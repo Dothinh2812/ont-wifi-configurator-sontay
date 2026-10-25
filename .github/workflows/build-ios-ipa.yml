@@ -1,0 +1,72 @@
+name: Build iOS Unsigned IPA
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "ios-app/**"
+      - ".github/workflows/build-ios-ipa.yml"
+  pull_request:
+    branches: [ main ]
+    paths:
+      - "ios-app/**"
+      - ".github/workflows/build-ios-ipa.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios-ipa:
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate Xcode project via XcodeGen
+        working-directory: ios-app
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen generate
+
+      - name: Run XCTest Unit Tests on iOS Simulator
+        working-directory: ios-app
+        run: |
+          SIM_UDID=$(xcrun simctl list devices available -j | python3 -c "import json, sys; data = json.load(sys.stdin); print(next(d['udid'] for r, devs in sorted(data.get('devices', {}).items(), reverse=True) if 'iOS' in r for d in devs if d.get('isAvailable') and 'iPhone' in d.get('name', '')))")
+          echo "Selected Simulator UDID: ${SIM_UDID}"
+          xcrun simctl boot "${SIM_UDID}" || true
+          xcrun simctl bootstatus "${SIM_UDID}" -b
+          xcodebuild test \
+            -project ONTWiFiConfigurator.xcodeproj \
+            -scheme ONTWiFiConfigurator \
+            -derivedDataPath build/SimDerivedData \
+            -destination "platform=iOS Simulator,id=${SIM_UDID}" \
+            CODE_SIGNING_ALLOWED=NO
+          SIM_APP_PATH="build/SimDerivedData/Build/Products/Debug-iphonesimulator/ONTWiFiConfigurator.app"
+          if [[ -d "${SIM_APP_PATH}" ]]; then
+            xcrun simctl terminate "${SIM_UDID}" vn.vnpt.ontconfig.ios || true
+            xcrun simctl install "${SIM_UDID}" "${SIM_APP_PATH}"
+            xcrun simctl launch "${SIM_UDID}" vn.vnpt.ontconfig.ios --auto-load-demo
+            sleep 5
+            xcrun simctl io "${SIM_UDID}" screenshot ios-simulator-screenshot.png
+          fi
+
+      - name: Package Unsigned Sideloadable .ipa and SHA256SUMS.txt
+        working-directory: ios-app
+        run: |
+          chmod +x scripts/package_unsigned_ipa.sh
+          ./scripts/package_unsigned_ipa.sh
+
+      - name: Upload ONT_WiFi_Configurator_Unsigned.ipa Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ONT_WiFi_Configurator_Unsigned_IPA
+          path: |
+            ios-app/ONT_WiFi_Configurator_Unsigned.ipa
+            ios-app/SHA256SUMS.txt
+            ios-app/ios-simulator-screenshot.png
+          if-no-files-found: error
+          retention-days: 30

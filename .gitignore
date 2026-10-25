@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# PyInstaller / Build
+build/
+dist/
+*.spec.bak
+
+# Testing & Cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# App runtime & checkpoints
+.checkpoint_results.json
+crash_dump.log
+*.log
+
+# Windows / OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Temporary outputs
+*.tmp
+*.bak
+
+# Local firmware / APK / JSONL dumps & build directories
+*.apk
+*.signed
+tclinux.bin*
+*.jsonl
+ONT_Configurator_Source.zip
+firmware_unpack/out/
+android-app/.gradle/
+android-app/build/
+android-app/app/build/
+ios-app/build/

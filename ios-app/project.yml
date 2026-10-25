@@ -1,0 +1,62 @@
+name: ONTWiFiConfigurator
+options:
+  bundleIdPrefix: vn.vnpt.ontconfig
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.0"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+
+targets:
+  ONTWiFiConfigurator:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: ONTWiFiConfigurator
+        excludes:
+          - "**/*.xlsx"
+          - "Info.plist"
+      - path: ONTWiFiConfigurator/Resources/sample-demo.xlsx
+        buildPhase: resources
+    info:
+      path: ONTWiFiConfigurator/Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: vn.vnpt.ontconfig.ios
+        PRODUCT_NAME: ONTWiFiConfigurator
+        INFOPLIST_FILE: ONTWiFiConfigurator/Info.plist
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_TESTABILITY: YES
+    dependencies:
+      - sdk: libz.tbd
+      - sdk: libsqlite3.tbd
+      - sdk: AudioToolbox.framework
+      - sdk: Network.framework
+    scheme:
+      testTargets:
+        - ONTWiFiConfiguratorTests
+
+  ONTWiFiConfiguratorTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: ONTWiFiConfiguratorTests
+        excludes:
+          - "**/*.xlsx"
+      - path: ONTWiFiConfiguratorTests/Resources/file-mau.xlsx
+        buildPhase: resources
+    dependencies:
+      - target: ONTWiFiConfigurator
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: vn.vnpt.ontconfig.ios.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ONTWiFiConfigurator.app/ONTWiFiConfigurator"
+        BUNDLE_LOADER: "$(TEST_HOST)"

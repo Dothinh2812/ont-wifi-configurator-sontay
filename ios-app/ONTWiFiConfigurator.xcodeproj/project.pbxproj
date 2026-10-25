@@ -1,0 +1,330 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000010000000000000001 /* ONTWiFiConfiguratorApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000010000000000000001 /* ONTWiFiConfiguratorApp.swift */; };
+		A10000020000000000000001 /* SubscriberRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000020000000000000001 /* SubscriberRecord.swift */; };
+		A10000030000000000000001 /* GlobalSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000030000000000000001 /* GlobalSettings.swift */; };
+		A10000040000000000000001 /* ZipArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000040000000000000001 /* ZipArchive.swift */; };
+		A10000050000000000000001 /* ExcelManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000050000000000000001 /* ExcelManager.swift */; };
+		A10000060000000000000001 /* AppDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000060000000000000001 /* AppDatabase.swift */; };
+		A10000070000000000000001 /* OntInputValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000070000000000000001 /* OntInputValidator.swift */; };
+		A10000080000000000000001 /* OntExceptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000080000000000000001 /* OntExceptions.swift */; };
+		A10000090000000000000001 /* AsyncMutex.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000090000000000000001 /* AsyncMutex.swift */; };
+		A100000A0000000000000001 /* UnsafeSslSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000A0000000000000001 /* UnsafeSslSession.swift */; };
+		A100000B0000000000000001 /* OntMobileDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000B0000000000000001 /* OntMobileDriver.swift */; };
+		A100000C0000000000000001 /* IosWifiMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000C0000000000000001 /* IosWifiMonitor.swift */; };
+		A100000D0000000000000001 /* MainViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000D0000000000000001 /* MainViewModel.swift */; };
+		A100000E0000000000000001 /* SubscriberListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000E0000000000000001 /* SubscriberListView.swift */; };
+		A100000F0000000000000001 /* ConfigReviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B100000F0000000000000001 /* ConfigReviewView.swift */; };
+		A10000100000000000000001 /* WifiGuideSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000100000000000000001 /* WifiGuideSheet.swift */; };
+		A10000110000000000000001 /* ExecutionProgressSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000110000000000000001 /* ExecutionProgressSheet.swift */; };
+		A10000120000000000000001 /* FooterSignatureBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000120000000000000001 /* FooterSignatureBar.swift */; };
+		A10000130000000000000001 /* sample-demo.xlsx in Resources */ = {isa = PBXBuildFile; fileRef = B10000130000000000000001 /* sample-demo.xlsx */; };
+		A10000140000000000000001 /* ExcelAndValidatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000140000000000000001 /* ExcelAndValidatorTests.swift */; };
+		A10000150000000000000001 /* OntMobileDriverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000150000000000000001 /* OntMobileDriverTests.swift */; };
+		A10000160000000000000001 /* file-mau.xlsx in Resources */ = {isa = PBXBuildFile; fileRef = B10000160000000000000001 /* file-mau.xlsx */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		B10000010000000000000001 /* ONTWiFiConfiguratorApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/ONTWiFiConfiguratorApp.swift; sourceTree = "<group>"; };
+		B10000020000000000000001 /* SubscriberRecord.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/Data/Model/SubscriberRecord.swift; sourceTree = "<group>"; };
+		B10000030000000000000001 /* GlobalSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/Data/Model/GlobalSettings.swift; sourceTree = "<group>"; };
+		B10000040000000000000001 /* ZipArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/Data/Excel/ZipArchive.swift; sourceTree = "<group>"; };
+		B10000050000000000000001 /* ExcelManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/Data/Excel/ExcelManager.swift; sourceTree = "<group>"; };
+		B10000060000000000000001 /* AppDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/Data/Local/AppDatabase.swift; sourceTree = "<group>"; };
+		B10000070000000000000001 /* OntInputValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/Core/Validation/OntInputValidator.swift; sourceTree = "<group>"; };
+		B10000080000000000000001 /* OntExceptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/Core/Driver/OntExceptions.swift; sourceTree = "<group>"; };
+		B10000090000000000000001 /* AsyncMutex.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/Core/Driver/AsyncMutex.swift; sourceTree = "<group>"; };
+		B100000A0000000000000001 /* UnsafeSslSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/Core/Driver/UnsafeSslSession.swift; sourceTree = "<group>"; };
+		B100000B0000000000000001 /* OntMobileDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/Core/Driver/OntMobileDriver.swift; sourceTree = "<group>"; };
+		B100000C0000000000000001 /* IosWifiMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/Core/Wifi/IosWifiMonitor.swift; sourceTree = "<group>"; };
+		B100000D0000000000000001 /* MainViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/UI/MainViewModel.swift; sourceTree = "<group>"; };
+		B100000E0000000000000001 /* SubscriberListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/UI/Screens/SubscriberListView.swift; sourceTree = "<group>"; };
+		B100000F0000000000000001 /* ConfigReviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/UI/Screens/ConfigReviewView.swift; sourceTree = "<group>"; };
+		B10000100000000000000001 /* WifiGuideSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/UI/Components/WifiGuideSheet.swift; sourceTree = "<group>"; };
+		B10000110000000000000001 /* ExecutionProgressSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/UI/Components/ExecutionProgressSheet.swift; sourceTree = "<group>"; };
+		B10000120000000000000001 /* FooterSignatureBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfigurator/UI/Components/FooterSignatureBar.swift; sourceTree = "<group>"; };
+		B10000130000000000000001 /* sample-demo.xlsx */ = {isa = PBXFileReference; lastKnownFileType = file; path = ONTWiFiConfigurator/Resources/sample-demo.xlsx; sourceTree = "<group>"; };
+		B10000140000000000000001 /* ExcelAndValidatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfiguratorTests/ExcelAndValidatorTests.swift; sourceTree = "<group>"; };
+		B10000150000000000000001 /* OntMobileDriverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ONTWiFiConfiguratorTests/OntMobileDriverTests.swift; sourceTree = "<group>"; };
+		B10000160000000000000001 /* file-mau.xlsx */ = {isa = PBXFileReference; lastKnownFileType = file; path = ONTWiFiConfiguratorTests/Resources/file-mau.xlsx; sourceTree = "<group>"; };
+		B10000170000000000000001 /* ONTWiFiConfigurator.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ONTWiFiConfigurator.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B10000180000000000000001 /* ONTWiFiConfiguratorTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ONTWiFiConfiguratorTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		C10000010000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				B10000010000000000000001 /* ONTWiFiConfiguratorApp.swift */,
+				B10000020000000000000001 /* SubscriberRecord.swift */,
+				B10000030000000000000001 /* GlobalSettings.swift */,
+				B10000040000000000000001 /* ZipArchive.swift */,
+				B10000050000000000000001 /* ExcelManager.swift */,
+				B10000060000000000000001 /* AppDatabase.swift */,
+				B10000070000000000000001 /* OntInputValidator.swift */,
+				B10000080000000000000001 /* OntExceptions.swift */,
+				B10000090000000000000001 /* AsyncMutex.swift */,
+				B100000A0000000000000001 /* UnsafeSslSession.swift */,
+				B100000B0000000000000001 /* OntMobileDriver.swift */,
+				B100000C0000000000000001 /* IosWifiMonitor.swift */,
+				B100000D0000000000000001 /* MainViewModel.swift */,
+				B100000E0000000000000001 /* SubscriberListView.swift */,
+				B100000F0000000000000001 /* ConfigReviewView.swift */,
+				B10000100000000000000001 /* WifiGuideSheet.swift */,
+				B10000110000000000000001 /* ExecutionProgressSheet.swift */,
+				B10000120000000000000001 /* FooterSignatureBar.swift */,
+				B10000130000000000000001 /* sample-demo.xlsx */,
+				B10000140000000000000001 /* ExcelAndValidatorTests.swift */,
+				B10000150000000000000001 /* OntMobileDriverTests.swift */,
+				B10000160000000000000001 /* file-mau.xlsx */,
+				B10000170000000000000001 /* ONTWiFiConfigurator.app */,
+				B10000180000000000000001 /* ONTWiFiConfiguratorTests.xctest */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		D10000010000000000000001 /* ONTWiFiConfigurator */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E10000010000000000000001 /* Build configuration list for PBXNativeTarget "ONTWiFiConfigurator" */;
+			buildPhases = (
+				F10000010000000000000001 /* Sources */,
+				F10000020000000000000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ONTWiFiConfigurator;
+			productName = ONTWiFiConfigurator;
+			productReference = B10000170000000000000001 /* ONTWiFiConfigurator.app */;
+			productType = "com.apple.product-type.application";
+		};
+		D10000020000000000000001 /* ONTWiFiConfiguratorTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E10000020000000000000001 /* Build configuration list for PBXNativeTarget "ONTWiFiConfiguratorTests" */;
+			buildPhases = (
+				F10000030000000000000001 /* Sources */,
+				F10000040000000000000001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				H10000010000000000000001 /* PBXTargetDependency */,
+			);
+			name = ONTWiFiConfiguratorTests;
+			productName = ONTWiFiConfiguratorTests;
+			productReference = B10000180000000000000001 /* ONTWiFiConfiguratorTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXContainerItemProxy section */
+		H10000020000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = P10000010000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = D10000010000000000000001;
+			remoteInfo = ONTWiFiConfigurator;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXTargetDependency section */
+		H10000010000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = D10000010000000000000001 /* ONTWiFiConfigurator */;
+			targetProxy = H10000020000000000000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXProject section */
+		P10000010000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+			};
+			buildConfigurationList = E10000030000000000000001 /* Build configuration list for PBXProject "ONTWiFiConfigurator" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = vi;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				vi,
+				en,
+				Base,
+			);
+			mainGroup = C10000010000000000000001;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				D10000010000000000000001 /* ONTWiFiConfigurator */,
+				D10000020000000000000001 /* ONTWiFiConfiguratorTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		F10000020000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000130000000000000001 /* sample-demo.xlsx in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F10000040000000000000001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000160000000000000001 /* file-mau.xlsx in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		F10000010000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000010000000000000001 /* ONTWiFiConfiguratorApp.swift in Sources */,
+				A10000020000000000000001 /* SubscriberRecord.swift in Sources */,
+				A10000030000000000000001 /* GlobalSettings.swift in Sources */,
+				A10000040000000000000001 /* ZipArchive.swift in Sources */,
+				A10000050000000000000001 /* ExcelManager.swift in Sources */,
+				A10000060000000000000001 /* AppDatabase.swift in Sources */,
+				A10000070000000000000001 /* OntInputValidator.swift in Sources */,
+				A10000080000000000000001 /* OntExceptions.swift in Sources */,
+				A10000090000000000000001 /* AsyncMutex.swift in Sources */,
+				A100000A0000000000000001 /* UnsafeSslSession.swift in Sources */,
+				A100000B0000000000000001 /* OntMobileDriver.swift in Sources */,
+				A100000C0000000000000001 /* IosWifiMonitor.swift in Sources */,
+				A100000D0000000000000001 /* MainViewModel.swift in Sources */,
+				A100000E0000000000000001 /* SubscriberListView.swift in Sources */,
+				A100000F0000000000000001 /* ConfigReviewView.swift in Sources */,
+				A10000100000000000000001 /* WifiGuideSheet.swift in Sources */,
+				A10000110000000000000001 /* ExecutionProgressSheet.swift in Sources */,
+				A10000120000000000000001 /* FooterSignatureBar.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		F10000030000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000140000000000000001 /* ExcelAndValidatorTests.swift in Sources */,
+				A10000150000000000000001 /* OntMobileDriverTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		G10000010000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_TESTABILITY = YES;
+				INFOPLIST_FILE = ONTWiFiConfigurator/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				OTHER_LDFLAGS = (
+					"-lz",
+					"-lsqlite3",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = vn.vnpt.ontconfig.ios;
+				PRODUCT_NAME = ONTWiFiConfigurator;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		G10000020000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				INFOPLIST_FILE = ONTWiFiConfigurator/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				OTHER_LDFLAGS = (
+					"-lz",
+					"-lsqlite3",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = vn.vnpt.ontconfig.ios;
+				PRODUCT_NAME = ONTWiFiConfigurator;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		G10000030000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				PRODUCT_BUNDLE_IDENTIFIER = vn.vnpt.ontconfig.ios.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ONTWiFiConfigurator.app/ONTWiFiConfigurator";
+			};
+			name = Debug;
+		};
+		G10000040000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				PRODUCT_BUNDLE_IDENTIFIER = vn.vnpt.ontconfig.ios.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ONTWiFiConfigurator.app/ONTWiFiConfigurator";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		E10000010000000000000001 /* Build configuration list for PBXNativeTarget "ONTWiFiConfigurator" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				G10000010000000000000001 /* Debug */,
+				G10000020000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E10000020000000000000001 /* Build configuration list for PBXNativeTarget "ONTWiFiConfiguratorTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				G10000030000000000000001 /* Debug */,
+				G10000040000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		E10000030000000000000001 /* Build configuration list for PBXProject "ONTWiFiConfigurator" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				G10000010000000000000001 /* Debug */,
+				G10000020000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = P10000010000000000000001 /* Project object */;
+}
