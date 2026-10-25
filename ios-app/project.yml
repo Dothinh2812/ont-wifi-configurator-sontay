@@ -25,8 +25,6 @@ targets:
           - "Info.plist"
       - path: ONTWiFiConfigurator/Resources/sample-demo.xlsx
         buildPhase: resources
-    info:
-      path: ONTWiFiConfigurator/Info.plist
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: vn.vnpt.ontconfig.ios
