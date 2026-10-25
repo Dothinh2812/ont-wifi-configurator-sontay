@@ -449,5 +449,80 @@ class TestMainWindowHeadless(unittest.TestCase):
             # Must automatically trigger run_current_device() for ONT #2 without pressing Retry!
             mock_run_next.assert_called_once()
             self.assertFalse(self.win._awaiting_next_ont)
+
+    def test_inline_editing_slid_and_wifi_reactively_validates(self):
+        # Row 1 is valid initially
+        row1 = self.win.table_model.get_record(1)
+        self.assertTrue(row1.is_valid)
+        self.assertEqual(row1.status, DeviceStatus.PENDING)
+
+        # Edit SLID (col 2) to > 10 chars -> should become INVALID_DATA
+        idx_slid = self.win.table_model.index(1, 2)
+        self.win.table_model.setData(idx_slid, "0123456789ABC", Qt.ItemDataRole.EditRole)
+        self.assertFalse(row1.is_valid)
+        self.assertEqual(row1.status, DeviceStatus.INVALID_DATA)
+
+        # Fix SLID back to valid -> should restore PENDING
+        self.win.table_model.setData(idx_slid, "005501941", Qt.ItemDataRole.EditRole)
+        self.assertTrue(row1.is_valid)
+        self.assertEqual(row1.status, DeviceStatus.PENDING)
+
+        # Edit SSID 2.4G (col 5) with unsafe shell metachar -> should become INVALID_DATA
+        idx_ssid = self.win.table_model.index(1, 5)
+        self.win.table_model.setData(idx_ssid, "Bad;SSID", Qt.ItemDataRole.EditRole)
+        self.assertFalse(row1.is_valid)
+        self.assertEqual(row1.status, DeviceStatus.INVALID_DATA)
+
+    @patch("PyQt6.QtWidgets.QMessageBox.warning")
+    @patch("app.ui.main_window.ONTExecutionWorker")
+    def test_lan_settings_applied_and_validated_on_run(self, mock_worker_cls, mock_warn):
+        mock_worker = MagicMock()
+        mock_worker_cls.return_value = mock_worker
+
+        # Invalid LAN IP should show warning and abort before creating worker
+        self.win.txt_lan_ip.setText("999.999.1.1")
+        self.win.run_current_device()
+        mock_warn.assert_called_once()
+        mock_worker_cls.assert_not_called()
+
+        # Valid custom LAN IP / mask / DHCP range should sync to global_cfg
+        mock_warn.reset_mock()
+        self.win.txt_lan_ip.setText("192.168.10.1")
+        self.win.txt_lan_mask.setText("255.255.255.0")
+        self.win.txt_dhcp_range.setText("192.168.10.10 - 192.168.10.200")
+        self.win.run_current_device()
+        mock_warn.assert_not_called()
+        self.assertEqual(self.win.global_cfg.lan_ip, "192.168.10.1")
+        self.assertEqual(self.win.global_cfg.lan_mask, "255.255.255.0")
+        self.assertEqual(self.win.global_cfg.dhcp_start, "192.168.10.10")
+        self.assertEqual(self.win.global_cfg.dhcp_end, "192.168.10.200")
+
+    def test_shortcut_ignored_when_input_or_table_editor_focused(self):
+        from PyQt6.QtGui import QKeyEvent
+        from PyQt6.QtCore import QEvent
+        from PyQt6.QtWidgets import QAbstractItemView
+
+        self.win.probe._is_online = True
+        self.win._update_run_button_state()
+        self.assertTrue(self.win.btn_run.isEnabled())
+
+        space_event = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Space, Qt.KeyboardModifier.NoModifier, " ")
+        with patch.object(self.win, "run_current_device") as mock_run:
+            # When focusWidget is a QLineEdit, Space must NOT trigger run_current_device
+            with patch.object(self.win, "focusWidget", return_value=self.win.txt_wifi5_ssid):
+                self.win.keyPressEvent(space_event)
+                mock_run.assert_not_called()
+
+            # When table_view is in EditingState, Space must NOT trigger run_current_device
+            with patch.object(self.win, "focusWidget", return_value=self.win.table_view), \
+                 patch.object(self.win.table_view, "state", return_value=QAbstractItemView.State.EditingState):
+                self.win.keyPressEvent(space_event)
+                mock_run.assert_not_called()
+
+            # When table_view is in NoState and focused, Space triggers run_current_device
+            with patch.object(self.win, "focusWidget", return_value=self.win.table_view), \
+                 patch.object(self.win.table_view, "state", return_value=QAbstractItemView.State.NoState):
+                self.win.keyPressEvent(space_event)
+                mock_run.assert_called_once()
 if __name__ == "__main__":
     unittest.main()

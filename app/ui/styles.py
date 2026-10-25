@@ -60,8 +60,12 @@ QPushButton#btnRun:hover {
     background-color: #059669;
 }
 
-QPushButton#btnRun:disabled {
+QPushButton#btnRun:disabled,
+QPushButton#btnSkip:disabled,
+QPushButton#btnRetry:disabled,
+QPushButton#btnCancel:disabled {
     background-color: #9CA3AF;
+    color: #E5E7EB;
 }
 
 QPushButton#btnSkip {
@@ -106,7 +110,8 @@ QHeaderView::section {
     color: #374151;
     font-weight: bold;
     border: 1px solid #E5E7EB;
-    padding: 6px;
+    padding: 5px 4px;
+    font-size: 12px;
 }
 
 /* Inputs */

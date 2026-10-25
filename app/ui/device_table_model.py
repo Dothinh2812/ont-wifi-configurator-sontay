@@ -1,5 +1,6 @@
 """High-performance Qt Table Model for ONT device records with inline editing and reactive re-validation."""
 
+import re
 from typing import List, Optional, Any, Tuple, Dict
 from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex
 from PyQt6.QtGui import QColor, QBrush
@@ -21,6 +22,45 @@ COLUMNS = [
     ("Trạng thái", "status"),
     ("Ghi chú / Chi tiết", "error_message"),
 ]
+
+
+def validate_device_record(rec: DeviceRecord) -> List[str]:
+    """Validate all fields of a DeviceRecord and return a list of validation error messages."""
+    errors: List[str] = []
+
+    if not rec.pass_pppoe:
+        errors.append("Thiếu mật khẩu PPPoE - Yêu cầu nhập tay (không dùng mật khẩu giả lập)")
+
+    if not rec.so_may:
+        errors.append("Thiếu Số máy định danh")
+    if not rec.account_pppoe:
+        errors.append("Thiếu Account PPPoE")
+
+    if rec.slid:
+        if len(rec.slid) > 10:
+            errors.append(f"SLID '{rec.slid}' vượt quá 10 ký tự ({len(rec.slid)} ký tự)")
+        elif not re.match(r"^[a-zA-Z0-9_\-\.]+$", rec.slid):
+            errors.append(f"SLID '{rec.slid}' chứa ký tự không hợp lệ cho GPON")
+    else:
+        errors.append("Thiếu thông tin SLID / Mã MEN")
+
+    fields_to_check = [
+        ("Số máy", rec.so_may),
+        ("SLID", rec.slid),
+        ("Account PPPoE", rec.account_pppoe),
+        ("Pass PPPoE", rec.pass_pppoe),
+        ("SSID 2.4G", rec.ssid_24g),
+        ("Pass 2.4G", rec.pass_24g),
+        ("SSID 5G", rec.ssid_5g),
+        ("Pass 5G", rec.pass_5g),
+    ]
+    for field_name, f_val in fields_to_check:
+        for ch in (f_val or ""):
+            if ch in UNSAFE_SHELL_METACHARS:
+                errors.append(f"{field_name} chứa ký tự shell không an toàn: '{ch}'")
+                break
+
+    return errors
 
 # Lazy-loaded status brush cache (prevents early C++ QBrush allocation before QApplication
 # and avoids exit crashes 0xC0000005 on Windows)
@@ -169,26 +209,15 @@ class DeviceTableModel(QAbstractTableModel):
         val_str = str(value or "").strip()
         setattr(rec, attr_name, val_str)
 
-        # Reactive re-validation when PPPoE password or essential fields are edited
-        if col == 4:  # Mật khẩu PPPoE
-            # Re-check validation
-            rec.validation_errors = [e for e in rec.validation_errors if "PPPoE" not in e]
-            if not val_str:
-                rec.validation_errors.append("Thiếu mật khẩu PPPoE - Yêu cầu nhập tay")
-            else:
-                for ch in val_str:
-                    if ch in UNSAFE_SHELL_METACHARS:
-                        rec.validation_errors.append(f"Mật khẩu PPPoE chứa ký tự không an toàn: '{ch}'")
-                        break
-
-            # Re-evaluate validity
+        # Reactive re-validation when any editable field is modified
+        if col in {2, 4, 5, 6, 7, 8}:
+            rec.validation_errors = validate_device_record(rec)
             rec.is_valid = len(rec.validation_errors) == 0
             if rec.is_valid and rec.status == DeviceStatus.INVALID_DATA:
                 rec.status = DeviceStatus.PENDING
                 rec.error_message = None
             elif not rec.is_valid:
                 rec.status = DeviceStatus.INVALID_DATA
-
         left_idx = self.index(row, 0)
         right_idx = self.index(row, self.columnCount() - 1)
         self.dataChanged.emit(left_idx, right_idx)

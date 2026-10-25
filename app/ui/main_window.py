@@ -2,13 +2,14 @@
 
 import os
 import datetime
+import ipaddress
 from typing import Optional, List
 from PyQt6.QtCore import Qt, QTimer, QModelIndex
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QTableView, QPushButton, QLabel, QLineEdit, QCheckBox,
     QProgressBar, QPlainTextEdit, QGroupBox, QFileDialog,
-    QMessageBox, QHeaderView, QFormLayout, QSpinBox
+    QMessageBox, QHeaderView, QFormLayout, QSpinBox, QAbstractItemView
 )
 
 from app.core.config_models import GlobalConfig, get_app_path
@@ -28,7 +29,7 @@ class MainWindow(QMainWindow):
     def __init__(self, initial_excel_path: Optional[str] = None):
         super().__init__()
         self.setWindowTitle("VNPT ONT 040-NSv2 Configurator - Tự Động Đổ Cấu Hình Từ Excel")
-        self.resize(1200, 780)
+        self.resize(1340, 780)
         self.setStyleSheet(MAIN_STYLE)
 
         self.excel_manager = ExcelManager()
@@ -122,8 +123,10 @@ class MainWindow(QMainWindow):
         self.table_view.setModel(self.table_model)
         self.table_view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
         self.table_view.setSelectionMode(QTableView.SelectionMode.SingleSelection)
+        self.table_view.verticalHeader().setVisible(False)
         self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table_view.horizontalHeader().setStretchLastSection(True)
+        self._configure_table_columns()
         self.table_view.selectionModel().selectionChanged.connect(self._on_table_selection_changed)
         self.table_model.dataChanged.connect(self._on_table_data_changed)
         table_layout.addWidget(self.table_view)
@@ -132,6 +135,8 @@ class MainWindow(QMainWindow):
 
         # Right: Settings Panel
         settings_container = QWidget()
+        settings_container.setMinimumWidth(340)
+        settings_container.setMaximumWidth(355)
         settings_layout = QVBoxLayout(settings_container)
         settings_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -140,7 +145,7 @@ class MainWindow(QMainWindow):
 
         self.txt_admin_pass = QLineEdit(self.global_cfg.admin_new_pass)
         self.txt_admin_pass.textChanged.connect(self._on_admin_pass_changed)
-        self.lbl_pass_complexity = QLabel("✓ Đạt độ phức tạp")
+        self.lbl_pass_complexity = QLabel("✓ Đạt chuẩn mật khẩu mạnh")
         self.lbl_pass_complexity.setStyleSheet("color: #10B981; font-size: 11px;")
         pass_vbox = QVBoxLayout()
         pass_vbox.addWidget(self.txt_admin_pass)
@@ -187,11 +192,12 @@ class MainWindow(QMainWindow):
         content_splitter.addWidget(settings_container)
         content_splitter.setStretchFactor(0, 3)
         content_splitter.setStretchFactor(1, 1)
+        content_splitter.setSizes([955, 345])
 
         main_layout.addWidget(content_splitter, stretch=2)
 
         # 3. Bottom Operation & Monitor Panel
-        op_group = QGroupBox("Điều Khiển & Giám Sát Cấu Hình 1-by-1")
+        op_group = QGroupBox("Điều Khiển && Giám Sát Cấu Hình 1-by-1")
         op_layout = QVBoxLayout(op_group)
 
         # Action Buttons Row
@@ -262,6 +268,23 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(footer_layout)
 
+    def _configure_table_columns(self) -> None:
+        """Set balanced default widths so all 11 columns including Status & Notes are visible at 1200x780."""
+        col_widths = {
+            0: 36,   # STT
+            1: 82,   # Số máy
+            2: 82,   # SLID
+            3: 98,   # Account PPPoE
+            4: 104,  # Mật khẩu PPPoE
+            5: 80,   # SSID 2.4G
+            6: 90,   # Mật khẩu 2.4G
+            7: 82,   # SSID 5G
+            8: 90,   # Mật khẩu 5G
+            9: 102,  # Trạng thái
+        }
+        for col_idx, width in col_widths.items():
+            self.table_view.setColumnWidth(col_idx, width)
+
     def _on_signature_clicked(self, event=None) -> None:
         """Handle click on footer signature to copy support phone number to clipboard."""
         if event is not None and event.button() != Qt.MouseButton.LeftButton:
@@ -278,8 +301,15 @@ class MainWindow(QMainWindow):
             event.accept()
 
     def keyPressEvent(self, event) -> None:
-        """Handle keyboard shortcuts (Space / Enter to trigger RUN)."""
+        """Handle keyboard shortcuts (Space / Enter to trigger RUN) when not editing inputs."""
         if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            focused = self.focusWidget()
+            if isinstance(focused, (QLineEdit, QSpinBox, QPlainTextEdit)):
+                super().keyPressEvent(event)
+                return
+            if self.table_view.state() == QAbstractItemView.State.EditingState:
+                super().keyPressEvent(event)
+                return
             if self.btn_run.isEnabled():
                 self.run_current_device()
                 event.accept()
@@ -296,6 +326,7 @@ class MainWindow(QMainWindow):
             )
             self.current_excel_path = file_path
             self.table_model.set_records(self.records)
+            self._configure_table_columns()
 
             # Auto-restore previous checkpoint if exists
             checkpoint_file = get_app_path(".checkpoint_results.json")
@@ -492,7 +523,31 @@ class MainWindow(QMainWindow):
 
         self._awaiting_next_ont = False
 
+        # Validate and apply LAN settings from UI
+        lan_ip = self.txt_lan_ip.text().strip()
+        lan_mask = self.txt_lan_mask.text().strip()
+        dhcp_range_raw = self.txt_dhcp_range.text().strip()
+        dhcp_parts = [p.strip() for p in dhcp_range_raw.split("-") if p.strip()]
+        try:
+            ipaddress.IPv4Address(lan_ip)
+            ipaddress.IPv4Address(lan_mask)
+            if len(dhcp_parts) != 2:
+                raise ValueError("Dải cấp DHCP phải có định dạng 'IP_đầu - IP_cuối'")
+            ipaddress.IPv4Address(dhcp_parts[0])
+            ipaddress.IPv4Address(dhcp_parts[1])
+        except ValueError as e:
+            QMessageBox.warning(
+                self,
+                "Cấu Hình LAN Không Hợp Lệ",
+                f"Thông số IP LAN / Subnet Mask / DHCP không hợp lệ:\n{e}",
+            )
+            return
+
         # Prepare global config from UI
+        self.global_cfg.lan_ip = lan_ip
+        self.global_cfg.lan_mask = lan_mask
+        self.global_cfg.dhcp_start = dhcp_parts[0]
+        self.global_cfg.dhcp_end = dhcp_parts[1]
         self.global_cfg.admin_new_pass = self.txt_admin_pass.text()
         self.global_cfg.default_wifi5_ssid = self.txt_wifi5_ssid.text()
         self.global_cfg.default_wifi5_pass = self.txt_wifi5_pass.text()
