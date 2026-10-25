@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Wi-Fi signal arcs above ONT router -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,24c-11.5,0 -21.8,4.6 -29.3,12.1l4.2,4.2c6.4,-6.4 15.3,-10.3 25.1,-10.3s18.7,3.9 25.1,10.3l4.2,-4.2C75.8,28.6 65.5,24 54,24z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,35c-8.3,0 -15.8,3.4 -21.2,8.8l4.2,4.2c4.3,-4.3 10.3,-7 17,-7s12.7,2.7 17,7l4.2,-4.2C79.8,38.4 62.3,35 54,35z" />
+    <path
+        android:fillColor="#4FC3F7"
+        android:pathData="M54,46c-4,0 -7.5,1.6 -10.1,4.2l4.2,4.2c1.5,-1.5 3.6,-2.4 5.9,-2.4s4.4,0.9 5.9,2.4l4.2,-4.2C61.5,47.6 58,46 54,46z" />
+    <!-- Dual ONT antennas -->
+    <path
+        android:fillColor="#E1F5FE"
+        android:pathData="M33,44h4v18h-4zM71,44h4v18h-4z" />
+    <!-- ONT Router Body -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M26,60h56c3.3,0 6,2.7 6,6v10c0,3.3 -2.7,6 -6,6H26c-3.3,0 -6,-2.7 -6,-6V66c0,-3.3 2.7,-6 6,-6z" />
+    <!-- Status LEDs (PON, LOS, INTERNET, WIFI) -->
+    <path
+        android:fillColor="#00C853"
+        android:pathData="M34,71m-3,0a3,3 0,1 1,6 0a3,3 0,1 1,-6 0" />
+    <path
+        android:fillColor="#00C853"
+        android:pathData="M44,71m-3,0a3,3 0,1 1,6 0a3,3 0,1 1,-6 0" />
+    <path
+        android:fillColor="#005BAA"
+        android:pathData="M56,69h20v4H56z" />
+</vector>
