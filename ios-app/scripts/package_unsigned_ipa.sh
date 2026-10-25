@@ -15,6 +15,7 @@ cd "${IOS_APP_DIR}"
 if command -v xcodegen >/dev/null 2>&1 && [[ -f "project.yml" ]]; then
     echo "[1/5] Generating Xcode project via xcodegen..."
     xcodegen generate
+    sed -i.bak 's/objectVersion = 77;/objectVersion = 56;/g' ONTWiFiConfigurator.xcodeproj/project.pbxproj && rm -f ONTWiFiConfigurator.xcodeproj/project.pbxproj.bak
 fi
 
 echo "[2/5] Building Release ONTWiFiConfigurator.app (Unsigned / Ad-hoc)..."

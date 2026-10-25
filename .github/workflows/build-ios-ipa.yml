@@ -31,12 +31,14 @@ jobs:
             brew install xcodegen
           fi
           xcodegen generate
+          sed -i.bak 's/objectVersion = 77;/objectVersion = 56;/g' ONTWiFiConfigurator.xcodeproj/project.pbxproj && rm -f ONTWiFiConfigurator.xcodeproj/project.pbxproj.bak
 
       - name: Run XCTest Unit Tests on iOS Simulator
         working-directory: ios-app
         run: |
-          SIM_UDID=$(xcrun simctl list devices available -j | python3 -c "import json, sys; data = json.load(sys.stdin); print(next(d['udid'] for r, devs in sorted(data.get('devices', {}).items(), reverse=True) if 'iOS' in r for d in devs if d.get('isAvailable') and 'iPhone' in d.get('name', '')))")
-          echo "Selected Simulator UDID: ${SIM_UDID}"
+          SDK_MAJOR=$(xcrun --sdk iphonesimulator --show-sdk-version | cut -d. -f1)
+          SIM_UDID=$(xcrun simctl list devices available -j | python3 -c "import json, sys; data = json.load(sys.stdin); devs_by_rt = sorted(data.get('devices', {}).items(), reverse=True); preferred = [d['udid'] for r, devs in devs_by_rt if 'iOS-${SDK_MAJOR}' in r for d in devs if d.get('isAvailable') and 'iPhone' in d.get('name', '')]; fallback = [d['udid'] for r, devs in devs_by_rt if 'iOS' in r for d in devs if d.get('isAvailable') and 'iPhone' in d.get('name', '')]; print((preferred + fallback)[0])")
+          echo "Selected Simulator UDID (SDK iOS ${SDK_MAJOR}): ${SIM_UDID}"
           xcrun simctl boot "${SIM_UDID}" || true
           xcrun simctl bootstatus "${SIM_UDID}" -b
           xcodebuild test \
