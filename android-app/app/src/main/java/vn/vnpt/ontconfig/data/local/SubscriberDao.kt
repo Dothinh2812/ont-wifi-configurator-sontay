@@ -27,7 +27,8 @@ interface SubscriberDao {
         SELECT * FROM subscribers
         WHERE (:query = ''
             OR LOWER(accountPppoe) LIKE '%' || LOWER(:query) || '%'
-            OR LOWER(soMay) LIKE '%' || LOWER(:query) || '%'
+            OR LOWER(slid) LIKE '%' || LOWER(:query) || '%'
+            OR (LTRIM(:query, '0') != '' AND LTRIM(LOWER(slid), '0') LIKE '%' || LTRIM(LOWER(:query), '0') || '%')
             OR LOWER(tenTb) LIKE '%' || LOWER(:query) || '%'
             OR LOWER(diachiTb) LIKE '%' || LOWER(:query) || '%'
             OR LOWER(soDt) LIKE '%' || LOWER(:query) || '%'

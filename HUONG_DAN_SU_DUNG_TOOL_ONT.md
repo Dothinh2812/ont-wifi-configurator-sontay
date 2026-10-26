@@ -12,7 +12,7 @@
 3. **Đổi mật khẩu quản trị:** Đổi mật khẩu sang mật khẩu mới (mặc định `Passwd2@`, hỗ trợ tùy chỉnh trên giao diện) kèm kiểm tra độ phức tạp.
 4. **Đăng nhập lại:** Xác thực bằng mật khẩu mới để lấy `sessionKey` phiên làm việc chính thức.
 5. **Cài đặt WAN PPPoE Lũy Thừa (Idempotent):** Kiểm tra `wancfg.json`, nếu đã có VLAN 11 gọi `editwan.json`, nếu chưa có gọi `addwan.json` và `sendwan.cmd` (VLAN 11, MTU 1492, NAT=1, Firewall=1).
-6. **Cài đặt GPON Password (SLID):** Tự động nạp `Mã MEN` (hoặc `SO_MAY`), kiểm tra độ dài $\le 10$ ký tự ASCII và lọc ký tự đặc biệt nguy hiểm.
+6. **Cài đặt GPON Password (SLID):** Tự động hợp nhất và nạp `SLID` (lấy từ `Mã MEN` hoặc `SO_MAY` trong file Excel), kiểm tra độ dài $\le 10$ ký tự ASCII và lọc ký tự đặc biệt nguy hiểm.
 7. **Cấu hình Wi-Fi 2.4 GHz:** Nạp SSID và Mật khẩu từ Excel, bảo mật WPA2/WPA3 PSK AES, restart driver Wi-Fi và dừng nghỉ 2 giây cho driver Broadcom ổn định.
 8. **Cấu hình Wi-Fi 5 GHz (Kế thừa thông minh):** Tự động tạo tên Wi-Fi 5G bằng `{SSID_2.4G} 5G` (độ dài $\le 32$ ký tự) và mật khẩu lấy giống hệt Wi-Fi 2.4G (fallback `VNPT 5G` và `1234567890`).
 9. **Xác nhận LAN IPv4:** Cấu hình mạng LAN `192.168.1.1`, mask `255.255.255.0`, DHCP range `192.168.1.2` - `192.168.1.254` (mặc định khóa chỉnh sửa để bảo vệ gateway).
@@ -45,7 +45,7 @@
 
 ### Cấu Trúc File Mẫu:
 - File mẫu mặc định: `file-mau.xlsx` (gồm 89 dòng dữ liệu thuê bao).
-- Giữ nguyên định dạng chuỗi số máy (ví dụ `001560828`), không để mất các chữ số `0` ở đầu.
+- Giữ nguyên định dạng chuỗi `SLID` (`Mã MEN` / `SO_MAY`, ví dụ `001560828`), không để mất các chữ số `0` ở đầu.
 
 ### Xử Lý Dòng Thiếu Mật Khẩu PPPoE (13 Dòng Lỗi):
 - Trong dữ liệu thực tế, có 13 dòng thiếu thông tin `Mật khẩu PPPoE`.
@@ -89,7 +89,7 @@
 - Khi nạp xong:
   - Loa máy tính sẽ phát âm thanh báo chuông (Beep).
   - Hộp thoại thông báo xuất hiện:
-    > *"ĐÃ HOÀN TẤT CẤU HÌNH THIẾT BỊ [SO_MAY]! VUI LÒNG RÚT CÁP VÀ CẮM THIẾT BỊ TIẾP THEO."*
+    > *"ĐÃ HOÀN TẤT CẤU HÌNH THIẾT BỊ [SLID]! VUI LÒNG RÚT CÁP VÀ CẮM THIẾT BỊ TIẾP THEO."*
   - Kết quả được ghi nhận tức thì vào file checkpoint.
 - Kỹ thuật viên:
   1. Rút cáp mạng khỏi ONT vừa làm xong.
@@ -146,13 +146,13 @@ Dành cho kỹ thuật viên đi lắp đặt/đổi ONT cơ động tại nhà 
 1. **Nạp danh sách Excel & Chọn đúng `ma_tb`:**
    - Mở ứng dụng **Cấu Hình ONT VNPT Qua Wi-Fi** trên điện thoại Android.
    - Bấm **"Nạp Excel (.xlsx)"** để chọn file danh sách giao việc trên máy (hoặc bấm **"Nạp Mẫu Demo"** để trải nghiệm 3 bản ghi mẫu ẩn danh).
-   - Gõ vài ký tự của `ma_tb` (`Account`), `SO_MAY`, `TEN_TB`, hoặc `SO_DT` vào ô tìm kiếm và chạm vào thẻ thuê bao cần cấu hình.
+   - Gõ vài ký tự của `ma_tb` (`Account`), `SLID`, `TEN_TB`, hoặc `SO_DT` vào ô tìm kiếm và chạm vào thẻ thuê bao cần cấu hình.
 2. **Bắt Wi-Fi Mặc Định Của ONT (`GW040-NSv2_2.4G_XXXXXX`):**
    - Cắm nguồn cho ONT GW040-NSv2 và chờ đèn Wi-Fi sáng ổn định.
    - Bấm nút **"Bắt Wi-Fi ONT"** trên thanh trạng thái: ứng dụng sẽ tự động lọc đúng sóng mặc định `GW040-NSv2_2.4G_XXXXXX` (hoặc `5G_XXXXXX`) và khóa luồng dữ liệu nội bộ vào `192.168.1.1` mà **không cần tắt mạng 4G/5G** trên điện thoại.
 3. **Kiểm Tra / Chỉnh Sửa Tham Số Trước Khi RUN:**
    - Trên màn hình **Kiểm Tra & Sửa Cấu Hình Trước Khi RUN**, đối chiếu:
-     - `SLID / Mã MEN` ($\le 10$ ký tự ASCII).
+     - `SLID / Mã MEN` ($\le 10$ ký tự ASCII; đã hợp nhất tham số `Số máy` về `SLID` duy nhất và tự động đồng bộ tên Wi-Fi mặc định `VNPT_{SLID}`).
      - `Account PPPoE (ma_tb)` và `Mật khẩu PPPoE` (nếu file Excel bị khuyết mật khẩu PPPoE, ô này sẽ viền đỏ để KTV nhập bổ sung).
      - `Tên Wi-Fi 2.4G` & `Pass Wi-Fi 2.4G` (tự động đồng bộ sang `Wi-Fi 5G`; nếu mật khẩu trong Excel chỉ có 7 chữ số do mất số `0` đầu ngày sinh, bấm nút 1 chạm **"Thêm số 0 ở đầu"** để đủ 8 ký tự chuẩn WPA2).
 4. **Bấm `RUN - ĐỔ CẤU HÌNH ONT` (7 Bước Tự Động):**
@@ -185,12 +185,12 @@ Dành cho kỹ thuật viên sử dụng iPhone (iOS 16.0 trở lên):
 ### B. Quy Trình 4 Bước Cấu Hình ONT Trên iPhone:
 1. **Nạp File Excel Giao Việc (`.xlsx`):**
    - Mở ứng dụng **ONT WiFi Config**, bấm **"Nạp Excel (.xlsx)"** để chọn file từ ứng dụng **Tệp (Files)** hoặc file tải về từ **Zalo** (hoặc bấm **"Nạp Mẫu Demo"**).
-   - Tìm nhanh thuê bao theo `Account`, `SO_MAY`, `TEN_TB`, hoặc `SO_DT` (có hoặc không có số `0` đầu).
+   - Tìm nhanh thuê bao theo `Account`, `SLID`, `TEN_TB`, hoặc `SO_DT` (có hoặc không có số `0` đầu).
 2. **Kết Nối Sóng Wi-Fi Mặc Định Của ONT (`GW040-NSv2_2.4G_XXXXXX`):**
    - Quét mã QR Wi-Fi dưới đáy modem bằng Camera iPhone hoặc bấm **"Bắt Wi-Fi ONT" -> "Mở Cài Đặt Wi-Fi iOS"** để chọn sóng mặc định của ONT.
    - Quay lại ứng dụng: thanh trạng thái sẽ nhận diện IP `192.168.1.x` trên card Wi-Fi `en0` và báo **`ONLINE - Sẵn sàng đổ cấu hình (192.168.1.1)`** (không cần tắt 4G/5G; nếu đang bật VPN 1.1.1.1/WireGuard, ứng dụng sẽ nhắc tắt VPN).
 3. **Kiểm Tra Tham Số & Chọn Băng Tần Đang Bắt (`2.4GHz` / `5GHz`):**
-   - Kiểm tra `SLID / Mã MEN` ($\le 10$ ký tự), nhập bổ sung `Mật khẩu PPPoE` nếu file Excel bị khuyết, hoặc bấm nút 1 chạm **"Thêm số 0 ở đầu"** nếu mật khẩu Wi-Fi chỉ có 7 số.
+   - Kiểm tra `SLID / Mã MEN` ($\le 10$ ký tự, hợp nhất từ `Mã MEN` / `SO_MAY`), nhập bổ sung `Mật khẩu PPPoE` nếu file Excel bị khuyết, hoặc bấm nút 1 chạm **"Thêm số 0 ở đầu"** nếu mật khẩu Wi-Fi chỉ có 7 số.
    - Chọn đúng băng tần Wi-Fi ONT mà iPhone đang kết nối (**`Đang bắt 2.4GHz`** hoặc **`Đang bắt 5GHz`**) ngay phía trên nút **RUN**.
 4. **Bấm `RUN - ĐỔ CẤU HÌNH ONT (7 BƯỚC)` & Chia Sẻ Báo Cáo Qua Zalo:**
    - Ứng dụng giữ sáng màn hình, xin quyền chạy nền ngắn hạn (`beginBackgroundTask`), cấu hình băng tần phụ ở Bước 6 và **đổi tên/mật khẩu băng tần đang kết nối ở Bước 7 cuối cùng**.

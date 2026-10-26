@@ -12,12 +12,12 @@ from app.core.ont_driver import (
     ONTUserExistError,
     ONTAuthenticationError,
     ONTValidationError,
+    UNSAFE_SHELL_METACHARS,
     validate_password_complexity,
     validate_slid,
     sanitize_input_metacharacters,
     ont_encode_query,
 )
-
 
 class TestONTDriverHelpers(unittest.TestCase):
     def test_ont_encode_query_replaces_ampersand(self):
@@ -26,13 +26,17 @@ class TestONTDriverHelpers(unittest.TestCase):
         self.assertEqual(encoded, "user=admin\x7fpass=Pass\x7f123\x7fother=val")
 
     def test_sanitize_input_metacharacters_rejects_unsafe(self):
+        self.assertEqual(len(UNSAFE_SHELL_METACHARS), 11)
+        self.assertIn("\\", UNSAFE_SHELL_METACHARS)
         unsafe_samples = [
+            "pass&cmd",
             "pass;rm",
             "pass|cat",
             "pass$var",
             "pass>out",
             "pass<in",
             "pass`id`",
+            "pass\\backslash",
             "pass!bang",
             "pass'quote",
             'pass"quote',
@@ -40,7 +44,6 @@ class TestONTDriverHelpers(unittest.TestCase):
         for s in unsafe_samples:
             with self.assertRaises(ONTValidationError):
                 sanitize_input_metacharacters(s)
-
     def test_sanitize_input_metacharacters_accepts_safe(self):
         safe_samples = ["Passwd2@", "kimthitv878", "001560828", "WiFi_2.4G-Home"]
         for s in safe_samples:
@@ -297,7 +300,6 @@ class TestONTDriverCore(unittest.TestCase):
         mock_wan.side_effect = RuntimeError("WAN setup failure")
 
         device = DeviceConfig(
-            so_may="001560828",
             slid="001560828",
             account_pppoe="kimthitv878",
             pass_pppoe="secretpass",
@@ -306,6 +308,7 @@ class TestONTDriverCore(unittest.TestCase):
             ssid_5g="Kim Thu 5G",
             pass_5g="tholau224",
         )
+        self.assertEqual(device.so_may, "001560828")
         global_cfg = GlobalConfig()
 
         with self.assertRaises(RuntimeError):

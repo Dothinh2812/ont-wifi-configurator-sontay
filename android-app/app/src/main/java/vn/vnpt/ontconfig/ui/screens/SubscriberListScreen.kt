@@ -222,14 +222,14 @@ fun SubscriberListScreen(
                 onValueChange = onSearchQueryChange,
                 label = {
                     Text(
-                        text = "Tìm ma_tb, Số máy, Tên TB, SĐT...",
+                        text = "Tìm ma_tb, SLID, Tên TB, SĐT...",
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 },
                 placeholder = {
                     Text(
-                        text = "Nhập Account, Số máy hoặc SĐT (có/không số 0)",
+                        text = "Nhập Account, SLID hoặc SĐT (có/không số 0)",
                         style = MaterialTheme.typography.bodySmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -457,7 +457,7 @@ private fun SubscriberCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "ma_tb: ${record.accountPppoe} • Số máy: ${record.soMay}",
+                    text = "ma_tb: ${record.accountPppoe} • SLID: ${record.slid}",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface,
@@ -504,7 +504,7 @@ private fun SubscriberCard(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    text = "SLID: ${record.slid}  •  2.4G: ${record.effectiveWifi24Ssid}  •  5G: ${record.effectiveWifi5Ssid}",
+                    text = "Wi-Fi 2.4G: ${record.effectiveWifi24Ssid}  •  5G: ${record.effectiveWifi5Ssid}",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary,
                     fontWeight = FontWeight.Medium,

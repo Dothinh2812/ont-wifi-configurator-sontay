@@ -47,11 +47,17 @@ class DeviceRecord:
     error_message: Optional[str] = None
     raw_row_data: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        effective = (self.slid or self.so_may or "").strip()
+        self.slid = effective
+        self.so_may = effective
+
     def to_device_config(self) -> DeviceConfig:
         """Convert record to driver DeviceConfig."""
+        effective_slid = (self.slid or self.so_may or "").strip()
         return DeviceConfig(
-            so_may=self.so_may,
-            slid=self.slid,
+            so_may=effective_slid,
+            slid=effective_slid,
             account_pppoe=self.account_pppoe,
             pass_pppoe=self.pass_pppoe,
             ssid_24g=self.ssid_24g,
@@ -67,11 +73,12 @@ class DeviceRecord:
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize record to dictionary for checkpoint storage."""
+        effective_slid = (self.slid or self.so_may or "").strip()
         return {
             "row_index": self.row_index,
             "stt": self.stt,
-            "so_may": self.so_may,
-            "slid": self.slid,
+            "so_may": effective_slid,
+            "slid": effective_slid,
             "account_pppoe": self.account_pppoe,
             "pass_pppoe": self.pass_pppoe,
             "ssid_24g": self.ssid_24g,
@@ -92,11 +99,12 @@ class DeviceRecord:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "DeviceRecord":
         """Deserialize record from dictionary."""
+        effective_slid = str(data.get("slid") or data.get("so_may") or "").strip()
         return cls(
             row_index=data.get("row_index", 0),
             stt=data.get("stt"),
-            so_may=data.get("so_may", ""),
-            slid=data.get("slid", ""),
+            so_may=effective_slid,
+            slid=effective_slid,
             account_pppoe=data.get("account_pppoe", ""),
             pass_pppoe=data.get("pass_pppoe", ""),
             ssid_24g=data.get("ssid_24g", ""),

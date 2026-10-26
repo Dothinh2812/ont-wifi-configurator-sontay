@@ -72,12 +72,12 @@ class TestCredentialMasking(unittest.TestCase):
         self.assertNotIn("tholau224", masked2)
         self.assertIn("wl_wpa_psk=***", masked2)
 
-        log3 = "newPass=Passwd2@&oldPass=admin"
+        log3 = "newPass=Passwd2@&oldPass=admin&data=001560828"
         masked3 = mask_sensitive_credentials(log3)
         self.assertNotIn("Passwd2@", masked3)
+        self.assertNotIn("001560828", masked3)
         self.assertIn("newPass=***", masked3)
-
-
+        self.assertIn("data=***", masked3)
 class TestDeviceTableModel(unittest.TestCase):
     def setUp(self):
         self.manager = ExcelManager()
@@ -86,11 +86,11 @@ class TestDeviceTableModel(unittest.TestCase):
 
     def test_model_row_and_column_count(self):
         self.assertEqual(self.model.rowCount(), 5)
-        self.assertEqual(self.model.columnCount(), 11)
+        self.assertEqual(self.model.columnCount(), 10)
 
     def test_row1_missing_pppoe_displays_invalid_data(self):
-        # Row 0 is missing PPPoE password
-        idx_status = self.model.index(0, 9)
+        # Row 0 is missing PPPoE password (col 8 is Trạng thái)
+        idx_status = self.model.index(0, 8)
         status_text = self.model.data(idx_status, Qt.ItemDataRole.DisplayRole)
         self.assertEqual(status_text, DeviceStatus.INVALID_DATA.value)
 
@@ -100,8 +100,8 @@ class TestDeviceTableModel(unittest.TestCase):
         self.assertFalse(row0.is_valid)
         self.assertEqual(row0.status, DeviceStatus.INVALID_DATA)
 
-        # Inline edit column 4 (Mật khẩu PPPoE)
-        col_pppoe_pass = 4
+        # Inline edit column 3 (Mật khẩu PPPoE)
+        col_pppoe_pass = 3
         idx = self.model.index(0, col_pppoe_pass)
         success = self.model.setData(idx, "MyNewPass123", Qt.ItemDataRole.EditRole)
         self.assertTrue(success)
@@ -456,23 +456,24 @@ class TestMainWindowHeadless(unittest.TestCase):
         self.assertTrue(row1.is_valid)
         self.assertEqual(row1.status, DeviceStatus.PENDING)
 
-        # Edit SLID (col 2) to > 10 chars -> should become INVALID_DATA
-        idx_slid = self.win.table_model.index(1, 2)
+        # Edit SLID (col 1) to > 10 chars -> should become INVALID_DATA
+        idx_slid = self.win.table_model.index(1, 1)
         self.win.table_model.setData(idx_slid, "0123456789ABC", Qt.ItemDataRole.EditRole)
         self.assertFalse(row1.is_valid)
         self.assertEqual(row1.status, DeviceStatus.INVALID_DATA)
+        self.assertEqual(row1.so_may, "0123456789ABC")
 
-        # Fix SLID back to valid -> should restore PENDING
+        # Fix SLID back to valid -> should restore PENDING and sync so_may
         self.win.table_model.setData(idx_slid, "005501941", Qt.ItemDataRole.EditRole)
         self.assertTrue(row1.is_valid)
         self.assertEqual(row1.status, DeviceStatus.PENDING)
+        self.assertEqual(row1.so_may, "005501941")
 
-        # Edit SSID 2.4G (col 5) with unsafe shell metachar -> should become INVALID_DATA
-        idx_ssid = self.win.table_model.index(1, 5)
+        # Edit SSID 2.4G (col 4) with unsafe shell metachar -> should become INVALID_DATA
+        idx_ssid = self.win.table_model.index(1, 4)
         self.win.table_model.setData(idx_ssid, "Bad;SSID", Qt.ItemDataRole.EditRole)
         self.assertFalse(row1.is_valid)
         self.assertEqual(row1.status, DeviceStatus.INVALID_DATA)
-
     @patch("PyQt6.QtWidgets.QMessageBox.warning")
     @patch("app.ui.main_window.ONTExecutionWorker")
     def test_lan_settings_applied_and_validated_on_run(self, mock_worker_cls, mock_warn):

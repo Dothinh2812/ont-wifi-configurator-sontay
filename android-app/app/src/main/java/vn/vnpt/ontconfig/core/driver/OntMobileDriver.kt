@@ -856,7 +856,7 @@ class OntMobileDriver(
 
             MobileSetupResult(
                 success = true,
-                soMay = record.soMay,
+                soMay = record.slid,
                 slid = record.slid,
                 accountPppoe = record.accountPppoe,
                 newSsid24g = wifi24Ssid,

@@ -66,6 +66,18 @@ object ExcelManager {
         return ssid5g to pass5g
     }
 
+    fun deriveWifi5Ssid(
+        ssid24g: String,
+        rawSsid5g: String? = "",
+        defaultSsid5g: String = "VNPT 5G"
+    ): String = deriveWifi5Config(
+        ssid24g = ssid24g,
+        pass24g = "",
+        rawSsid5g = rawSsid5g,
+        rawPass5g = "",
+        defaultSsid5g = defaultSsid5g
+    ).first
+
     /**
      * Parse .xlsx archive using Native ZipInputStream + XmlPullParser.
      * Preserves leading zeros in SO_MAY / SO_DT / Mã MEN and all 30 original columns.
@@ -122,9 +134,11 @@ object ExcelManager {
             val rowMap = rawRows[rowNum] ?: continue
             val sttVal = getCell(rowMap, "STT", 1)
             val soMay = getCell(rowMap, "SO_MAY", 9)
+            val maMen = getCell(rowMap, "Mã MEN", 13)
             val accountPppoe = getCell(rowMap, "Account", 10)
+            val slid = maMen.ifBlank { soMay }
 
-            if (sttVal.isEmpty() && soMay.isEmpty() && accountPppoe.isEmpty()) {
+            if (sttVal.isEmpty() && slid.isEmpty() && accountPppoe.isEmpty()) {
                 continue
             }
 
@@ -135,14 +149,12 @@ object ExcelManager {
             val diachiTb = getCell(rowMap, "DIACHI_TB", 7)
             val soDt = getCell(rowMap, "SO_DT", 8)
             val passPppoe = getCell(rowMap, "Mật khẩu PPPoE", 11)
-            val maMen = getCell(rowMap, "Mã MEN", 13)
-            val slid = maMen.ifBlank { soMay }
 
             val rawSsid24g = getCell(rowMap, "SSID Wi-Fi 2.4G", 15)
             val rawPass24g = getCell(rowMap, "Mật khẩu Wi-Fi 2.4G", 16)
 
-            // [Red Team RT-03] Populate fallback VNPT_{SO_MAY} and 1234567890 if blank in Excel
-            val ssid24g = rawSsid24g.ifBlank { if (soMay.isNotBlank()) "VNPT_$soMay" else "" }
+            // [Red Team RT-03 & RT-07] Populate fallback VNPT_{SLID} and 1234567890 if blank in Excel
+            val ssid24g = rawSsid24g.ifBlank { if (slid.isNotBlank()) "VNPT_$slid" else "" }
             val pass24g = rawPass24g.ifBlank { "1234567890" }
 
             val rawSsid5g = getCell(rowMap, "SSID Wi-Fi 5G", 19)
@@ -171,7 +183,7 @@ object ExcelManager {
                 tenTb = tenTb,
                 diachiTb = diachiTb,
                 soDt = soDt,
-                soMay = soMay,
+                soMay = slid,
                 accountPppoe = accountPppoe,
                 passPppoe = passPppoe,
                 maMen = maMen,
@@ -210,8 +222,20 @@ object ExcelManager {
         if (existingRecords.isEmpty()) return incomingRecords
 
         val byKey = existingRecords.associateBy { recordKey(it) }
+        val byRowAndAccount = existingRecords.associateBy {
+            "${it.rowIndex}|${it.accountPppoe.trim().lowercase()}"
+        }
+        val byRawSoMayAndAccount = existingRecords
+            .filter { !it.rawRowData["SO_MAY"].isNullOrBlank() || !it.rawRowData["Mã MEN"].isNullOrBlank() }
+            .associateBy {
+                val origSlid = it.rawRowData["Mã MEN"]?.trim()?.ifBlank { it.rawRowData["SO_MAY"]?.trim().orEmpty() }
+                    ?: it.rawRowData["SO_MAY"]?.trim().orEmpty()
+                "${origSlid.lowercase()}|${it.accountPppoe.trim().lowercase()}"
+            }
         return incomingRecords.map { incoming ->
             val prev = byKey[recordKey(incoming)]
+                ?: byRowAndAccount["${incoming.rowIndex}|${incoming.accountPppoe.trim().lowercase()}"]
+                ?: byRawSoMayAndAccount[recordKey(incoming)]
             if (prev == null) {
                 incoming
             } else {
@@ -222,9 +246,11 @@ object ExcelManager {
                     prev.pass24g != incoming.pass24g ||
                     prev.slid != incoming.slid
 
+                val mergedSlid = if (hasCustomEdits && prev.slid.isNotBlank()) prev.slid else incoming.slid
                 val mergedDraft = incoming.copy(
                     passPppoe = mergedPassPppoe,
-                    slid = if (hasCustomEdits && prev.slid.isNotBlank()) prev.slid else incoming.slid,
+                    slid = mergedSlid,
+                    soMay = mergedSlid,
                     ssid24g = if (hasCustomEdits && prev.ssid24g.isNotBlank()) prev.ssid24g else incoming.ssid24g,
                     pass24g = if (hasCustomEdits && prev.pass24g.isNotBlank()) prev.pass24g else incoming.pass24g,
                     ssid5g = if (hasCustomEdits && prev.ssid5g.isNotBlank()) prev.ssid5g else incoming.ssid5g,
@@ -252,7 +278,7 @@ object ExcelManager {
     }
 
     private fun recordKey(record: SubscriberRecord): String {
-        return "${record.soMay.trim().lowercase()}|${record.accountPppoe.trim().lowercase()}"
+        return "${record.slid.trim().lowercase()}|${record.accountPppoe.trim().lowercase()}"
     }
 
     /**
@@ -286,11 +312,11 @@ object ExcelManager {
 
         return statusFiltered.filter { rec ->
             val recPhoneNorm = normalizePhoneForSearch(rec.soDt)
-            val recSoMayNoZero = rec.soMay.trimStart('0').lowercase()
+            val recSlidNoZero = rec.slid.trimStart('0').lowercase()
 
             rec.accountPppoe.lowercase().contains(qLower) ||
-                rec.soMay.lowercase().contains(qLower) ||
-                (qNoLeadingZeros.isNotEmpty() && recSoMayNoZero.contains(qNoLeadingZeros)) ||
+                rec.slid.lowercase().contains(qLower) ||
+                (qNoLeadingZeros.isNotEmpty() && recSlidNoZero.contains(qNoLeadingZeros)) ||
                 rec.tenTb.lowercase().contains(qLower) ||
                 rec.diachiTb.lowercase().contains(qLower) ||
                 rec.nvkt.lowercase().contains(qLower) ||
@@ -604,7 +630,7 @@ object ExcelManager {
                     "TEN_TB" -> rec.tenTb.ifBlank { rec.rawRowData[header].orEmpty() }
                     "DIACHI_TB" -> rec.diachiTb.ifBlank { rec.rawRowData[header].orEmpty() }
                     "SO_DT" -> rec.soDt.ifBlank { rec.rawRowData[header].orEmpty() }
-                    "SO_MAY" -> rec.soMay
+                    "SO_MAY" -> rec.slid
                     "Account" -> rec.accountPppoe
                     "Mật khẩu PPPoE" -> rec.passPppoe
                     "Mã MEN" -> rec.slid

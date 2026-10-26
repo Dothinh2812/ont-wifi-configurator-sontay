@@ -160,7 +160,7 @@ public struct SubscriberListView: View {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(.secondary)
                 TextField(
-                    "Tìm Account, Số máy (0015...), Tên TB, SĐT...",
+                    "Tìm Account, SLID (0015...), Tên TB, SĐT...",
                     text: Binding(
                         get: { viewModel.searchQuery },
                         set: { viewModel.onSearchQueryChange($0) }
@@ -253,7 +253,7 @@ public struct SubscriberListView: View {
     private func subscriberRow(_ record: SubscriberRecord) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text("\(record.accountPppoe.isEmpty ? "(Thiếu Account)" : record.accountPppoe) — \(record.soMay)")
+                Text("\(record.accountPppoe.isEmpty ? "(Thiếu Account)" : record.accountPppoe) — SLID: \(record.slid)")
                     .font(.subheadline.weight(.bold))
                 Spacer()
                 Text(record.status.label)

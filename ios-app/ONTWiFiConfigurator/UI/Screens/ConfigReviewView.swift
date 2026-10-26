@@ -62,25 +62,6 @@ public struct ConfigReviewView: View {
     private func serviceParametersSection(_ record: SubscriberRecord) -> some View {
         Section("Thông số dịch vụ WAN PPPoE & GPON SLID") {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Số máy (SO_MAY)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                TextField(
-                    "Số máy (ví dụ: 001560828)",
-                    text: Binding(
-                        get: { record.soMay },
-                        set: { newVal in
-                            var updated = record
-                            updated.soMay = newVal
-                            viewModel.updateSelectedRecord(updated)
-                        }
-                    )
-                )
-                .autocorrectionDisabled(true)
-                .textInputAutocapitalization(.never)
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text("SLID / Mã MEN (GPON Password)")
                         .font(.caption)
@@ -96,7 +77,26 @@ public struct ConfigReviewView: View {
                         get: { record.slid },
                         set: { newVal in
                             var updated = record
+                            let oldSlid = record.slid.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let oldSoMay = record.soMay.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let currentSsid24 = record.ssid24g.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let wasDefaultSsid = currentSsid24.isEmpty ||
+                                currentSsid24 == "VNPT_\(oldSlid)" ||
+                                currentSsid24 == "VNPT_\(oldSoMay)"
+
                             updated.slid = newVal
+                            updated.soMay = newVal
+                            if wasDefaultSsid {
+                                let cleanNew = newVal.trimmingCharacters(in: .whitespacesAndNewlines)
+                                updated.ssid24g = cleanNew.isEmpty ? "" : "VNPT_\(cleanNew)"
+                                if viewModel.autoSyncWifi5g {
+                                    updated.ssid5g = ExcelManager.deriveWifi5Ssid(
+                                        ssid24g: updated.ssid24g,
+                                        rawSsid5g: "",
+                                        defaultSsid5g: viewModel.globalSettings.defaultWifi5Ssid
+                                    )
+                                }
+                            }
                             viewModel.updateSelectedRecord(updated)
                         }
                     )

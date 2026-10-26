@@ -25,11 +25,11 @@ class TestExcelManager(unittest.TestCase):
 
     def test_preserve_so_may_string_leading_zeros(self):
         records = self.manager.load_file(self.sample_excel_path)
-        # Row 1 in sample data: SO_MAY is 001560828
+        # Row 1 in sample data: SLID / SO_MAY is 001560828
         row1 = records[0]
+        self.assertEqual(row1.slid, "001560828")
         self.assertEqual(row1.so_may, "001560828")
-        self.assertTrue(isinstance(row1.so_may, str))
-
+        self.assertTrue(isinstance(row1.slid, str))
     def test_strict_validation_detects_13_missing_pppoe_passwords(self):
         records = self.manager.load_file(self.sample_excel_path)
         invalid_records = [r for r in records if not r.is_valid and any("PPPoE" in err for err in r.validation_errors)]
@@ -110,6 +110,7 @@ class TestExcelManager(unittest.TestCase):
 
     def test_export_results_creates_excel(self):
         export_file = ".test_export.xlsx"
+        export_source_file = ".test_export_source.xlsx"
         try:
             records = self.manager.load_file(self.sample_excel_path)[:2]
             records[0].status = DeviceStatus.SUCCESS
@@ -123,10 +124,23 @@ class TestExcelManager(unittest.TestCase):
             headers = [ws.cell(1, col).value for col in range(1, ws.max_column + 1)]
             self.assertIn("Trạng thái cấu hình", headers)
             self.assertIn("Ghi chú chi tiết", headers)
-        finally:
-            if os.path.exists(export_file):
-                os.remove(export_file)
 
+            # Verify export with source_excel_path writes edited SLID to both SO_MAY (col 9) and Mã MEN (col 13)
+            records[0].slid = "009998888"
+            records[0].so_may = "009998888"
+            records[0].pass_pppoe = "UpdatedPass123"
+            self.manager.export_results(
+                export_source_file, records, source_excel_path=self.sample_excel_path
+            )
+            wb_src = openpyxl.load_workbook(export_source_file)
+            ws_src = wb_src.active
+            self.assertEqual(ws_src.cell(2, 9).value, "009998888")
+            self.assertEqual(ws_src.cell(2, 13).value, "009998888")
+            self.assertEqual(ws_src.cell(2, 11).value, "UpdatedPass123")
+        finally:
+            for fp in (export_file, export_source_file):
+                if os.path.exists(fp):
+                    os.remove(fp)
     def test_export_results_permission_error_handling(self):
         from unittest.mock import patch
         records = self.manager.load_file(self.sample_excel_path)[:1]

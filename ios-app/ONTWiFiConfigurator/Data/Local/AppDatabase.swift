@@ -193,6 +193,7 @@ public final class AppDatabase: @unchecked Sendable {
             let validationErrors: [String] = (try? JSONDecoder().decode([String].self, from: Data(validationErrorsJson.utf8))) ?? []
             let rawRowData: [String: String] = (try? JSONDecoder().decode([String: String].self, from: Data(rawRowJson.utf8))) ?? [:]
             let status = SubscriberStatus(rawValue: statusStr) ?? .pending
+            let unifiedSlid = slid.isEmpty ? soMay : slid
 
             results.append(
                 SubscriberRecord(
@@ -203,11 +204,11 @@ public final class AppDatabase: @unchecked Sendable {
                     tenTb: tenTb,
                     diachiTb: diachiTb,
                     soDt: soDt,
-                    soMay: soMay,
+                    soMay: unifiedSlid,
                     accountPppoe: accountPppoe,
                     passPppoe: passPppoe,
                     maMen: maMen,
-                    slid: slid,
+                    slid: unifiedSlid,
                     ssid24g: ssid24g,
                     pass24g: pass24g,
                     ssid5g: ssid5g,
@@ -246,6 +247,7 @@ public final class AppDatabase: @unchecked Sendable {
         let errorsJson = (try? String(data: JSONEncoder().encode(record.validationErrors), encoding: .utf8)) ?? "[]"
         let rawJson = (try? String(data: JSONEncoder().encode(record.rawRowData), encoding: .utf8)) ?? "{}"
         let soDtNormalized = ExcelManager.normalizePhoneForSearch(record.soDt)
+        let unifiedSlid = record.slid.isEmpty ? record.soMay : record.slid
 
         sqlite3_bind_int(stmt, 1, Int32(record.rowIndex))
         if let stt = record.stt {
@@ -259,11 +261,11 @@ public final class AppDatabase: @unchecked Sendable {
         bindText(stmt, 6, record.diachiTb)
         bindText(stmt, 7, record.soDt)
         bindText(stmt, 8, soDtNormalized)
-        bindText(stmt, 9, record.soMay)
+        bindText(stmt, 9, unifiedSlid)
         bindText(stmt, 10, record.accountPppoe)
         bindText(stmt, 11, record.passPppoe)
         bindText(stmt, 12, record.maMen)
-        bindText(stmt, 13, record.slid)
+        bindText(stmt, 13, unifiedSlid)
         bindText(stmt, 14, record.ssid24g)
         bindText(stmt, 15, record.pass24g)
         bindText(stmt, 16, record.ssid5g)

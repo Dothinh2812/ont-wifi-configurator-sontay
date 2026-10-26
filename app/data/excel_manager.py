@@ -104,15 +104,17 @@ class ExcelManager:
             # Check if row is entirely empty
             stt_val = get_val(r, "STT", 1)
             so_may_val = get_val(r, "SO_MAY", 9)
+            ma_men_val = get_val(r, "Mã MEN", 13)
             account_val = get_val(r, "Account", 10)
 
-            if stt_val is None and so_may_val is None and account_val is None:
-                continue
+            # Preserve string format with leading zeros; SLID priority: Mã MEN first, then SO_MAY
+            so_may = str(so_may_val).strip() if so_may_val is not None else ""
+            ma_men = str(ma_men_val).strip() if ma_men_val is not None else ""
+            slid = ma_men if ma_men else so_may
+            so_may = slid
 
-            # Preserve string format with leading zeros
-            so_may = ""
-            if so_may_val is not None:
-                so_may = str(so_may_val).strip()
+            if stt_val is None and not slid and account_val is None:
+                continue
 
             stt = int(stt_val) if stt_val is not None and str(stt_val).isdigit() else None
             ten_tb = str(get_val(r, "TEN_TB", 6) or "").strip()
@@ -122,12 +124,6 @@ class ExcelManager:
 
             pass_pppoe_val = get_val(r, "Mật khẩu PPPoE", 11)
             pass_pppoe = str(pass_pppoe_val).strip() if pass_pppoe_val is not None else ""
-
-            # SLID priority: Mã MEN first, then SO_MAY
-            ma_men_val = get_val(r, "Mã MEN", 13)
-            ma_men = str(ma_men_val).strip() if ma_men_val is not None else ""
-            slid = ma_men if ma_men else so_may
-
             ssid_24g = str(get_val(r, "SSID Wi-Fi 2.4G", 15) or "").strip()
             pass_24g = str(get_val(r, "Mật khẩu Wi-Fi 2.4G", 16) or "").strip()
 
@@ -151,8 +147,6 @@ class ExcelManager:
                 errors.append("Thiếu mật khẩu PPPoE - Yêu cầu nhập tay (không dùng mật khẩu giả lập)")
 
             # 2. Identification fields
-            if not so_may:
-                errors.append("Thiếu Số máy định danh")
             if not account_pppoe:
                 errors.append("Thiếu Account PPPoE")
 
@@ -167,7 +161,6 @@ class ExcelManager:
 
             # 4. Check for unsafe shell metacharacters
             fields_to_check = [
-                ("Số máy", so_may),
                 ("SLID", slid),
                 ("Account PPPoE", account_pppoe),
                 ("Pass PPPoE", pass_pppoe),
@@ -217,7 +210,7 @@ class ExcelManager:
 
     def save_checkpoint(self, records: List[DeviceRecord], checkpoint_path: str = ".checkpoint_results.json") -> None:
         """Atomically persist status checkpoint to disk after each ONT device."""
-        data = {r.so_may or str(r.row_index): r.to_dict() for r in records}
+        data = {r.slid or str(r.row_index): r.to_dict() for r in records}
         tmp_path = f"{checkpoint_path}.tmp"
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -261,7 +254,7 @@ class ExcelManager:
                     ws.cell(1, c_idx, h)
                 for r_idx, rec in enumerate(records, start=2):
                     ws.cell(r_idx, 1, rec.stt)
-                    ws.cell(r_idx, 2, rec.so_may)
+                    ws.cell(r_idx, 2, rec.slid)
                     ws.cell(r_idx, 3, rec.account_pppoe)
                     ws.cell(r_idx, 4, rec.pass_pppoe)
                     ws.cell(r_idx, 5, rec.slid)
@@ -269,6 +262,16 @@ class ExcelManager:
                     ws.cell(r_idx, 7, rec.pass_24g)
                     ws.cell(r_idx, 8, rec.ssid_5g)
                     ws.cell(r_idx, 9, rec.pass_5g)
+
+            col_map = self._locate_headers(ws)
+            has_source = bool(source_excel_path and os.path.exists(source_excel_path))
+            so_may_col = col_map.get("SO_MAY", 9 if has_source else 2)
+            ma_men_col = col_map.get("Mã MEN", 13 if has_source else 5)
+            pass_pppoe_col = col_map.get("Mật khẩu PPPoE")
+            ssid_24_col = col_map.get("SSID Wi-Fi 2.4G")
+            pass_24_col = col_map.get("Mật khẩu Wi-Fi 2.4G")
+            ssid_5_col = col_map.get("SSID Wi-Fi 5G")
+            pass_5_col = col_map.get("Mật khẩu Wi-Fi 5G")
 
             # Append status columns
             base_col = ws.max_column
@@ -280,17 +283,38 @@ class ExcelManager:
             ws.cell(1, time_col, "Thời gian thực hiện")
             ws.cell(1, note_col, "Ghi chú chi tiết")
 
-            # Create quick lookup by row_index or so_may
+            # Create quick lookup by row_index, slid, or original raw SO_MAY
             rec_map = {r.row_index: r for r in records}
-            so_may_map = {r.so_may: r for r in records if r.so_may}
+            slid_map: Dict[str, DeviceRecord] = {}
+            for r in records:
+                if r.slid:
+                    slid_map[r.slid] = r
+                raw_so_may = str(r.raw_row_data.get("SO_MAY") or "").strip() if r.raw_row_data else ""
+                if raw_so_may:
+                    slid_map[raw_so_may] = r
 
             for row in range(2, ws.max_row + 1):
                 rec = rec_map.get(row)
                 if not rec:
-                    so_val = str(ws.cell(row, 9).value or "").strip()
-                    rec = so_may_map.get(so_val)
+                    so_val = str(ws.cell(row, so_may_col).value or "").strip()
+                    rec = slid_map.get(so_val)
 
                 if rec:
+                    if so_may_col:
+                        ws.cell(row, so_may_col, rec.slid)
+                    if ma_men_col:
+                        ws.cell(row, ma_men_col, rec.slid)
+                    if pass_pppoe_col and rec.pass_pppoe:
+                        ws.cell(row, pass_pppoe_col, rec.pass_pppoe)
+                    if ssid_24_col and rec.ssid_24g:
+                        ws.cell(row, ssid_24_col, rec.ssid_24g)
+                    if pass_24_col and rec.pass_24g:
+                        ws.cell(row, pass_24_col, rec.pass_24g)
+                    if ssid_5_col and rec.ssid_5g:
+                        ws.cell(row, ssid_5_col, rec.ssid_5g)
+                    if pass_5_col and rec.pass_5g:
+                        ws.cell(row, pass_5_col, rec.pass_5g)
+
                     ws.cell(row, status_col, str(rec.status))
                     time_str = ""
                     if rec.start_time and rec.end_time:
@@ -301,7 +325,6 @@ class ExcelManager:
 
                     note = rec.error_message or (", ".join(rec.validation_errors) if rec.validation_errors else "OK")
                     ws.cell(row, note_col, note)
-
             wb.save(output_path)
             return output_path
 

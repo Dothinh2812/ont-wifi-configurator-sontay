@@ -45,7 +45,7 @@ class TestPerformanceBenchmarks(unittest.TestCase):
         print(f"\n[BENCHMARK] MainWindow init & render (89 rows): {elapsed * 1000:.2f} ms")
         self.assertLess(elapsed, 1.0, f"Init time {elapsed:.3f}s exceeds threshold of 1.0s")
         self.assertEqual(len(win.records), 89)
-
+        self.assertEqual(win.table_model.columnCount(), 10)
         # Cleanup
         win.close()
         QCoreApplication.processEvents()

@@ -37,7 +37,7 @@ data class SubscriberRecord(
     val rawRowData: Map<String, String> = emptyMap()
 ) {
     val effectiveWifi24Ssid: String
-        get() = ssid24g.ifBlank { "VNPT_$soMay" }
+        get() = ssid24g.ifBlank { "VNPT_${slid.trim()}" }
 
     val effectiveWifi24Pass: String
         get() = pass24g.ifBlank { "1234567890" }

@@ -115,11 +115,11 @@ Bên cạnh bản Desktop Windows chạy qua cáp LAN, dự án cung cấp ứng
 
 ### Tính Năng Nổi Bật (Bản Android)
 1. **Đọc/Xuất `.xlsx` Native (Zero-POI Bloat) & Room SQLite Offline:**
-   - Nạp file Excel (`.xlsx` qua SAF) hoặc bộ dữ liệu mẫu ẩn danh (`assets/sample-demo.xlsx`), bảo toàn nguyên vẹn **30 cột gốc** và số `0` ở đầu `SO_MAY` (`001560828`).
-   - Tìm kiếm tức thì (`< 5ms`) theo `ma_tb` (`Account`), `SO_MAY`, `TEN_TB`, `SO_DT` (tự động chuẩn hóa có/không có số `0` đầu).
-   - Merge thông minh khi nạp lại file Excel (giữ nguyên trạng thái `SUCCESS` và mật khẩu PPPoE đã nhập tay).
+   - Nạp file Excel (`.xlsx` qua SAF) hoặc bộ dữ liệu mẫu ẩn danh (`assets/sample-demo.xlsx`), bảo toàn nguyên vẹn **30 cột gốc** và số `0` ở đầu `SLID` (`Mã MEN` / `SO_MAY`, ví dụ `001560828`).
+   - Tìm kiếm tức thì (`< 5ms`) theo `ma_tb` (`Account`), `SLID`, `TEN_TB`, `SO_DT` (tự động chuẩn hóa có/không có số `0` đầu).
+   - Merge thông minh khi nạp lại file Excel (giữ nguyên trạng thái `SUCCESS`, `SLID` và mật khẩu PPPoE đã nhập tay).
 2. **Màn Hình Kiểm Tra & Chỉnh Sửa Trước Khi RUN (`ConfigReviewScreen`):**
-   - Cho phép KTV kiểm tra và sửa trực tiếp `SLID / Mã MEN`, `Account / Mật khẩu PPPoE`, `SSID / Pass Wi-Fi 2.4G & 5G` (tự động đồng bộ 5G theo 2.4G).
+   - Hợp nhất tham số định danh GPON về duy nhất **`SLID / Mã MEN`** (loại bỏ ô nhập `Số máy` trùng lặp), cho phép KTV kiểm tra và sửa trực tiếp `SLID`, `Account / Mật khẩu PPPoE`, `SSID / Pass Wi-Fi 2.4G & 5G` (tự động đồng bộ SSID mặc định `VNPT_{SLID}` và 5G theo 2.4G, đồng thời ghi đồng bộ vào cả cột `SO_MAY` và `Mã MEN` khi xuất file Excel).
    - Kiểm tra hợp lệ 2 tầng (`validateOnImport` & `validateBeforeRun`): chặn đủ 11 ký tự shell metacharacters (`&|;$><`\!'"`), kiểm tra `SLID <= 10` ký tự ASCII, và cung cấp nút **1 chạm "Thêm số 0 ở đầu"** cho các mật khẩu Wi-Fi 7 chữ số (do Excel mất số `0` đầu ngày sinh).
 3. **Tự Động Bắt Wi-Fi Mặc Định ONT & Tối Ưu Hóa Đổi Wi-Fi 2.4G Ở Bước Cuối (Bước 7/7):**
    - Tự động lọc sóng xuất xưởng `GW040-NSv2_2.4G_XXXXXX` / `GW040-NSv2_5G_XXXXXX` (đối chiếu hậu tố MAC với BSSID) và định tuyến HTTP qua `wifiNetwork.socketFactory` ngay cả khi máy đang bật 4G/5G.
@@ -143,7 +143,7 @@ Dự án cung cấp thêm phiên bản **iOS Native (Pure Swift 5.9+ & SwiftUI, 
 ### Tính Năng Nổi Bật (Bản iOS Native)
 1. **Đọc/Xuất `.xlsx` Thuần Native (`ZipArchive` raw DEFLATE `windowBits = -15` + `XMLParser`) & SQLite3 Offline:**
    - Không phụ thuộc bất kỳ thư viện bên thứ 3 nào (CocoaPods/SPM), đảm bảo gói `.app` đơn khối không gây lỗi chữ ký dynamic framework khi Sideload bằng Apple ID miễn phí.
-   - Bảo toàn nguyên vẹn **30 cột gốc** (`STANDARD_30_HEADERS`) và số `0` ở đầu `SO_MAY` (`001560828`), tìm kiếm tức thì theo `Account`, `SO_MAY`, `TEN_TB`, `SO_DT` và Merge thông minh trong giao dịch SQLite `BEGIN IMMEDIATE TRANSACTION`.
+   - Bảo toàn nguyên vẹn **30 cột gốc** (`STANDARD_30_HEADERS`) và số `0` ở đầu `SLID` (`001560828`), tìm kiếm tức thì theo `Account`, `SLID`, `TEN_TB`, `SO_DT` và Merge thông minh trong giao dịch SQLite `BEGIN IMMEDIATE TRANSACTION`.
 2. **Ép Định Tuyến `https://192.168.1.1` Qua Card Wi-Fi `en0` Không Cần Tắt 4G/5G (`IosWifiMonitor` + `UnsafeSslSession`):**
    - Kiểm tra trực tiếp IPv4 `192.168.1.x` trên giao diện Wi-Fi `"en0"` (`getifaddrs`), phát hiện cảnh báo VPN (`utun*`), chờ DHCP cấp IP (`awaitWifiIpv4Ready`) và đặt `allowsCellularAccess = false` + chặn toàn bộ HTTP Redirect (`301/302/307/308`).
 3. **Trình Tự 7 Bước LuCI CGI Tối Ưu Không Dây (`OntMobileDriver.swift`):**

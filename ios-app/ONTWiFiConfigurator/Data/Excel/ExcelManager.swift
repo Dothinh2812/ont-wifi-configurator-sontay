@@ -55,6 +55,20 @@ public enum ExcelManager {
         return (ssid5g, pass5g)
     }
 
+    public static func deriveWifi5Ssid(
+        ssid24g: String,
+        rawSsid5g: String? = "",
+        defaultSsid5g: String = "VNPT 5G"
+    ) -> String {
+        return deriveWifi5Config(
+            ssid24g: ssid24g,
+            pass24g: "",
+            rawSsid5g: rawSsid5g,
+            rawPass5g: "",
+            defaultSsid5g: defaultSsid5g
+        ).0
+    }
+
     /// Parse .xlsx archive using Native ZipArchive + XMLParser (shouldResolveExternalEntities = false).
     /// Preserves leading zeros in SO_MAY / SO_DT / Mã MEN and all 30 original columns.
     public static func parseExcel(
@@ -114,9 +128,11 @@ public enum ExcelManager {
             guard let rowMap = rawRows[rowNum] else { continue }
             let sttVal = getCell(rowMap, "STT", fallbackCol: 1)
             let soMay = getCell(rowMap, "SO_MAY", fallbackCol: 9)
+            let maMen = getCell(rowMap, "Mã MEN", fallbackCol: 13)
             let accountPppoe = getCell(rowMap, "Account", fallbackCol: 10)
+            let slid = maMen.isEmpty ? soMay : maMen
 
-            if sttVal.isEmpty && soMay.isEmpty && accountPppoe.isEmpty {
+            if sttVal.isEmpty && slid.isEmpty && accountPppoe.isEmpty {
                 continue
             }
 
@@ -127,13 +143,11 @@ public enum ExcelManager {
             let diachiTb = getCell(rowMap, "DIACHI_TB", fallbackCol: 7)
             let soDt = getCell(rowMap, "SO_DT", fallbackCol: 8)
             let passPppoe = getCell(rowMap, "Mật khẩu PPPoE", fallbackCol: 11)
-            let maMen = getCell(rowMap, "Mã MEN", fallbackCol: 13)
-            let slid = maMen.isEmpty ? soMay : maMen
 
             let rawSsid24g = getCell(rowMap, "SSID Wi-Fi 2.4G", fallbackCol: 15)
             let rawPass24g = getCell(rowMap, "Mật khẩu Wi-Fi 2.4G", fallbackCol: 16)
 
-            let ssid24g = rawSsid24g.isEmpty ? (soMay.isEmpty ? "" : "VNPT_\(soMay)") : rawSsid24g
+            let ssid24g = rawSsid24g.isEmpty ? (slid.isEmpty ? "" : "VNPT_\(slid)") : rawSsid24g
             let pass24g = rawPass24g.isEmpty ? "1234567890" : rawPass24g
 
             let rawSsid5g = getCell(rowMap, "SSID Wi-Fi 5G", fallbackCol: 19)
@@ -163,7 +177,7 @@ public enum ExcelManager {
                 tenTb: tenTb,
                 diachiTb: diachiTb,
                 soDt: soDt,
-                soMay: soMay,
+                soMay: slid,
                 accountPppoe: accountPppoe,
                 passPppoe: passPppoe,
                 maMen: maMen,
@@ -194,12 +208,24 @@ public enum ExcelManager {
         if existingRecords.isEmpty { return incomingRecords }
 
         var byKey: [String: SubscriberRecord] = [:]
+        var byRowAndAccount: [String: SubscriberRecord] = [:]
+        var byRawSlidAndAccount: [String: SubscriberRecord] = [:]
         for rec in existingRecords {
             byKey[recordKey(rec)] = rec
+            let acc = rec.accountPppoe.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            byRowAndAccount["\(rec.rowIndex)|\(acc)"] = rec
+            let rawMen = (rec.rawRowData["Mã MEN"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawSoMay = (rec.rawRowData["SO_MAY"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let origSlid = (rawMen.isEmpty ? rawSoMay : rawMen).lowercased()
+            if !origSlid.isEmpty {
+                byRawSlidAndAccount["\(origSlid)|\(acc)"] = rec
+            }
         }
 
         return incomingRecords.map { incoming in
-            guard let prev = byKey[recordKey(incoming)] else {
+            let acc = incoming.accountPppoe.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let key = recordKey(incoming)
+            guard let prev = byKey[key] ?? byRowAndAccount["\(incoming.rowIndex)|\(acc)"] ?? byRawSlidAndAccount[key] else {
                 return incoming
             }
 
@@ -219,6 +245,7 @@ public enum ExcelManager {
             if hasCustomEdits && !prev.slid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 merged.slid = prev.slid
             }
+            merged.soMay = merged.slid
             if hasCustomEdits && !prev.ssid24g.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 merged.ssid24g = prev.ssid24g
             }
@@ -256,9 +283,9 @@ public enum ExcelManager {
     }
 
     private static func recordKey(_ record: SubscriberRecord) -> String {
-        let sm = record.soMay.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let sl = record.slid.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let acc = record.accountPppoe.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return "\(sm)|\(acc)"
+        return "\(sl)|\(acc)"
     }
 
     public static func normalizePhoneForSearch(_ phone: String) -> String {
@@ -291,11 +318,11 @@ public enum ExcelManager {
 
         return statusFiltered.filter { rec in
             let recPhoneNorm = normalizePhoneForSearch(rec.soDt)
-            let recSoMayNoZero = String(rec.soMay.drop(while: { $0 == "0" })).lowercased()
+            let recSlidNoZero = String(rec.slid.drop(while: { $0 == "0" })).lowercased()
 
             return rec.accountPppoe.lowercased().contains(qLower) ||
-                rec.soMay.lowercased().contains(qLower) ||
-                (!qNoLeadingZeros.isEmpty && recSoMayNoZero.contains(qNoLeadingZeros)) ||
+                rec.slid.lowercased().contains(qLower) ||
+                (!qNoLeadingZeros.isEmpty && recSlidNoZero.contains(qNoLeadingZeros)) ||
                 rec.tenTb.lowercased().contains(qLower) ||
                 rec.diachiTb.lowercased().contains(qLower) ||
                 rec.nvkt.lowercased().contains(qLower) ||
@@ -453,7 +480,7 @@ public enum ExcelManager {
                 case "SO_DT":
                     value = rec.soDt.isEmpty ? (rec.rawRowData[header] ?? "") : rec.soDt
                 case "SO_MAY":
-                    value = rec.soMay
+                    value = rec.slid
                 case "Account":
                     value = rec.accountPppoe
                 case "Mật khẩu PPPoE":

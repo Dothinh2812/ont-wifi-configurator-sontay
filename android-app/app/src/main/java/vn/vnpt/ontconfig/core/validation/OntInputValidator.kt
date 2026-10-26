@@ -25,13 +25,14 @@ object OntInputValidator {
     private val SEVEN_DIGITS_REGEX = Regex("^\\d{7}$")
 
     private val SENSITIVE_PATTERNS = listOf(
-        Regex("(pppPassword=)([^&\\s]+)", RegexOption.IGNORE_CASE),
-        Regex("(pass=)([^&\\s]+)", RegexOption.IGNORE_CASE),
-        Regex("(newPass=)([^&\\s]+)", RegexOption.IGNORE_CASE),
-        Regex("(oldPass=)([^&\\s]+)", RegexOption.IGNORE_CASE),
-        Regex("(wl_wpa_psk=)([^&\\s]+)", RegexOption.IGNORE_CASE),
-        Regex("(password=)([^&\\s]+)", RegexOption.IGNORE_CASE),
-        Regex("(sessionKey=)([^&\\s]+)", RegexOption.IGNORE_CASE)
+        Regex("(pppPassword=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
+        Regex("(pass=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
+        Regex("(newPass=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
+        Regex("(oldPass=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
+        Regex("(wl_wpa_psk=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
+        Regex("(password=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
+        Regex("(sessionKey=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
+        Regex("(data=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE)
     )
 
     /**
@@ -155,9 +156,6 @@ object OntInputValidator {
         if (record.passPppoe.trim().isEmpty()) {
             errors.add("Thiếu mật khẩu PPPoE - Yêu cầu nhập tay (không dùng mật khẩu giả lập)")
         }
-        if (record.soMay.trim().isEmpty()) {
-            errors.add("Thiếu Số máy định danh")
-        }
         if (record.accountPppoe.trim().isEmpty()) {
             errors.add("Thiếu Account PPPoE")
         }
@@ -174,7 +172,6 @@ object OntInputValidator {
         }
 
         val fieldsToCheck = listOf(
-            "Số máy" to record.soMay,
             "SLID" to record.slid,
             "Account PPPoE" to record.accountPppoe,
             "Pass PPPoE" to record.passPppoe,

@@ -11,7 +11,6 @@ from app.core.ont_driver import UNSAFE_SHELL_METACHARS
 
 COLUMNS = [
     ("STT", "stt"),
-    ("Số máy", "so_may"),
     ("SLID", "slid"),
     ("Account PPPoE", "account_pppoe"),
     ("Mật khẩu PPPoE", "pass_pppoe"),
@@ -31,8 +30,6 @@ def validate_device_record(rec: DeviceRecord) -> List[str]:
     if not rec.pass_pppoe:
         errors.append("Thiếu mật khẩu PPPoE - Yêu cầu nhập tay (không dùng mật khẩu giả lập)")
 
-    if not rec.so_may:
-        errors.append("Thiếu Số máy định danh")
     if not rec.account_pppoe:
         errors.append("Thiếu Account PPPoE")
 
@@ -45,7 +42,6 @@ def validate_device_record(rec: DeviceRecord) -> List[str]:
         errors.append("Thiếu thông tin SLID / Mã MEN")
 
     fields_to_check = [
-        ("Số máy", rec.so_may),
         ("SLID", rec.slid),
         ("Account PPPoE", rec.account_pppoe),
         ("Pass PPPoE", rec.pass_pppoe),
@@ -159,8 +155,8 @@ class DeviceTableModel(QAbstractTableModel):
             return Qt.ItemFlag.NoItemFlags
 
         base_flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        # Editable columns: PPPoE password (col 4), WiFi SSID/Pass, SLID
-        editable_cols = {2, 4, 5, 6, 7, 8}
+        # Editable columns: SLID (col 1), PPPoE password (col 3), WiFi SSID/Pass (cols 4..7)
+        editable_cols = {1, 3, 4, 5, 6, 7}
         if index.column() in editable_cols:
             return base_flags | Qt.ItemFlag.ItemIsEditable
 
@@ -191,7 +187,7 @@ class DeviceTableModel(QAbstractTableModel):
             bg_brush, fg_brush = get_status_brush(rec.status)
             return bg_brush if role == Qt.ItemDataRole.BackgroundRole else fg_brush
         elif role == Qt.ItemDataRole.TextAlignmentRole:
-            if col in (0, 9):  # STT, Status
+            if col in (0, 8):  # STT, Status
                 return int(Qt.AlignmentFlag.AlignCenter)
             return int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
 
@@ -208,9 +204,11 @@ class DeviceTableModel(QAbstractTableModel):
 
         val_str = str(value or "").strip()
         setattr(rec, attr_name, val_str)
+        if attr_name == "slid":
+            rec.so_may = val_str
 
         # Reactive re-validation when any editable field is modified
-        if col in {2, 4, 5, 6, 7, 8}:
+        if col in {1, 3, 4, 5, 6, 7}:
             rec.validation_errors = validate_device_record(rec)
             rec.is_valid = len(rec.validation_errors) == 0
             if rec.is_valid and rec.status == DeviceStatus.INVALID_DATA:

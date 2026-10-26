@@ -39,6 +39,7 @@ def test_phase1_zip_archive_and_excel_manager_contracts():
 
     excel_swift = (IOS_APP_DIR / "Data" / "Excel" / "ExcelManager.swift").read_text(encoding="utf-8")
     assert "STANDARD_30_HEADERS" in excel_swift
+    assert "deriveWifi5Ssid" in excel_swift
     assert "shouldResolveExternalEntities = false" in excel_swift
     assert "!rawVal.isEmpty" in excel_swift
     assert "Trạng thái cấu hình" in excel_swift
@@ -55,9 +56,8 @@ def test_phase1_validator_and_sqlite_contracts():
     assert "urlEncodeFormValue" in val_swift
     assert "ontEncodeQuery" in val_swift
     assert "maskSensitiveCredentials" in val_swift
-    for count_hint in ["3011965", "0x20", "0x7E"]:
-        # Ensure printable ASCII range check is enforced
-        pass
+    assert "Thiếu Số máy định danh" not in val_swift
+    assert '("Số máy",' not in val_swift
     assert "0x20" in val_swift and "0x7E" in val_swift
 
     db_swift = (IOS_APP_DIR / "Data" / "Local" / "AppDatabase.swift").read_text(encoding="utf-8")
@@ -67,7 +67,7 @@ def test_phase1_validator_and_sqlite_contracts():
     assert "BEGIN IMMEDIATE TRANSACTION" in db_swift
     assert "isExcludedFromBackup = true" in db_swift
     assert "lastKnownAdminPass" in db_swift
-
+    assert "unifiedSlid" in db_swift
 
 def test_phase2_wifi_en0_monitor_and_unsafe_ssl_session_contracts():
     """Verify IosWifiMonitor getifaddrs('en0'), VPN detection, awaitWifiIpv4Ready, and UnsafeSslSession."""
@@ -106,7 +106,7 @@ def test_phase2_ont_mobile_driver_7step_protocol_contracts():
     assert "ensureGatewayReadyBeforeStep7" in driver_swift
     assert "Task.detached" in driver_swift
     assert "recordPasswordCache" in driver_swift
-
+    assert "recordCacheKey(rowIndex: record.rowIndex, soMay: record.slid)" in driver_swift
 
 def test_phase3_swiftui_screens_and_viewmodel_contracts():
     """Verify MainViewModel background task, ConfigReviewView band selector & 1-tap 0, and Privacy Blur."""
@@ -119,12 +119,14 @@ def test_phase3_swiftui_screens_and_viewmodel_contracts():
     list_swift = (IOS_APP_DIR / "UI" / "Screens" / "SubscriberListView.swift").read_text(encoding="utf-8")
     assert "startAccessingSecurityScopedResource" in list_swift
     assert "stopAccessingSecurityScopedResource" in list_swift
+    assert "SLID:" in list_swift
 
     review_swift = (IOS_APP_DIR / "UI" / "Screens" / "ConfigReviewView.swift").read_text(encoding="utf-8")
     assert "2.4GHz" in review_swift and "5GHz" in review_swift
     assert "Thêm số 0 ở đầu" in review_swift
     assert "autocorrectionDisabled(true)" in review_swift
-
+    assert "Số máy (SO_MAY)" not in review_swift
+    assert "SLID / Mã MEN" in review_swift
     sheet_swift = (IOS_APP_DIR / "UI" / "Components" / "ExecutionProgressSheet.swift").read_text(encoding="utf-8")
     assert "interactiveDismissDisabled" in sheet_swift
     assert "localOnly" in sheet_swift

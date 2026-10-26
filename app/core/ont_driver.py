@@ -16,7 +16,7 @@ from app.core.config_models import DeviceConfig, GlobalConfig
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Shell metacharacters blocked by LuCI
-UNSAFE_SHELL_METACHARS = set('&|;$><`!\'"')
+UNSAFE_SHELL_METACHARS = {'&', '|', ';', '$', '>', '<', '`', '\\', '!', "'", '"'}
 
 
 class ONTDriverError(Exception):
@@ -411,7 +411,7 @@ class ONTDriver:
             emit("Cài đặt GPON Password (SLID)", 4, "SUCCESS", f"SLID {device_cfg.slid} đã nạp thành công")
 
             # Step 5: WiFi 2.4GHz
-            wifi24_ssid = device_cfg.ssid_24g or f"VNPT_{device_cfg.so_may}"
+            wifi24_ssid = device_cfg.ssid_24g or f"VNPT_{device_cfg.slid}"
             wifi24_pass = device_cfg.pass_24g or "1234567890"
             emit("Cấu hình Wi-Fi 2.4GHz", 5, "RUNNING", f"SSID: {wifi24_ssid}")
             self.configure_wifi(unit=0, ssid=wifi24_ssid, password=wifi24_pass, pause_settling=True)
@@ -445,8 +445,8 @@ class ONTDriver:
 
             return {
                 "status": "SUCCESS",
-                "so_may": device_cfg.so_may,
                 "slid": device_cfg.slid,
+                "so_may": device_cfg.slid,
                 "account_pppoe": device_cfg.account_pppoe,
                 "message": "Cấu hình thiết bị hoàn tất 10/10 bước an toàn",
             }

@@ -392,6 +392,7 @@ final class OntMobileDriverTests: XCTestCase {
         var freshDifferentRecord = sampleRecord
         freshDifferentRecord.rowIndex = 99
         freshDifferentRecord.soMay = "009999999"
+        freshDifferentRecord.slid = "009999999"
         freshDifferentRecord.lastKnownAdminPass = ""
 
         do {

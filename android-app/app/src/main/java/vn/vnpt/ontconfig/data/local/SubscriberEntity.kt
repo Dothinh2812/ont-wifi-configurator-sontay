@@ -66,6 +66,7 @@ data class SubscriberEntity(
             SubscriberStatus.PENDING
         }
 
+        val unifiedSlid = slid.ifBlank { soMay }
         return SubscriberRecord(
             rowIndex = rowIndex,
             stt = stt,
@@ -74,11 +75,11 @@ data class SubscriberEntity(
             tenTb = tenTb,
             diachiTb = diachiTb,
             soDt = soDt,
-            soMay = soMay,
+            soMay = unifiedSlid,
             accountPppoe = accountPppoe,
             passPppoe = passPppoe,
             maMen = maMen,
-            slid = slid,
+            slid = unifiedSlid,
             ssid24g = ssid24g,
             pass24g = pass24g,
             ssid5g = ssid5g,
@@ -105,6 +106,7 @@ data class SubscriberEntity(
             }
 
             val normPhone = record.soDt.filter { it.isDigit() }.trimStart('0')
+            val unifiedSlid = record.slid.ifBlank { record.soMay }
 
             return SubscriberEntity(
                 rowIndex = record.rowIndex,
@@ -115,11 +117,11 @@ data class SubscriberEntity(
                 diachiTb = record.diachiTb,
                 soDt = record.soDt,
                 soDtNormalized = normPhone,
-                soMay = record.soMay,
+                soMay = unifiedSlid,
                 accountPppoe = record.accountPppoe,
                 passPppoe = record.passPppoe,
                 maMen = record.maMen,
-                slid = record.slid,
+                slid = unifiedSlid,
                 ssid24g = record.ssid24g,
                 pass24g = record.pass24g,
                 ssid5g = record.ssid5g,

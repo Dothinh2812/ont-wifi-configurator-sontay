@@ -79,11 +79,12 @@ public struct SubscriberRecord: Identifiable, Codable, Equatable, Sendable {
         self.tenTb = tenTb
         self.diachiTb = diachiTb
         self.soDt = soDt
-        self.soMay = soMay
+        let unifiedSlid = slid.isEmpty ? soMay : slid
+        self.soMay = unifiedSlid
         self.accountPppoe = accountPppoe
         self.passPppoe = passPppoe
         self.maMen = maMen
-        self.slid = slid
+        self.slid = unifiedSlid
         self.ssid24g = ssid24g
         self.pass24g = pass24g
         self.ssid5g = ssid5g
@@ -100,8 +101,8 @@ public struct SubscriberRecord: Identifiable, Codable, Equatable, Sendable {
 
     public var effectiveWifi24Ssid: String {
         let trimmed = ssid24g.trimmingCharacters(in: .whitespacesAndNewlines)
-        let cleanSoMay = soMay.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "VNPT_\(cleanSoMay)" : trimmed
+        let cleanSlid = slid.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "VNPT_\(cleanSlid)" : trimmed
     }
 
     public var effectiveWifi24Pass: String {

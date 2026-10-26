@@ -730,7 +730,7 @@ public final class OntMobileDriver: @unchecked Sendable {
         let wifi24Pass = record.effectiveWifi24Pass
         let wifi5Ssid = record.effectiveWifi5Ssid
         let wifi5Pass = record.effectiveWifi5Pass
-        let recordKey = Self.recordCacheKey(rowIndex: record.rowIndex, soMay: record.soMay)
+        let recordKey = Self.recordCacheKey(rowIndex: record.rowIndex, soMay: record.slid)
 
         func emit(_ step: Int, _ title: String, _ status: StepStatus, _ detail: String) {
             onProgress?(StepProgress(stepNumber: step, totalSteps: 7, title: title, status: status, detail: detail))
@@ -901,7 +901,7 @@ public final class OntMobileDriver: @unchecked Sendable {
             probePauseMutex?.unlock()
             return MobileSetupResult(
                 success: true,
-                soMay: record.soMay,
+                soMay: record.slid,
                 slid: record.slid,
                 accountPppoe: record.accountPppoe,
                 newSsid24g: wifi24Ssid,

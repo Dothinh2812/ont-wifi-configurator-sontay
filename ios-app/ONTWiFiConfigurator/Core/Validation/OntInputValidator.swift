@@ -208,9 +208,6 @@ public enum OntInputValidator {
         if record.passPppoe.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             errors.append("Thiếu mật khẩu PPPoE - Yêu cầu nhập tay (không dùng mật khẩu giả lập)")
         }
-        if record.soMay.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            errors.append("Thiếu Số máy định danh")
-        }
         if record.accountPppoe.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             errors.append("Thiếu Account PPPoE")
         }
@@ -227,7 +224,6 @@ public enum OntInputValidator {
         }
 
         let fieldsToCheck: [(String, String)] = [
-            ("Số máy", record.soMay),
             ("SLID", record.slid),
             ("Account PPPoE", record.accountPppoe),
             ("Pass PPPoE", record.passPppoe),

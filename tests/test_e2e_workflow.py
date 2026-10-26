@@ -68,8 +68,8 @@ class TestE2EWorkflow(unittest.TestCase):
         )
 
         self.assertEqual(res["status"], "SUCCESS")
+        self.assertEqual(res["slid"], "005501941")
         self.assertEqual(res["so_may"], "005501941")
-
         # Invariant 1: All 10 steps were recorded
         steps_recorded = set(p[0] for p in progress_events)
         self.assertEqual(steps_recorded, set(range(1, 11)))

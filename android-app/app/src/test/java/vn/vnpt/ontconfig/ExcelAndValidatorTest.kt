@@ -164,6 +164,8 @@ class ExcelAndValidatorTest {
         // Simulate KTV entering missing PPPoE password on row 0 (kimthitv878) and completing setup
         val editedFirst = initial[0].copy(
             passPppoe = "ktv_entered_123",
+            slid = "NEW_SLID01",
+            soMay = "NEW_SLID01",
             ssid24g = "KimThu_New",
             pass24g = "88889999",
             ssid5g = "KimThu_New 5G",
@@ -185,6 +187,8 @@ class ExcelAndValidatorTest {
         val mergedFirst = merged[0]
         assertEquals(SubscriberStatus.SUCCESS, mergedFirst.status)
         assertEquals("ktv_entered_123", mergedFirst.passPppoe)
+        assertEquals("NEW_SLID01", mergedFirst.slid)
+        assertEquals("NEW_SLID01", mergedFirst.soMay)
         assertEquals("KimThu_New", mergedFirst.ssid24g)
         assertEquals("88889999", mergedFirst.pass24g)
         assertEquals("Passwd2@", mergedFirst.lastKnownAdminPass)
@@ -214,7 +218,7 @@ class ExcelAndValidatorTest {
             status = SubscriberStatus.FAILED,
             startTime = "10:02:00",
             endTime = "10:02:30",
-            errorMessage = "Lỗi tại sendwan.cmd: pppPassword=6l6s8z2a&wl_wpa_psk=28121995&sessionKey=123456"
+            errorMessage = "Lỗi tại sendwan.cmd: pppPassword=6l6s8z2a&wl_wpa_psk=28121995&sessionKey=123456&data=slid01"
         )
 
         val outStream = ByteArrayOutputStream()
@@ -225,7 +229,7 @@ class ExcelAndValidatorTest {
         // Re-parse the exported Excel file to verify all 30 original columns + 3 appended columns (33 total)
         val reParsed = ExcelManager.parseExcel(ByteArrayInputStream(exportedBytes))
         assertEquals(89, reParsed.size)
-        assertEquals("001560828", reParsed[0].soMay)
+        assertEquals("NEW_SLID01", reParsed[0].soMay)
         assertEquals("updated_pppoe_pass", reParsed[0].passPppoe)
         assertEquals("Updated_SSID_24G", reParsed[0].ssid24g)
         assertEquals("updated_wifi_pass", reParsed[0].pass24g)
@@ -243,9 +247,11 @@ class ExcelAndValidatorTest {
         assertFalse(secondNote!!.contains("6l6s8z2a"))
         assertFalse(secondNote.contains("28121995"))
         assertFalse(secondNote.contains("123456"))
+        assertFalse(secondNote.contains("slid01"))
         assertTrue(secondNote.contains("pppPassword=***"))
         assertTrue(secondNote.contains("wl_wpa_psk=***"))
         assertTrue(secondNote.contains("sessionKey=***"))
+        assertTrue(secondNote.contains("data=***"))
     }
 
     @Test

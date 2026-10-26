@@ -212,6 +212,8 @@ final class ExcelAndValidatorTests: XCTestCase {
 
         var editedFirst = records[0]
         editedFirst.passPppoe = "ktv_entered_123"
+        editedFirst.slid = "NEW_SLID01"
+        editedFirst.soMay = "NEW_SLID01"
         editedFirst.ssid24g = "KimThu_New"
         editedFirst.pass24g = "88889999"
         editedFirst.ssid5g = "KimThu_New 5G"
@@ -239,6 +241,8 @@ final class ExcelAndValidatorTests: XCTestCase {
         let exportedData = try ExcelManager.exportResults(sourceExcelData: data, records: records)
         let reParsed = try ExcelManager.parseExcel(data: exportedData)
         XCTAssertEqual(reParsed.count, 89)
+        XCTAssertEqual(reParsed[0].soMay, "NEW_SLID01")
+        XCTAssertEqual(reParsed[0].slid, "NEW_SLID01")
         XCTAssertEqual(reParsed[0].passPppoe, "ktv_entered_123")
         XCTAssertEqual(reParsed[0].rawRowData.count, 33)
         XCTAssertEqual(reParsed[0].rawRowData["Trạng thái cấu hình"], "SUCCESS")

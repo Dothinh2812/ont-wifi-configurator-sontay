@@ -25,6 +25,7 @@ def mask_sensitive_credentials(text: str) -> str:
         (r"(wl_wpa_psk=)([^&\s]+)", r"\1***"),
         (r"(password=)([^&\s]+)", r"\1***"),
         (r"(sessionKey=)([^&\s]+)", r"\1***"),
+        (r"(data=)([^&\s\x7f]+)", r"\1***"),
     ]
 
     for pattern, replacement in patterns:
@@ -67,7 +68,7 @@ class ONTExecutionWorker(QThread):
 
     def run(self) -> None:
         """Run the configuration workflow with strict pause/resume coordination."""
-        self.emit_log(f"Bắt đầu nạp cấu hình cho thiết bị {self.device_cfg.so_may}...")
+        self.emit_log(f"Bắt đầu nạp cấu hình cho thiết bị {self.device_cfg.slid}...")
         self.probe_pause_requested.emit()
 
         success = False
@@ -95,13 +96,17 @@ class ONTExecutionWorker(QThread):
             )
             success = True
             message = "Cấu hình thành công 10/10 bước!"
-            self.emit_log(f"Hoàn tất cấu hình thành công cho thiết bị {self.device_cfg.so_may}.")
+            self.emit_log(f"Hoàn tất cấu hình thành công cho thiết bị {self.device_cfg.slid}.")
 
         except Exception as e:
             success = False
             message = str(e)
             self.emit_log(f"LỖI trong quá trình cấu hình: {e}")
-            result = {"error": str(e), "so_may": self.device_cfg.so_may}
+            result = {
+                "error": mask_sensitive_credentials(str(e)),
+                "slid": self.device_cfg.slid,
+                "so_may": self.device_cfg.slid,
+            }
 
         finally:
             # Guarantees:

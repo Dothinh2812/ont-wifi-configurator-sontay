@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import vn.vnpt.ontconfig.core.validation.OntInputValidator
 import vn.vnpt.ontconfig.core.wifi.WifiBand
+import vn.vnpt.ontconfig.data.excel.ExcelManager
 import vn.vnpt.ontconfig.data.model.GlobalSettings
 import vn.vnpt.ontconfig.data.model.SubscriberRecord
 import vn.vnpt.ontconfig.ui.components.FooterSignatureBar
@@ -95,8 +96,8 @@ fun ConfigReviewScreen(
         keyboardType = KeyboardType.Ascii
     )
 
-    val isUsingDefaultMenSsid = record.ssid24g == "VNPT_${record.soMay}" ||
-        (record.slid.isNotBlank() && record.ssid24g == "VNPT_${record.slid}")
+    val isUsingDefaultMenSsid = record.slid.isNotBlank() &&
+        record.ssid24g == "VNPT_${record.slid.trim()}"
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -112,7 +113,7 @@ fun ConfigReviewScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "ma_tb: ${record.accountPppoe} • Số máy: ${record.soMay}",
+                            text = "ma_tb: ${record.accountPppoe} • SLID: ${record.slid}",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.9f),
                             maxLines = 1,
@@ -361,43 +362,45 @@ fun ConfigReviewScreen(
                         color = MaterialTheme.colorScheme.primary
                     )
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = record.soMay,
-                            onValueChange = { newSoMay ->
-                                onUpdateRecord(record.copy(soMay = newSoMay))
-                            },
-                            label = {
-                                Text(
-                                    text = "Số máy (SO_MAY)",
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                    val slidInvalid = record.slid.trim().isEmpty() || record.slid.trim().length > 10
+                    OutlinedTextField(
+                        value = record.slid,
+                        onValueChange = { newSlid ->
+                            val oldSlid = record.slid.trim()
+                            val wasDefaultSsid = record.ssid24g.isBlank() ||
+                                record.ssid24g == "VNPT_$oldSlid" ||
+                                record.ssid24g == "VNPT_${record.soMay.trim()}"
+                            val updatedSsid24g = if (wasDefaultSsid) {
+                                if (newSlid.trim().isNotEmpty()) "VNPT_${newSlid.trim()}" else ""
+                            } else {
+                                record.ssid24g
+                            }
+                            val updatedSsid5g = if (wasDefaultSsid && autoSyncWifi5g) {
+                                ExcelManager.deriveWifi5Ssid(updatedSsid24g, "", settings.defaultWifi5Ssid)
+                            } else {
+                                record.ssid5g
+                            }
+                            onUpdateRecord(
+                                record.copy(
+                                    slid = newSlid,
+                                    soMay = newSlid,
+                                    ssid24g = updatedSsid24g,
+                                    ssid5g = updatedSsid5g
                                 )
-                            },
-                            keyboardOptions = safeKeyboardOptions,
-                            singleLine = true,
-                            modifier = Modifier.weight(1f)
-                        )
-
-                        val slidInvalid = record.slid.trim().isEmpty() || record.slid.trim().length > 10
-                        OutlinedTextField(
-                            value = record.slid,
-                            onValueChange = { newSlid ->
-                                onUpdateRecord(record.copy(slid = newSlid))
-                            },
-                            label = {
-                                Text(
-                                    text = "SLID / MEN (${record.slid.length}/10)",
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            },
-                            isError = slidInvalid,
-                            keyboardOptions = safeKeyboardOptions,
-                            singleLine = true,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
+                            )
+                        },
+                        label = {
+                            Text(
+                                text = "SLID / Mã MEN (${record.slid.length}/10)",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        },
+                        isError = slidInvalid,
+                        keyboardOptions = safeKeyboardOptions,
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(

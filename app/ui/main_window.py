@@ -17,7 +17,7 @@ from app.core.network_probe import NetworkProbe
 from app.core.ont_driver import validate_password_complexity
 from app.data.models import DeviceRecord, DeviceStatus
 from app.data.excel_manager import ExcelManager, ExcelFileLockedError
-from app.ui.device_table_model import DeviceTableModel
+from app.ui.device_table_model import DeviceTableModel, validate_device_record
 from app.ui.worker import ONTExecutionWorker, ProbeWorker
 from app.ui.audio_alert import play_alert_sound
 from app.ui.styles import MAIN_STYLE
@@ -269,18 +269,17 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(footer_layout)
 
     def _configure_table_columns(self) -> None:
-        """Set balanced default widths so all 11 columns including Status & Notes are visible at 1200x780."""
+        """Set balanced default widths so all 10 columns including Status & Notes are visible at 1200x780."""
         col_widths = {
-            0: 36,   # STT
-            1: 82,   # Số máy
-            2: 82,   # SLID
-            3: 98,   # Account PPPoE
-            4: 104,  # Mật khẩu PPPoE
-            5: 80,   # SSID 2.4G
-            6: 90,   # Mật khẩu 2.4G
-            7: 82,   # SSID 5G
-            8: 90,   # Mật khẩu 5G
-            9: 102,  # Trạng thái
+            0: 40,   # STT
+            1: 96,   # SLID
+            2: 108,  # Account PPPoE
+            3: 112,  # Mật khẩu PPPoE
+            4: 96,   # SSID 2.4G
+            5: 98,   # Mật khẩu 2.4G
+            6: 96,   # SSID 5G
+            7: 98,   # Mật khẩu 5G
+            8: 108,  # Trạng thái
         }
         for col_idx, width in col_widths.items():
             self.table_view.setColumnWidth(col_idx, width)
@@ -333,13 +332,34 @@ class MainWindow(QMainWindow):
             if os.path.exists(checkpoint_file):
                 restored = self.excel_manager.load_checkpoint(checkpoint_file)
                 for r in self.records:
-                    if r.so_may in restored:
-                        item = restored[r.so_may]
+                    raw_so_may = str(r.raw_row_data.get("SO_MAY") or "").strip() if r.raw_row_data else ""
+                    item = (
+                        restored.get(r.slid)
+                        or (restored.get(raw_so_may) if raw_so_may else None)
+                        or restored.get(str(r.row_index))
+                    )
+                    if item:
+                        edited = False
+                        saved_slid = str(item.get("slid") or item.get("so_may") or "").strip()
+                        if saved_slid and saved_slid != r.slid:
+                            r.slid = saved_slid
+                            r.so_may = saved_slid
+                            edited = True
+                        for field_key in ("pass_pppoe", "ssid_24g", "pass_24g", "ssid_5g", "pass_5g"):
+                            if field_key in item and item[field_key] is not None:
+                                new_val = str(item[field_key]).strip()
+                                if new_val and new_val != getattr(r, field_key):
+                                    setattr(r, field_key, new_val)
+                                    edited = True
+                        if edited:
+                            r.validation_errors = validate_device_record(r)
+                            r.is_valid = len(r.validation_errors) == 0
                         r.status = DeviceStatus(item.get("status", r.status))
+                        if edited and r.is_valid and r.status == DeviceStatus.INVALID_DATA:
+                            r.status = DeviceStatus.PENDING
                         r.error_message = item.get("error_message")
                         r.start_time = item.get("start_time")
                         r.end_time = item.get("end_time")
-
             self._awaiting_next_ont = False
             self._update_summary_stats()
             self._select_first_pending_row()
@@ -488,7 +508,7 @@ class MainWindow(QMainWindow):
 
         self._awaiting_next_ont = False
         self._log(
-            f"Đã tự động nhận kết nối ONT mới. Bắt đầu đổ cấu hình tiếp cho thiết bị {rec.so_may}..."
+            f"Đã tự động nhận kết nối ONT mới. Bắt đầu đổ cấu hình tiếp cho thiết bị {rec.slid}..."
         )
         self.run_current_device()
     def _update_run_button_state(self) -> None:
@@ -599,21 +619,21 @@ class MainWindow(QMainWindow):
         self.excel_manager.save_checkpoint(self.records, checkpoint_path=get_app_path(".checkpoint_results.json"))
 
         rec = self.table_model.get_record(self.selected_row)
-        so_may = rec.so_may if rec else "N/A"
+        slid = rec.slid if rec else "N/A"
 
         if success:
             has_next = self._select_next_pending_row()
             self._awaiting_next_ont = has_next
             if has_next:
                 next_rec = self.table_model.get_record(self.selected_row)
-                next_so_may = next_rec.so_may if next_rec else "N/A"
+                next_slid = next_rec.slid if next_rec else "N/A"
                 self.lbl_progress_step.setText(
-                    f"Đã xong [{so_may}]. Đang chờ cắm ONT tiếp theo cho [{next_so_may}]..."
+                    f"Đã xong [{slid}]. Đang chờ cắm ONT tiếp theo cho [{next_slid}]..."
                 )
             play_alert_sound()
             self._completion_dialog_open = True
             try:
-                self._show_completion_dialog(so_may)
+                self._show_completion_dialog(slid)
             finally:
                 self._completion_dialog_open = False
                 self._completion_msg_box = None
@@ -624,14 +644,14 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(
                 self,
                 "Cấu Hình Thất Bại",
-                f"Cấu hình thiết bị [{so_may}] gặp lỗi:\n\n{message}\n\n"
+                f"Cấu hình thiết bị [{slid}] gặp lỗi:\n\n{message}\n\n"
                 "Bạn có thể ấn THỬ LẠI (RETRY) hoặc BỎ QUA (SKIP).",
             )
 
-    def _show_completion_dialog(self, so_may: str) -> None:
+    def _show_completion_dialog(self, slid: str) -> None:
         """Show completion dialog that also auto-closes when the next ONT is plugged in and online."""
         text = (
-            f"ĐÃ HOÀN TẤT CẤU HÌNH THIẾT BỊ [{so_may}]!\n\n"
+            f"ĐÃ HOÀN TẤT CẤU HÌNH THIẾT BỊ [{slid}]!\n\n"
             "Vui lòng rút cáp mạng và cắm thiết bị tiếp theo."
         )
         # Preserve mock compatibility if QMessageBox.information is patched in unit tests

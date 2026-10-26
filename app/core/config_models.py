@@ -28,10 +28,10 @@ def get_app_path(relative_path: str = "") -> str:
 @dataclass
 class DeviceConfig:
     """Configuration parameters for a single ONT device."""
-    so_may: str
-    slid: str
-    account_pppoe: str
-    pass_pppoe: str
+    so_may: str = ""
+    slid: str = ""
+    account_pppoe: str = ""
+    pass_pppoe: str = ""
     ssid_24g: str = ""
     pass_24g: str = ""
     ssid_5g: str = ""
@@ -41,6 +41,11 @@ class DeviceConfig:
     diachi_tb: Optional[str] = None
     so_dt: Optional[str] = None
     extra_data: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        effective = (self.slid or self.so_may or "").strip()
+        self.slid = effective
+        self.so_may = effective
 
 
 @dataclass
