@@ -253,4 +253,38 @@ final class ExcelAndValidatorTests: XCTestCase {
         XCTAssertFalse(secondNote.contains("6l6s8z2a"))
         XCTAssertTrue(secondNote.contains("pppPassword=***"))
     }
+
+    func testWifiSecurityModeCodableBackwardCompatibilityAndOpenModeValidation() throws {
+        XCTAssertEqual(WifiSecurityMode.allCases.count, 6)
+        XCTAssertEqual(WifiSecurityMode.wpaWpa2Psk.crypto, "tkip+aes")
+        XCTAssertEqual(WifiSecurityMode.wpaPsk.crypto, "tkip+aes")
+        XCTAssertEqual(WifiSecurityMode.open.akmPsk, "disabled")
+        XCTAssertFalse(WifiSecurityMode.open.requiresPassword)
+
+        // Legacy JSON without wifiSecurityMode must decode with default wpa2_wpa3_psk (RT-07)
+        let legacyJson = """
+        {"baseUrl":"https://192.168.1.1","adminDefaultPass":"admin","adminNewPass":"Passwd2@","vlanId":11,"mtu":1492,"defaultWifi5Ssid":"VNPT 5G","defaultWifi5Pass":"1234567890","lanIp":"192.168.1.1","lanMask":"255.255.255.0","dhcpStart":"192.168.1.2","dhcpEnd":"192.168.1.254","dhcpLease":1440,"brName":"br-lan","requestTimeoutMs":5000}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(GlobalSettings.self, from: legacyJson)
+        XCTAssertEqual(decoded.wifiSecurityMode, "wpa2_wpa3_psk")
+
+        let shortPassRec = SubscriberRecord(
+            rowIndex: 2,
+            soMay: "005501941",
+            accountPppoe: "manh9653",
+            passPppoe: "6l6s8z2a",
+            slid: "005501941",
+            ssid24g: "Manh Ngoc",
+            pass24g: "3011965",
+            ssid5g: "Manh Ngoc 5G",
+            pass5g: "3011965"
+        )
+        let openCheck = OntInputValidator.validateBeforeRun(
+            shortPassRec,
+            settings: GlobalSettings(wifiSecurityMode: "open")
+        )
+        XCTAssertTrue(openCheck.isValid, "Open mode must allow short/empty password: \(openCheck.errors)")
+        XCTAssertFalse(openCheck.canPrependZero24g)
+        XCTAssertFalse(openCheck.canPrependZero5g)
+    }
 }

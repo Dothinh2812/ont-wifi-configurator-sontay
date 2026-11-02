@@ -263,39 +263,58 @@ public enum OntInputValidator {
         let importResult = validateOnImport(record)
         var errors = importResult.errors
 
+        let cleanSec = settings.wifiSecurityMode.trimmingCharacters(in: .whitespacesAndNewlines)
+        let secMode = WifiSecurityMode(rawValue: cleanSec)
+        if secMode == nil {
+            errors.append("Chế độ bảo mật Wi-Fi '\(settings.wifiSecurityMode)' không hợp lệ")
+        }
+        let requiresPassword = secMode?.requiresPassword ?? true
+
         let ssid24 = record.effectiveWifi24Ssid
         let pass24 = record.effectiveWifi24Pass
         let ssid5 = record.effectiveWifi5Ssid
         let pass5 = record.effectiveWifi5Pass
 
-        if !(1...32).contains(ssid24.count) {
-            errors.append("SSID Wi-Fi 2.4G phải dài từ 1..32 ký tự (hiện tại: \(ssid24.count))")
-        } else if !isPrintableAscii(ssid24) {
+        if !(1...32).contains(ssid24.count) || ssid24.trimmingCharacters(in: .whitespaces).isEmpty {
+            errors.append("SSID Wi-Fi 2.4G phải dài từ 1..32 ký tự và không chứa toàn dấu cách (hiện tại: \(ssid24.count))")
+        }
+        if !isPrintableAscii(ssid24) {
             errors.append("SSID Wi-Fi 2.4G chỉ chấp nhận ký tự ASCII in được (0x20..0x7E)")
         }
 
-        if !(1...32).contains(ssid5.count) {
-            errors.append("SSID Wi-Fi 5G phải dài từ 1..32 ký tự (hiện tại: \(ssid5.count))")
-        } else if !isPrintableAscii(ssid5) {
+        if !(1...32).contains(ssid5.count) || ssid5.trimmingCharacters(in: .whitespaces).isEmpty {
+            errors.append("SSID Wi-Fi 5G phải dài từ 1..32 ký tự và không chứa toàn dấu cách (hiện tại: \(ssid5.count))")
+        }
+        if !isPrintableAscii(ssid5) {
             errors.append("SSID Wi-Fi 5G chỉ chấp nhận ký tự ASCII in được (0x20..0x7E)")
         }
 
-        let canFix24 = canPrependLeadingZeroToWifiPass(pass24)
-        let canFix5 = canPrependLeadingZeroToWifiPass(pass5)
+        let canFix24 = requiresPassword && canPrependLeadingZeroToWifiPass(pass24)
+        let canFix5 = requiresPassword && canPrependLeadingZeroToWifiPass(pass5)
 
-        if !(8...63).contains(pass24.count) {
-            let hint = canFix24 ? " — Gợi ý: bấm 'Thêm số 0 ở đầu (0\(pass24))'" : ""
-            errors.append("Mật khẩu Wi-Fi 2.4G (\(pass24.count)/8 ký tự): chuẩn WPA2 yêu cầu từ 8..63 ký tự\(hint)")
-        } else if !isPrintableAscii(pass24) {
-            errors.append("Mật khẩu Wi-Fi 2.4G chỉ chấp nhận ký tự ASCII in được (0x20..0x7E)")
+        if requiresPassword {
+            if !(8...63).contains(pass24.count) || pass24.trimmingCharacters(in: .whitespaces).isEmpty {
+                let hint = canFix24 ? " — Gợi ý: bấm 'Thêm số 0 ở đầu (0\(pass24))'" : ""
+                errors.append("Mật khẩu Wi-Fi 2.4G (\(pass24.count)/8 ký tự): chuẩn \(secMode?.shortLabel ?? "WPA2") yêu cầu từ 8..63 ký tự\(hint)")
+            }
+            if !isPrintableAscii(pass24) {
+                errors.append("Mật khẩu Wi-Fi 2.4G chỉ chấp nhận ký tự ASCII in được (0x20..0x7E)")
+            }
+
+            if !(8...63).contains(pass5.count) || pass5.trimmingCharacters(in: .whitespaces).isEmpty {
+                errors.append("Mật khẩu Wi-Fi 5G (\(pass5.count)/8 ký tự): chuẩn \(secMode?.shortLabel ?? "WPA2") yêu cầu từ 8..63 ký tự")
+            }
+            if !isPrintableAscii(pass5) {
+                errors.append("Mật khẩu Wi-Fi 5G chỉ chấp nhận ký tự ASCII in được (0x20..0x7E)")
+            }
+        } else {
+            if !record.pass24g.isEmpty && !isPrintableAscii(record.pass24g) {
+                errors.append("Mật khẩu Wi-Fi 2.4G chỉ chấp nhận ký tự ASCII in được (0x20..0x7E)")
+            }
+            if !record.pass5g.isEmpty && !isPrintableAscii(record.pass5g) {
+                errors.append("Mật khẩu Wi-Fi 5G chỉ chấp nhận ký tự ASCII in được (0x20..0x7E)")
+            }
         }
-
-        if !(8...63).contains(pass5.count) {
-            errors.append("Mật khẩu Wi-Fi 5G (\(pass5.count)/8 ký tự): chuẩn WPA2 yêu cầu từ 8..63 ký tự")
-        } else if !isPrintableAscii(pass5) {
-            errors.append("Mật khẩu Wi-Fi 5G chỉ chấp nhận ký tự ASCII in được (0x20..0x7E)")
-        }
-
         errors.append(contentsOf: validateAdminPassword(settings.adminNewPass))
 
         return ValidationResult(

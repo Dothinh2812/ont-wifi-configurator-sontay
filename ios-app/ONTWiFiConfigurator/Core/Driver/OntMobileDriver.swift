@@ -42,6 +42,7 @@ public struct MobileSetupResult: Equatable, Sendable {
     public let updatedAdminPass: String
     public let message: String
     public let beaconVerified: Bool
+    public let wifiSecurityMode: String
 
     public init(
         success: Bool,
@@ -54,7 +55,8 @@ public struct MobileSetupResult: Equatable, Sendable {
         newPass5g: String,
         updatedAdminPass: String,
         message: String,
-        beaconVerified: Bool = false
+        beaconVerified: Bool = false,
+        wifiSecurityMode: String = WifiSecurityMode.wpa2Wpa3Psk.rawValue
     ) {
         self.success = success
         self.soMay = soMay
@@ -67,6 +69,7 @@ public struct MobileSetupResult: Equatable, Sendable {
         self.updatedAdminPass = updatedAdminPass
         self.message = message
         self.beaconVerified = beaconVerified
+        self.wifiSecurityMode = wifiSecurityMode
     }
 }
 
@@ -521,33 +524,64 @@ public final class OntMobileDriver: @unchecked Sendable {
         unit: Int,
         ssid: String,
         password: String,
+        secMode: String = WifiSecurityMode.wpa2Wpa3Psk.rawValue,
         isConnectedBandFinalStep: Bool = false
     ) async throws -> WifiApplyOutcome {
-        try OntInputValidator.sanitizeInputMetacharacters(ssid)
-        try OntInputValidator.sanitizeInputMetacharacters(password)
+        let cleanSec = secMode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let mode = WifiSecurityMode(rawValue: cleanSec) else {
+            throw OntValidationError("Chế độ bảo mật Wi-Fi '\(secMode)' không hợp lệ.")
+        }
+        do {
+            try OntInputValidator.sanitizeInputMetacharacters(ssid)
+            try OntInputValidator.sanitizeInputMetacharacters(password)
+        } catch {
+            throw OntValidationError(error.localizedDescription)
+        }
+        if !(1...32).contains(ssid.count) || ssid.trimmingCharacters(in: .whitespaces).isEmpty || !OntInputValidator.isPrintableAscii(ssid) {
+            throw OntValidationError("SSID Wi-Fi unit=\(unit) phải từ 1..32 ký tự ASCII in được và không chứa toàn dấu cách.")
+        }
+        if !OntInputValidator.isPrintableAscii(password) {
+            throw OntValidationError("Mật khẩu Wi-Fi unit=\(unit) chỉ chấp nhận ký tự ASCII in được (0x20..0x7E).")
+        }
+        if mode.requiresPassword && (!(8...63).contains(password.count) || password.trimmingCharacters(in: .whitespaces).isEmpty) {
+            throw OntValidationError("Mật khẩu Wi-Fi unit=\(unit) phải dài từ 8..63 ký tự ASCII và không chứa toàn dấu cách.")
+        }
 
         let encSsid = OntInputValidator.urlEncodeFormValue(ssid)
         let encPass = OntInputValidator.urlEncodeFormValue(password)
+        let encSec = OntInputValidator.urlEncodeFormValue(mode.rawValue)
+        let encKey = OntInputValidator.urlEncodeFormValue(currentSessionKey)
 
         let cfgPayload =
             "page=ssid.asp&action=Apply&wl_unit=\(unit)&wl_radio=1&wl_bssid=0&wl_bss_enabled=1" +
-            "&wl_ssid=\(encSsid)&wl_bss_maxassoc=32&wl_closed=0&sec_mode=wpa2_wpa3_psk" +
+            "&wl_ssid=\(encSsid)&wl_bss_maxassoc=32&wl_closed=0&sec_mode=\(encSec)" +
             "&wl_wpa_psk=\(encPass)&wl_mode=null&wl_auth=0&wl_auth_mode=radius&wl_osenen=0" +
-            "&wl_akm=&wl_akm_wpa=disabled&wl_akm_psk=enabled&wl_akm_wpa2=disabled&wl_akm_psk2=enabled" +
-            "&wl_akm_brcm_psk=disabled&wl_preauth=disabled&wl_wep=disabled&wl_crypto=aes" +
-            "&wl_radius_ipaddr=0.0.0.0&wl_radius_port=1812&wl_radius_key=1234&sessionKey=\(currentSessionKey)"
+            "&wl_akm=&wl_akm_wpa=disabled&wl_akm_psk=\(mode.akmPsk)&wl_akm_wpa2=disabled&wl_akm_psk2=\(mode.akmPsk2)" +
+            "&wl_akm_brcm_psk=disabled&wl_preauth=disabled&wl_wep=disabled&wl_crypto=\(mode.crypto)" +
+            "&wl_radius_ipaddr=0.0.0.0&wl_radius_port=1812&wl_radius_key=1234&sessionKey=\(encKey)"
 
         var cfgSavedToNvram = false
         var droppedDuringRadioReload = false
 
         do {
             let cfgResp = try await postForm(path: "/cgi-bin/luci/wirelesscfg.json", rawPayload: cfgPayload)
-            _ = try parseJsonOrThrow(
+            let cfgJson = try parseJsonOrThrow(
                 stepContext: "Cài đặt Wi-Fi unit=\(unit) (wirelesscfg.json)",
                 statusCode: cfgResp.statusCode,
                 body: cfgResp.body
             )
+            let cfgStatus = stringValue(cfgJson, "status").trimmingCharacters(in: .whitespacesAndNewlines)
+            if cfgStatus == "conflict_mesh" {
+                throw OntDriverException(
+                    "ONT đang chạy Mesh nên không cho phép đổi chế độ bảo mật Wi-Fi sang Open (chỉ hỗ trợ WPA2-PSK hoặc WPA-PSK/WPA2-PSK)."
+                )
+            }
+            if !cfgStatus.isEmpty && cfgStatus != "OK" {
+                throw OntDriverException("Cài đặt Wi-Fi unit=\(unit) bị từ chối (status=\(cfgStatus))")
+            }
             cfgSavedToNvram = true
+        } catch let err as OntDriverException {
+            throw err
         } catch {
             if isConnectedBandFinalStep && isPostFlushRadioDrop(error) {
                 droppedDuringRadioReload = true
@@ -726,10 +760,14 @@ public final class OntMobileDriver: @unchecked Sendable {
             throw OntValidationError(preRunCheck.errors.joined(separator: "; "))
         }
 
+        let cleanSec = settings.wifiSecurityMode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let secMode = WifiSecurityMode(rawValue: cleanSec) else {
+            throw OntValidationError("Chế độ bảo mật Wi-Fi '\(settings.wifiSecurityMode)' không hợp lệ.")
+        }
         let wifi24Ssid = record.effectiveWifi24Ssid
-        let wifi24Pass = record.effectiveWifi24Pass
+        let wifi24Pass = record.effectiveWifi24Pass(secMode: secMode.rawValue)
         let wifi5Ssid = record.effectiveWifi5Ssid
-        let wifi5Pass = record.effectiveWifi5Pass
+        let wifi5Pass = record.effectiveWifi5Pass(secMode: secMode.rawValue)
         let recordKey = Self.recordCacheKey(rowIndex: record.rowIndex, soMay: record.slid)
 
         func emit(_ step: Int, _ title: String, _ status: StepStatus, _ detail: String) {
@@ -803,6 +841,7 @@ public final class OntMobileDriver: @unchecked Sendable {
                 unit: step6Unit,
                 ssid: step6Ssid,
                 password: step6Pass,
+                secMode: secMode.rawValue,
                 isConnectedBandFinalStep: false
             )
             if settlingDelayMs > 0 {
@@ -822,6 +861,7 @@ public final class OntMobileDriver: @unchecked Sendable {
                         unit: step7Unit,
                         ssid: step7Ssid,
                         password: step7Pass,
+                        secMode: secMode.rawValue,
                         isConnectedBandFinalStep: true
                     )
                     if step7Outcome.cfgSavedToNvram {
@@ -849,6 +889,9 @@ public final class OntMobileDriver: @unchecked Sendable {
                         break
                     }
                 } catch {
+                    if error is OntValidationError || (error is OntDriverException && !(error is OntNetworkError)) {
+                        throw error
+                    }
                     lastStep7Error = error
                     if step7Attempt < 3 {
                         emit(
@@ -910,7 +953,8 @@ public final class OntMobileDriver: @unchecked Sendable {
                 newPass5g: wifi5Pass,
                 updatedAdminPass: settings.adminNewPass,
                 message: "Cấu hình hoàn tất 7/7 bước! Wi-Fi mới: \(wifi24Ssid) / \(wifi5Ssid)",
-                beaconVerified: step7Outcome.cfgSavedToNvram || step7Outcome.droppedDuringRadioReload
+                beaconVerified: step7Outcome.cfgSavedToNvram || step7Outcome.droppedDuringRadioReload,
+                wifiSecurityMode: secMode.rawValue
             )
         } catch {
             await Task.detached {

@@ -68,3 +68,7 @@ class GlobalConfig:
     request_timeout: float = 5.0
     settling_pause_wifi: float = 2.0
     debounce_probe_count: int = 3
+    enable_firmware_update: bool = False
+    firmware_path: str = ""
+    firmware_upload_timeout: float = 120.0
+    wifi_security_mode: str = "wpa2_wpa3_psk"

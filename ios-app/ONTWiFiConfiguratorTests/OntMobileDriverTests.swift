@@ -405,4 +405,89 @@ final class OntMobileDriverTests: XCTestCase {
             XCTAssertTrue(error.localizedDescription.contains("2"))
         }
     }
+
+    func testConfigureWifiBandAllSixSecurityModesAndConflictMeshNoRetry() async throws {
+        var wirelessBodies: [String] = []
+        MockLuciURLProtocol.requestHandler = { req, body in
+            let url = req.url ?? URL(string: "https://192.168.1.1/")!
+            let path = url.path.isEmpty ? "/" : url.path
+            if path == "/cgi-bin/luci/wirelesscfg.json" {
+                wirelessBodies.append(body)
+            }
+            return self.makeHTTPResponse(url: url, body: """
+            {"status":"OK","_wlrestart_":"0"}
+            """)
+        }
+
+        let driver = OntMobileDriver(
+            baseUrl: baseUrl,
+            settlingDelayMs: 5,
+            protocolClasses: [MockLuciURLProtocol.self]
+        )
+
+        for mode in WifiSecurityMode.allCases {
+            wirelessBodies.removeAll()
+            let pw = mode.requiresPassword ? "28121995" : ""
+            _ = try await driver.configureWifiBand(
+                unit: 0,
+                ssid: "Manh Ngoc",
+                password: pw,
+                secMode: mode.rawValue,
+                isConnectedBandFinalStep: false
+            )
+            XCTAssertEqual(wirelessBodies.count, 1)
+            let body = wirelessBodies[0]
+            XCTAssertTrue(body.contains("sec_mode=\(mode.rawValue)"))
+            XCTAssertTrue(body.contains("wl_akm_psk=\(mode.akmPsk)"))
+            XCTAssertTrue(body.contains("wl_akm_psk2=\(mode.akmPsk2)"))
+            XCTAssertTrue(body.contains("wl_crypto=\(mode.crypto)"))
+        }
+
+        // Verify conflict_mesh in Step 7 throws OntDriverException (not OntNetworkError) without retrying 3x (RT-01)
+        var step7Attempts = 0
+        MockLuciURLProtocol.requestHandler = { req, body in
+            let url = req.url ?? URL(string: "https://192.168.1.1/")!
+            let path = url.path.isEmpty ? "/" : url.path
+            switch path {
+            case "/":
+                return self.makeHTTPResponse(url: url, body: "<html>VNPT iGate GW040-NSv2</html>")
+            case "/cgi-bin/luci/login.cmd":
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK","firstlog":"0","sessionKey":"sess_mesh"}
+                """)
+            case "/cgi-bin/luci/wancfg.json":
+                return self.makeHTTPResponse(url: url, body: """
+                {"wanCfg":[]}
+                """)
+            case "/cgi-bin/luci/wirelesscfg.json":
+                if body.contains("wl_unit=0") {
+                    step7Attempts += 1
+                    return self.makeHTTPResponse(url: url, body: """
+                    {"status":"conflict_mesh"}
+                    """)
+                }
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK"}
+                """)
+            default:
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK","_wlrestart_":"0"}
+                """)
+            }
+        }
+
+        do {
+            _ = try await driver.executeMobileSetup(
+                record: sampleRecord,
+                settings: GlobalSettings(baseUrl: baseUrl, wifiSecurityMode: "open"),
+                connectedBand: .band24GHz
+            )
+            XCTFail("Expected OntDriverException on conflict_mesh")
+        } catch let err as OntNetworkError {
+            XCTFail("conflict_mesh must not be wrapped as OntNetworkError: \(err)")
+        } catch let err as OntDriverException {
+            XCTAssertTrue(err.localizedDescription.contains("Mesh"))
+        }
+        XCTAssertEqual(step7Attempts, 1, "conflict_mesh must not retry 3 times in Step 7")
+    }
 }

@@ -2,6 +2,7 @@
 
 import os
 import unittest
+import tempfile
 from unittest.mock import MagicMock, patch
 
 # Ensure Qt platform offscreen for headless testing
@@ -78,6 +79,19 @@ class TestCredentialMasking(unittest.TestCase):
         self.assertNotIn("001560828", masked3)
         self.assertIn("newPass=***", masked3)
         self.assertIn("data=***", masked3)
+
+        log4 = 'Response JSON: {"status": "valid", "sessionKey": "47286a1b2def03a82dcf2b47e8960d55"}'
+        masked4 = mask_sensitive_credentials(log4)
+        self.assertNotIn("47286a1b2def03a82dcf2b47e8960d55", masked4)
+        self.assertIn('"sessionKey": "***"', masked4)
+
+        # \x7f delimiter masking (RT-04)
+        log5 = "wl_wpa_psk=MySecretPass\x7fwl_ssid=Home\x7fsessionKey=tok999\x7fother=1"
+        masked5 = mask_sensitive_credentials(log5)
+        self.assertNotIn("MySecretPass", masked5)
+        self.assertNotIn("tok999", masked5)
+        self.assertIn("wl_wpa_psk=***\x7f", masked5)
+        self.assertIn("sessionKey=***\x7f", masked5)
 class TestDeviceTableModel(unittest.TestCase):
     def setUp(self):
         self.manager = ExcelManager()
@@ -184,6 +198,39 @@ class TestONTExecutionWorker(unittest.TestCase):
         self.assertTrue(len(finished_called) > 0)
         self.assertTrue(finished_called[0][0])  # success == True
 
+
+    @patch("app.core.ont_driver.ONTDriver.execute_full_setup")
+    def test_worker_cancel_during_step_10_success_does_not_abort(self, mock_setup):
+        rec = DeviceRecord(
+            row_index=2,
+            so_may="005501941",
+            slid="005501941",
+            account_pppoe="manh9653",
+            pass_pppoe="6l6s8z2a",
+        )
+        global_cfg = GlobalConfig(enable_firmware_update=True, firmware_path="/tmp/fw.signed")
+        worker = ONTExecutionWorker(rec.to_device_config(), global_cfg)
+
+        def fake_setup(device_cfg, global_cfg, progress_cb=None):
+            progress_cb("Nâng cấp Firmware", 10, 11, "RUNNING", "Đang tải...")
+            # Simulate user clicking cancel while file upload is in-flight
+            worker.cancel()
+            # Step 10 completes with SUCCESS -> must NOT raise RuntimeError on SUCCESS status
+            progress_cb("Nâng cấp Firmware", 10, 11, "SUCCESS", "Đã tải xong")
+            progress_cb("Hoàn tất", 11, 11, "SUCCESS", "Khởi động lại")
+            return {"status": "SUCCESS", "firmware_updated": True, "firmware_file": "fw.signed"}
+
+        mock_setup.side_effect = fake_setup
+        finished_events = []
+        worker.finished.connect(lambda ok, msg, res: finished_events.append((ok, msg, res)))
+        worker.run()
+
+        self.assertEqual(len(finished_events), 1)
+        ok, msg, res = finished_events[0]
+        self.assertTrue(ok)
+        self.assertIn("11/11", msg)
+        self.assertIn("fw.signed", msg)
+        self.assertTrue(res.get("firmware_updated"))
 
 class TestProbeWorker(unittest.TestCase):
     def setUp(self):
@@ -304,6 +351,31 @@ class TestNetworkProbeFingerprint(unittest.TestCase):
         self.assertTrue(probe.is_online)
         self.assertTrue(probe.has_seen_offline)
 
+
+    @patch("requests.Session.get")
+    def test_probe_reset_clears_current_mac_and_detects_same_device(self, mock_get):
+        probe = NetworkProbe(base_url="https://192.168.1.1", required_consecutive_success=1)
+        mock_get.return_value = MagicMock(status_code=200, text='<script src="login.js"></script>')
+
+        with patch.object(probe, "_get_gateway_mac", return_value="aa:bb:cc:dd:ee:01"):
+            self.assertTrue(probe.probe_once())
+            self.assertEqual(probe._current_mac, "aa:bb:cc:dd:ee:01")
+            self.assertFalse(probe.is_same_device_as_last_reset)
+
+        probe.reset()
+        self.assertEqual(probe._last_reset_mac, "aa:bb:cc:dd:ee:01")
+        self.assertIsNone(probe._current_mac)
+        self.assertFalse(probe.is_same_device_as_last_reset)
+
+        # Same ONT #1 comes back online with identical MAC -> is_same_device_as_last_reset is True
+        with patch.object(probe, "_get_gateway_mac", return_value="aa:bb:cc:dd:ee:01"):
+            self.assertTrue(probe.probe_once())
+            self.assertTrue(probe.is_same_device_as_last_reset)
+
+        # Different ONT #2 plugged in with new MAC -> is_same_device_as_last_reset is False
+        with patch.object(probe, "_get_gateway_mac", return_value="aa:bb:cc:dd:ee:02"):
+            self.assertTrue(probe.probe_once())
+            self.assertFalse(probe.is_same_device_as_last_reset)
 
 class TestWorkerInThreadCancel(unittest.TestCase):
     def test_cancel_does_not_call_logout_on_caller_thread(self):
@@ -525,5 +597,133 @@ class TestMainWindowHeadless(unittest.TestCase):
                  patch.object(self.win.table_view, "state", return_value=QAbstractItemView.State.NoState):
                 self.win.keyPressEvent(space_event)
                 mock_run.assert_called_once()
+
+    @patch("PyQt6.QtWidgets.QMessageBox.warning")
+    @patch("app.ui.main_window.ONTExecutionWorker")
+    def test_firmware_update_ui_controls_and_run_gating(self, mock_worker_cls, mock_warn):
+        mock_worker = MagicMock()
+        mock_worker.isRunning.return_value = False
+        mock_worker_cls.return_value = mock_worker
+
+        # Default state: checkbox is unchecked
+        self.assertFalse(self.win.chk_enable_fw_update.isChecked())
+        self.win.probe._is_online = True
+        self.win._update_run_button_state()
+        self.assertTrue(self.win.btn_run.isEnabled())
+
+        # Enable firmware update with invalid path -> RUN disabled & warning on run_current_device
+        self.win.txt_fw_path.setText("/nonexistent/fw_invalid.signed")
+        self.win.chk_enable_fw_update.setChecked(True)
+        self.assertFalse(self.win.btn_run.isEnabled())
+        self.win.run_current_device()
+        mock_warn.assert_called_once()
+        mock_worker_cls.assert_not_called()
+
+        # Set valid firmware file -> RUN enabled & snapshot GlobalConfig passed to worker
+        mock_warn.reset_mock()
+        with tempfile.NamedTemporaryFile(suffix=".signed", delete=False) as tf:
+            tf.write(b"FIRMWARE_IMAGE" * 1024)
+            valid_fw = tf.name
+        self.addCleanup(lambda: os.path.exists(valid_fw) and os.remove(valid_fw))
+
+        self.win.txt_fw_path.setText(valid_fw)
+        self.assertTrue(self.win.btn_run.isEnabled())
+        self.win.run_current_device()
+        mock_warn.assert_not_called()
+        mock_worker_cls.assert_called_once()
+        passed_cfg = mock_worker_cls.call_args[0][1]
+        self.assertIsNot(passed_cfg, self.win.global_cfg)
+        self.assertTrue(passed_cfg.enable_firmware_update)
+        self.assertEqual(passed_cfg.firmware_path, valid_fw)
+        self.assertEqual(self.win.progress_bar.maximum(), 11)
+
+    @patch("PyQt6.QtWidgets.QMessageBox.information")
+    @patch("app.ui.main_window.play_alert_sound")
+    def test_firmware_reboot_hot_swap_protection_blocks_14s_window_and_same_mac(
+        self, mock_beep, mock_msgbox
+    ):
+        with tempfile.NamedTemporaryFile(suffix=".signed", delete=False) as tf:
+            tf.write(b"FW_DATA" * 512)
+            valid_fw = tf.name
+        self.addCleanup(lambda: os.path.exists(valid_fw) and os.remove(valid_fw))
+
+        self.win.txt_fw_path.setText(valid_fw)
+        self.win.chk_enable_fw_update.setChecked(True)
+
+        # Pause background probe thread before setting mock state so in-flight probe doesn't overwrite MAC
+        self.win.probe_worker.pause()
+        self.win.probe._is_online = True
+        self.win.probe._consecutive_success = 3
+        self.win.probe._current_mac = "11:22:33:44:55:01"
+
+        with patch.object(self.win, "run_current_device") as mock_run_next:
+            self.win._on_worker_finished(
+                True,
+                "Cấu hình & Nạp Firmware thành công 11/11 bước!",
+                {"status": "SUCCESS", "firmware_updated": True, "firmware_file": os.path.basename(valid_fw)},
+            )
+            # Pause again after _on_worker_finished resumed it so deterministic state transitions are tested cleanly
+            self.win.probe_worker.pause()
+            self.assertTrue(self.win._awaiting_fw_reboot_disconnect)
+            self.assertEqual(self.win.probe._last_reset_mac, "11:22:33:44:55:01")
+            self.assertIsNone(self.win.probe._current_mac)
+
+            # 1. During 14s window where uHTTPd of ONT #1 still responds (has_seen_offline=False)
+            self.win.probe._is_online = True
+            self.win.probe._consecutive_success = 3
+            self.win.probe._has_seen_offline = False
+            self.win._on_probe_status_changed(True, 3)
+            self.assertFalse(self.win.btn_run.isEnabled())
+            mock_run_next.assert_not_called()
+
+            # 2. ONT #1 goes offline while rebooting, then comes back online 2 min later with SAME MAC
+            self.win.probe._has_seen_offline = True
+            self.win.probe._current_mac = "11:22:33:44:55:01"
+            self.assertTrue(self.win.probe.is_same_device_as_last_reset)
+            self.win._on_probe_status_changed(True, 3)
+            self.assertTrue(self.win._awaiting_fw_reboot_disconnect)
+            self.assertFalse(self.win.btn_run.isEnabled())
+            mock_run_next.assert_not_called()
+
+            # 3. Technician plugs in ONT #2 with DIFFERENT MAC -> unlocks and auto-runs!
+            self.win.probe._current_mac = "11:22:33:44:55:02"
+            self.assertFalse(self.win.probe.is_same_device_as_last_reset)
+            self.win._on_probe_status_changed(True, 3)
+            self.assertFalse(self.win._awaiting_fw_reboot_disconnect)
+            mock_run_next.assert_called_once()
+
+    @patch("PyQt6.QtWidgets.QMessageBox.warning")
+    @patch("app.ui.main_window.ONTExecutionWorker")
+    def test_wifi_security_mode_combobox_and_preflight_gating(self, mock_worker_cls, mock_warn):
+        mock_worker = MagicMock()
+        mock_worker.isRunning.return_value = False
+        mock_worker_cls.return_value = mock_worker
+
+        # Default mode is wpa2_wpa3_psk with 6 options
+        self.assertEqual(self.win.cmb_wifi_sec_mode.count(), 6)
+        self.assertEqual(self.win.cmb_wifi_sec_mode.currentData(), "wpa2_wpa3_psk")
+
+        # Select row with 7-char Wi-Fi password -> blocked in PSK mode, allowed in Open mode
+        rec = self.win.table_model.get_record(self.win.selected_row)
+        rec.pass_24g = "1234567"
+        self.win.probe._is_online = True
+        self.win._update_run_button_state()
+
+        self.win.run_current_device()
+        mock_warn.assert_called_once()
+        mock_worker_cls.assert_not_called()
+
+        # Switch combobox to Open mode -> allowed!
+        mock_warn.reset_mock()
+        open_idx = self.win.cmb_wifi_sec_mode.findData("open")
+        self.assertGreaterEqual(open_idx, 0)
+        self.win.cmb_wifi_sec_mode.setCurrentIndex(open_idx)
+        self.assertEqual(self.win.global_cfg.wifi_security_mode, "open")
+
+        self.win.run_current_device()
+        mock_warn.assert_not_called()
+        mock_worker_cls.assert_called_once()
+        passed_cfg = mock_worker_cls.call_args[0][1]
+        self.assertEqual(passed_cfg.wifi_security_mode, "open")
 if __name__ == "__main__":
     unittest.main()

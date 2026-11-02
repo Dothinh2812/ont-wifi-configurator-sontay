@@ -18,13 +18,14 @@ def mask_sensitive_credentials(text: str) -> str:
         text = str(text or "")
 
     patterns = [
-        (r"(pppPassword=)([^&\s]+)", r"\1***"),
-        (r"(pass=)([^&\s]+)", r"\1***"),
-        (r"(newPass=)([^&\s]+)", r"\1***"),
-        (r"(oldPass=)([^&\s]+)", r"\1***"),
-        (r"(wl_wpa_psk=)([^&\s]+)", r"\1***"),
-        (r"(password=)([^&\s]+)", r"\1***"),
-        (r"(sessionKey=)([^&\s]+)", r"\1***"),
+        (r"(pppPassword=)([^&\s\x7f]+)", r"\1***"),
+        (r"(pass=)([^&\s\x7f]+)", r"\1***"),
+        (r"(newPass=)([^&\s\x7f]+)", r"\1***"),
+        (r"(oldPass=)([^&\s\x7f]+)", r"\1***"),
+        (r"(wl_wpa_psk=)([^&\s\x7f]+)", r"\1***"),
+        (r"(password=)([^&\s\x7f]+)", r"\1***"),
+        (r"(sessionKey=)([^&\s\x7f]+)", r"\1***"),
+        (r'("sessionKey"\s*:\s*")([^"]+)', r'\1***'),
         (r"(data=)([^&\s\x7f]+)", r"\1***"),
     ]
 
@@ -84,7 +85,7 @@ class ONTExecutionWorker(QThread):
             def progress_callback(
                 step_name: str, step_num: int, total_steps: int, status: str, detail: str
             ):
-                if self._is_cancelled:
+                if self._is_cancelled and status == "RUNNING":
                     raise RuntimeError("Tiến trình đã bị người dùng hủy bỏ (Cancelled).")
                 self.step_progress.emit(step_name, step_num, total_steps, status, detail)
                 self.emit_log(f"[Bước {step_num}/{total_steps}] {step_name}: {status} - {detail}")
@@ -95,15 +96,19 @@ class ONTExecutionWorker(QThread):
                 progress_cb=progress_callback,
             )
             success = True
-            message = "Cấu hình thành công 10/10 bước!"
+            if result.get("firmware_updated"):
+                fw_file = result.get("firmware_file", "")
+                message = f"Cấu hình & Nạp Firmware ({fw_file}) thành công 11/11 bước!"
+            else:
+                message = "Cấu hình thành công 10/10 bước!"
             self.emit_log(f"Hoàn tất cấu hình thành công cho thiết bị {self.device_cfg.slid}.")
 
         except Exception as e:
             success = False
-            message = str(e)
+            message = mask_sensitive_credentials(str(e))
             self.emit_log(f"LỖI trong quá trình cấu hình: {e}")
             result = {
-                "error": mask_sensitive_credentials(str(e)),
+                "error": message,
                 "slid": self.device_cfg.slid,
                 "so_may": self.device_cfg.slid,
             }

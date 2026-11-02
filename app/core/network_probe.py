@@ -79,6 +79,11 @@ class NetworkProbe:
         """Return True if probe has observed at least one offline/disconnected state since last reset."""
         return self._has_seen_offline
 
+
+    @property
+    def is_same_device_as_last_reset(self) -> bool:
+        """Return True if current online gateway MAC matches the MAC of the ONT just finished."""
+        return bool(self._current_mac and self._last_reset_mac and self._current_mac == self._last_reset_mac)
     def pause(self) -> None:
         """Pause probing (e.g. during active configuration execution)."""
         self._is_paused = True
@@ -107,11 +112,14 @@ class NetworkProbe:
                     ["arp", "-a", host],
                     capture_output=True,
                     text=True,
-                    timeout=0.4,
+                    timeout=1.0,
                     creationflags=flags,
                 )
                 if proc.returncode == 0 and proc.stdout:
-                    m = re.search(r"([0-9a-fA-F]{2}(?:-[0-9a-fA-F]{2}){5})", proc.stdout)
+                    m = re.search(
+                        rf"{re.escape(host)}\s+([0-9a-fA-F]{{2}}(?:-[0-9a-fA-F]{{2}}){{5}})",
+                        proc.stdout,
+                    )
                     if m:
                         return m.group(1).replace("-", ":").lower()
         except Exception:
@@ -122,6 +130,7 @@ class NetworkProbe:
         """Reset consecutive counter, online status, and recreate HTTP session pool."""
         if self._current_mac:
             self._last_reset_mac = self._current_mac
+        self._current_mac = None
         self._consecutive_success = 0
         self._is_online = False
         self._has_seen_offline = False
@@ -155,10 +164,9 @@ class NetworkProbe:
             if self._consecutive_success >= self.required_consecutive_success:
                 self._is_online = True
                 mac = self._get_gateway_mac()
-                if mac:
-                    if self._last_reset_mac and mac != self._last_reset_mac:
-                        self._has_seen_offline = True
-                    self._current_mac = mac
+                self._current_mac = mac
+                if mac and self._last_reset_mac and mac != self._last_reset_mac:
+                    self._has_seen_offline = True
         else:
             self._consecutive_success = 0
             self._is_online = False

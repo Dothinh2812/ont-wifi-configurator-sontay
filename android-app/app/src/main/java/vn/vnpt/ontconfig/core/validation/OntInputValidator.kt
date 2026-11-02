@@ -2,6 +2,7 @@ package vn.vnpt.ontconfig.core.validation
 
 import vn.vnpt.ontconfig.data.model.GlobalSettings
 import vn.vnpt.ontconfig.data.model.SubscriberRecord
+import vn.vnpt.ontconfig.data.model.WifiSecurityMode
 import java.net.URLEncoder
 
 data class ValidationResult(
@@ -21,8 +22,12 @@ object OntInputValidator {
         '&', '|', ';', '$', '>', '<', '`', '\\', '!', '\'', '"'
     )
 
+    const val MIN_FIRMWARE_SIZE_BYTES: Long = 64 * 1024L
+    const val MAX_FIRMWARE_SIZE_BYTES: Long = 64L * 1024L * 1024L
+
     private val SLID_REGEX = Regex("^[a-zA-Z0-9_\\-\\.]+$")
     private val SEVEN_DIGITS_REGEX = Regex("^\\d{7}$")
+    private val UNSAFE_FIRMWARE_CHARS_REGEX = Regex("[^a-zA-Z0-9_.\\-]+")
 
     private val SENSITIVE_PATTERNS = listOf(
         Regex("(pppPassword=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
@@ -32,6 +37,7 @@ object OntInputValidator {
         Regex("(wl_wpa_psk=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
         Regex("(password=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
         Regex("(sessionKey=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
+        Regex("""(["']?sessionKey["']?\s*[:=]\s*["']?)([^"'\s,&}\]\u007f]+)""", RegexOption.IGNORE_CASE),
         Regex("(data=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE)
     )
 
@@ -50,13 +56,49 @@ object OntInputValidator {
     }
 
     /**
+     * [Red Team RT-04] Verify firmware image extension (.signed, .signed.*, .bin, .img).
+     */
+    fun isValidFirmwareExtension(fileName: String): Boolean {
+        val clean = fileName.trim().lowercase()
+        if (clean.isEmpty()) return false
+        return clean.endsWith(".signed") ||
+            clean.contains(".signed.") ||
+            clean.endsWith(".bin") ||
+            clean.endsWith(".img")
+    }
+
+    /**
+     * [Red Team RT-04] Sanitize firmware filename for HTTP multipart Content-Disposition header.
+     */
+    fun sanitizeFirmwareFilename(rawName: String): String {
+        val baseName = rawName.trim()
+            .substringAfterLast('/')
+            .substringAfterLast('\\')
+            .replace(UNSAFE_FIRMWARE_CHARS_REGEX, "_")
+            .trim('_')
+        return if (baseName.isEmpty() || baseName.all { it == '.' || it == '_' }) {
+            "firmware.signed"
+        } else {
+            baseName
+        }
+    }
+
+    /**
      * Verify that text does not contain any of the 11 unsafe shell metacharacters.
      */
+    fun containsControlCharacters(text: String): Boolean {
+        return text.any { it.code < 0x20 || it.code == 0x7F }
+    }
+
+    fun isPrintableAscii(text: String): Boolean {
+        return text.all { it.code in 0x20..0x7E }
+    }
+
     fun sanitizeInputMetacharacters(text: String): String {
         for (ch in text) {
-            if (ch in UNSAFE_SHELL_METACHARS) {
+            if (ch in UNSAFE_SHELL_METACHARS || ch.code < 0x20 || ch.code == 0x7F) {
                 throw IllegalArgumentException(
-                    "Ký tự '$ch' không an toàn cho hệ thống LuCI CGI (chứa shell metacharacter)."
+                    "Ký tự '$ch' không an toàn cho hệ thống LuCI CGI (chứa shell metacharacter hoặc ký tự điều khiển)."
                 )
             }
         }
@@ -182,6 +224,9 @@ object OntInputValidator {
         )
 
         for ((fieldName, fieldVal) in fieldsToCheck) {
+            if (containsControlCharacters(fieldVal)) {
+                errors.add("$fieldName chứa ký tự điều khiển ASCII không hợp lệ")
+            }
             for (ch in fieldVal) {
                 if (ch in UNSAFE_SHELL_METACHARS) {
                     errors.add("$fieldName chứa ký tự shell không an toàn: '$ch'")
@@ -213,34 +258,77 @@ object OntInputValidator {
         val importResult = validateOnImport(record)
         val errors = importResult.errors.toMutableList()
 
-        val ssid24 = record.effectiveWifi24Ssid.trim()
-        val pass24 = record.effectiveWifi24Pass.trim()
-        val ssid5 = record.effectiveWifi5Ssid.trim()
-        val pass5 = record.effectiveWifi5Pass.trim()
-
-        if (ssid24.length !in 1..32) {
-            errors.add("SSID Wi-Fi 2.4G phải dài từ 1..32 ký tự (hiện tại: ${ssid24.length})")
+        val secMode = WifiSecurityMode.fromFormValue(settings.wifiSecurityMode)
+        if (secMode == null) {
+            errors.add("Chế độ bảo mật Wi-Fi '${settings.wifiSecurityMode}' không hợp lệ")
         }
-        if (ssid5.length !in 1..32) {
-            errors.add("SSID Wi-Fi 5G phải dài từ 1..32 ký tự (hiện tại: ${ssid5.length})")
+        val requiresPassword = secMode?.requiresPassword != false
+
+        val ssid24Raw = record.effectiveWifi24Ssid
+        val ssid24 = ssid24Raw.trim()
+        val pass24Raw = record.effectiveWifi24Pass
+        val pass24 = pass24Raw.trim()
+        val ssid5Raw = record.effectiveWifi5Ssid
+        val ssid5 = ssid5Raw.trim()
+        val pass5Raw = record.effectiveWifi5Pass
+        val pass5 = pass5Raw.trim()
+
+        if (ssid24Raw.length !in 1..32 || ssid24.isEmpty()) {
+            errors.add("SSID Wi-Fi 2.4G phải dài từ 1..32 ký tự và không chứa toàn dấu cách (hiện tại: ${ssid24Raw.length})")
+        } else if (!isPrintableAscii(ssid24Raw)) {
+            errors.add("SSID Wi-Fi 2.4G chỉ chấp nhận ký tự ASCII in được (0x20..0x7E)")
+        }
+        if (ssid5Raw.length !in 1..32 || ssid5.isEmpty()) {
+            errors.add("SSID Wi-Fi 5G phải dài từ 1..32 ký tự và không chứa toàn dấu cách (hiện tại: ${ssid5Raw.length})")
+        } else if (!isPrintableAscii(ssid5Raw)) {
+            errors.add("SSID Wi-Fi 5G chỉ chấp nhận ký tự ASCII in được (0x20..0x7E)")
         }
 
-        val canFix24 = canPrependLeadingZeroToWifiPass(pass24)
-        val canFix5 = canPrependLeadingZeroToWifiPass(pass5)
+        val canFix24 = requiresPassword && canPrependLeadingZeroToWifiPass(pass24)
+        val canFix5 = requiresPassword && canPrependLeadingZeroToWifiPass(pass5)
 
-        if (pass24.length !in 8..63) {
-            val hint = if (canFix24) " — Gợi ý: bấm 'Thêm số 0 ở đầu (0$pass24)'" else ""
-            errors.add(
-                "Mật khẩu Wi-Fi 2.4G (${pass24.length}/8 ký tự): chuẩn WPA2 yêu cầu từ 8..63 ký tự$hint"
-            )
+        if (requiresPassword) {
+            if (pass24Raw.length !in 8..63 || pass24.isEmpty()) {
+                val hint = if (canFix24) " — Gợi ý: bấm 'Thêm số 0 ở đầu (0$pass24)'" else ""
+                errors.add(
+                    "Mật khẩu Wi-Fi 2.4G (${pass24Raw.length}/8 ký tự): chuẩn ${secMode?.shortLabel ?: "WPA2"} yêu cầu từ 8..63 ký tự$hint"
+                )
+            } else if (!isPrintableAscii(pass24Raw)) {
+                errors.add("Mật khẩu Wi-Fi 2.4G chỉ chấp nhận ký tự ASCII in được (0x20..0x7E)")
+            }
+            if (pass5Raw.length !in 8..63 || pass5.isEmpty()) {
+                errors.add(
+                    "Mật khẩu Wi-Fi 5G (${pass5Raw.length}/8 ký tự): chuẩn ${secMode?.shortLabel ?: "WPA2"} yêu cầu từ 8..63 ký tự"
+                )
+            } else if (!isPrintableAscii(pass5Raw)) {
+                errors.add("Mật khẩu Wi-Fi 5G chỉ chấp nhận ký tự ASCII in được (0x20..0x7E)")
+            }
+        } else {
+            if (record.pass24g.isNotEmpty() && !isPrintableAscii(record.pass24g)) {
+                errors.add("Mật khẩu Wi-Fi 2.4G chỉ chấp nhận ký tự ASCII in được (0x20..0x7E)")
+            }
+            if (record.pass5g.isNotEmpty() && !isPrintableAscii(record.pass5g)) {
+                errors.add("Mật khẩu Wi-Fi 5G chỉ chấp nhận ký tự ASCII in được (0x20..0x7E)")
+            }
         }
-        if (pass5.length !in 8..63) {
-            errors.add(
-                "Mật khẩu Wi-Fi 5G (${pass5.length}/8 ký tự): chuẩn WPA2 yêu cầu từ 8..63 ký tự"
-            )
-        }
-
         errors.addAll(validateAdminPassword(settings.adminNewPass))
+
+        if (settings.enableFirmwareUpdate) {
+            val fwPath = settings.firmwareFilePath.trim()
+            val fwName = settings.firmwareFileName.trim().ifEmpty {
+                fwPath.substringAfterLast('/').substringAfterLast('\\')
+            }
+            val fwSize = settings.firmwareFileSize
+            if (fwPath.isEmpty() || fwName.isEmpty()) {
+                errors.add("Chưa chọn file Firmware (.signed / .bin / .img) để cập nhật")
+            } else if (!isValidFirmwareExtension(fwName)) {
+                errors.add("Định dạng file Firmware '$fwName' không hợp lệ (chỉ hỗ trợ .signed, .bin, .img)")
+            } else if (fwSize !in MIN_FIRMWARE_SIZE_BYTES..MAX_FIRMWARE_SIZE_BYTES) {
+                errors.add(
+                    "Dung lượng file Firmware '$fwName' không hợp lệ (${fwSize / 1024} KB — yêu cầu từ 64 KB đến 64 MB)"
+                )
+            }
+        }
 
         return ValidationResult(
             isValid = errors.isEmpty(),

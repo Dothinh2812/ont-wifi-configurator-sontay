@@ -126,4 +126,14 @@ public struct SubscriberRecord: Identifiable, Codable, Equatable, Sendable {
         let trimmed = pass5g.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? effectiveWifi24Pass : trimmed
     }
+
+    public func effectiveWifi24Pass(secMode: String) -> String {
+        let cleanMode = secMode.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleanMode == WifiSecurityMode.open.rawValue ? "" : effectiveWifi24Pass
+    }
+
+    public func effectiveWifi5Pass(secMode: String) -> String {
+        let cleanMode = secMode.trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleanMode == WifiSecurityMode.open.rawValue ? "" : effectiveWifi5Pass
+    }
 }

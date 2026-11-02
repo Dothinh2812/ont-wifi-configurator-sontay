@@ -19,8 +19,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.SystemUpdateAlt
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Wifi
@@ -31,6 +33,9 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -64,6 +69,7 @@ import vn.vnpt.ontconfig.core.wifi.WifiBand
 import vn.vnpt.ontconfig.data.excel.ExcelManager
 import vn.vnpt.ontconfig.data.model.GlobalSettings
 import vn.vnpt.ontconfig.data.model.SubscriberRecord
+import vn.vnpt.ontconfig.data.model.WifiSecurityMode
 import vn.vnpt.ontconfig.ui.components.FooterSignatureBar
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -75,8 +81,11 @@ fun ConfigReviewScreen(
     connectedWifiSsid: String,
     connectedBand: WifiBand,
     isOntGatewayOnline: Boolean,
-    @Suppress("UNUSED_PARAMETER") statusMessage: String? = null,
+    statusMessage: String? = null,
+    isRunningSetup: Boolean = false,
+    isImportingFirmware: Boolean = false,
     onOpenWifiScanner: () -> Unit,
+    onPickFirmwareFile: () -> Unit = {},
     onAutoSyncWifi5gChange: (Boolean) -> Unit,
     onUpdateRecord: (SubscriberRecord) -> Unit,
     onUpdateSettings: (GlobalSettings) -> Unit,
@@ -89,6 +98,10 @@ fun ConfigReviewScreen(
     var showPppoePass by remember { mutableStateOf(record.passPppoe.isBlank()) }
     var showWifiPass by remember { mutableStateOf(true) }
     var showAdminPass by remember { mutableStateOf(false) }
+    var secModeDropdownExpanded by remember { mutableStateOf(false) }
+    val selectedSecMode = WifiSecurityMode.fromFormValue(settings.wifiSecurityMode)
+        ?: WifiSecurityMode.WPA2_WPA3_PSK
+    val requiresWifiPass = selectedSecMode.requiresPassword
 
     val safeKeyboardOptions = KeyboardOptions(
         capitalization = KeyboardCapitalization.None,
@@ -153,6 +166,7 @@ fun ConfigReviewScreen(
                     ) {
                         OutlinedButton(
                             onClick = onSaveChanges,
+                            enabled = !isRunningSetup && !isImportingFirmware,
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
                             modifier = Modifier.weight(0.75f)
                         ) {
@@ -173,7 +187,7 @@ fun ConfigReviewScreen(
 
                         Button(
                             onClick = onRunConfiguration,
-                            enabled = validation.isValid,
+                            enabled = validation.isValid && !isRunningSetup && !isImportingFirmware,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Color(0xFF1B5E20),
                                 disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant
@@ -188,10 +202,12 @@ fun ConfigReviewScreen(
                             )
                             Spacer(modifier = Modifier.width(5.dp))
                             Text(
-                                text = if (isOntGatewayOnline) {
-                                    "RUN • ĐỔ CẤU HÌNH ONT"
-                                } else {
-                                    "RUN • ĐỔ CẤU HÌNH (TỰ DÒ)"
+                                text = when {
+                                    isImportingFirmware -> "ĐANG NẠP FILE FIRMWARE..."
+                                    settings.enableFirmwareUpdate && isOntGatewayOnline -> "RUN • ĐỔ CẤU HÌNH + UP FW"
+                                    settings.enableFirmwareUpdate -> "RUN • ĐỔ CẤU HÌNH + UP FW (TỰ DÒ)"
+                                    isOntGatewayOnline -> "RUN • ĐỔ CẤU HÌNH ONT"
+                                    else -> "RUN • ĐỔ CẤU HÌNH (TỰ DÒ)"
                                 },
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
@@ -279,6 +295,22 @@ fun ConfigReviewScreen(
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("Bắt Wi-Fi ONT", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
                     }
+                }
+            }
+
+            if (!statusMessage.isNullOrBlank()) {
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    shape = RoundedCornerShape(6.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = statusMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
                 }
             }
 
@@ -527,6 +559,50 @@ fun ConfigReviewScreen(
                         }
                     }
 
+                    ExposedDropdownMenuBox(
+                        expanded = secModeDropdownExpanded,
+                        onExpandedChange = {
+                            if (!isRunningSetup && !isImportingFirmware) {
+                                secModeDropdownExpanded = !secModeDropdownExpanded
+                            }
+                        }
+                    ) {
+                        OutlinedTextField(
+                            value = selectedSecMode.displayLabel,
+                            onValueChange = {},
+                            readOnly = true,
+                            enabled = !isRunningSetup && !isImportingFirmware,
+                            label = {
+                                Text(
+                                    text = "Chuẩn bảo mật Wi-Fi (2.4G & 5G)",
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            },
+                            trailingIcon = {
+                                ExposedDropdownMenuDefaults.TrailingIcon(expanded = secModeDropdownExpanded)
+                            },
+                            singleLine = true,
+                            modifier = Modifier
+                                .menuAnchor()
+                                .fillMaxWidth()
+                        )
+                        ExposedDropdownMenu(
+                            expanded = secModeDropdownExpanded,
+                            onDismissRequest = { secModeDropdownExpanded = false }
+                        ) {
+                            WifiSecurityMode.entries.forEach { mode ->
+                                DropdownMenuItem(
+                                    text = { Text(mode.displayLabel) },
+                                    onClick = {
+                                        secModeDropdownExpanded = false
+                                        onUpdateSettings(settings.copy(wifiSecurityMode = mode.formValue))
+                                    }
+                                )
+                            }
+                        }
+                    }
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -577,12 +653,18 @@ fun ConfigReviewScreen(
                             },
                             label = {
                                 Text(
-                                    text = "Pass 2.4G (${record.pass24g.length} KT, ≥8)",
+                                    text = if (requiresWifiPass) {
+                                        "Pass 2.4G (${record.pass24g.length} KT, ≥8)"
+                                    } else {
+                                        "Pass 2.4G (Open - Không mật khẩu)"
+                                    },
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             },
-                            isError = record.pass24g.trim().length !in 8..63,
+                            isError = (requiresWifiPass && record.effectiveWifi24Pass.length !in 8..63) ||
+                                !OntInputValidator.isPrintableAscii(record.pass24g) ||
+                                record.pass24g.any { it in OntInputValidator.UNSAFE_SHELL_METACHARS },
                             visualTransformation = if (showWifiPass) {
                                 VisualTransformation.None
                             } else {
@@ -649,15 +731,140 @@ fun ConfigReviewScreen(
                             enabled = !autoSyncWifi5g,
                             label = {
                                 Text(
-                                    text = "Pass 5G (${record.pass5g.length} KT, ≥8)",
+                                    text = if (requiresWifiPass) {
+                                        "Pass 5G (${record.pass5g.length} KT, ≥8)"
+                                    } else {
+                                        "Pass 5G (Open - Không mật khẩu)"
+                                    },
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             },
-                            isError = record.pass5g.trim().length !in 8..63,
+                            isError = (requiresWifiPass && record.effectiveWifi5Pass.length !in 8..63) ||
+                                !OntInputValidator.isPrintableAscii(record.pass5g) ||
+                                record.pass5g.any { it in OntInputValidator.UNSAFE_SHELL_METACHARS },
                             keyboardOptions = safeKeyboardOptions,
                             singleLine = true,
                             modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+
+            // Section 4: Firmware Update Before Final Connected Wi-Fi Step
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.SystemUpdateAlt,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "4. Cập Nhật Firmware ONT (Trước bước đổi Wi-Fi chính)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Nâng cấp Firmware trước bước đổi Wi-Fi kết nối chính",
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = settings.enableFirmwareUpdate,
+                            enabled = !isRunningSetup && !isImportingFirmware,
+                            onCheckedChange = { enabled ->
+                                onUpdateSettings(settings.copy(enableFirmwareUpdate = enabled))
+                            }
+                        )
+                    }
+
+                    val hasValidFirmwareFile = settings.firmwareFilePath.isNotBlank() &&
+                        OntInputValidator.isValidFirmwareExtension(settings.firmwareFileName) &&
+                        settings.firmwareFileSize in OntInputValidator.MIN_FIRMWARE_SIZE_BYTES..OntInputValidator.MAX_FIRMWARE_SIZE_BYTES
+
+                    if (hasValidFirmwareFile) {
+                        val sizeMb = String.format(
+                            java.util.Locale.US,
+                            "%.2f",
+                            settings.firmwareFileSize / (1024.0 * 1024.0)
+                        )
+                        Surface(
+                            color = Color(0xFFE8F5E9),
+                            shape = RoundedCornerShape(6.dp),
+                            border = BorderStroke(1.dp, Color(0xFF81C784)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "📦 File Firmware: ${settings.firmwareFileName} ($sizeMb MB)",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF1B5E20),
+                                modifier = Modifier.padding(8.dp)
+                            )
+                        }
+                    } else if (settings.enableFirmwareUpdate) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            shape = RoundedCornerShape(6.dp),
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f)),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "⚠️ Chưa chọn file Firmware (.signed / .bin / .img) hợp lệ (64 KB – 64 MB).",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.padding(8.dp)
+                            )
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = onPickFirmwareFile,
+                        enabled = !isRunningSetup && !isImportingFirmware,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.FolderOpen,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (hasValidFirmwareFile) {
+                                "Đổi file Firmware (.signed / .bin / .img)"
+                            } else {
+                                "Chọn file Firmware (.signed / .bin / .img)"
+                            },
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+
+                    if (settings.enableFirmwareUpdate) {
+                        Text(
+                            text = "ℹ️ Khi bật: App sẽ đổ Bước 1–6 (WAN, SLID, LAN, Wi-Fi băng tần phụ), sau đó tải lên & cập nhật Firmware ở Bước 7. Bước đổi Wi-Fi kết nối chính sẽ thực hiện thủ công sau khi ONT khởi động lại xong (~2 phút).",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }

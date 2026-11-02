@@ -1,5 +1,69 @@
 import Foundation
 
+public enum WifiSecurityMode: String, Codable, CaseIterable, Sendable {
+    case wpa2Wpa3Psk = "wpa2_wpa3_psk"
+    case wpa2Psk = "wpa2_psk"
+    case wpaWpa2Psk = "wpa_wpa2_psk"
+    case wpa3Psk = "wpa3_psk"
+    case wpaPsk = "wpa_psk"
+    case open = "open"
+
+    public var displayLabel: String {
+        switch self {
+        case .wpa2Wpa3Psk:
+            return "WPA2-PSK / WPA3-PSK (Mặc định)"
+        case .wpa2Psk:
+            return "WPA2-PSK (Tương thích rộng / Mesh)"
+        case .wpaWpa2Psk:
+            return "WPA-PSK / WPA2-PSK (Thiết bị cũ / Mesh)"
+        case .wpa3Psk:
+            return "WPA3-PSK"
+        case .wpaPsk:
+            return "WPA-PSK"
+        case .open:
+            return "Open (Không mật khẩu)"
+        }
+    }
+
+    public var shortLabel: String {
+        switch self {
+        case .wpa2Wpa3Psk:
+            return "WPA2/WPA3-PSK"
+        case .wpa2Psk:
+            return "WPA2-PSK"
+        case .wpaWpa2Psk:
+            return "WPA/WPA2-PSK"
+        case .wpa3Psk:
+            return "WPA3-PSK"
+        case .wpaPsk:
+            return "WPA-PSK"
+        case .open:
+            return "Open"
+        }
+    }
+
+    public var akmPsk: String {
+        return self == .open ? "disabled" : "enabled"
+    }
+
+    public var akmPsk2: String {
+        return self == .open ? "disabled" : "enabled"
+    }
+
+    public var crypto: String {
+        switch self {
+        case .wpaWpa2Psk, .wpaPsk:
+            return "tkip+aes"
+        case .wpa2Wpa3Psk, .wpa2Psk, .wpa3Psk, .open:
+            return "aes"
+        }
+    }
+
+    public var requiresPassword: Bool {
+        return self != .open
+    }
+}
+
 public struct GlobalSettings: Codable, Equatable, Sendable {
     public var baseUrl: String
     public var adminDefaultPass: String
@@ -15,6 +79,25 @@ public struct GlobalSettings: Codable, Equatable, Sendable {
     public var dhcpLease: Int
     public var brName: String
     public var requestTimeoutMs: Int
+    public var wifiSecurityMode: String
+
+    enum CodingKeys: String, CodingKey {
+        case baseUrl
+        case adminDefaultPass
+        case adminNewPass
+        case vlanId
+        case mtu
+        case defaultWifi5Ssid
+        case defaultWifi5Pass
+        case lanIp
+        case lanMask
+        case dhcpStart
+        case dhcpEnd
+        case dhcpLease
+        case brName
+        case requestTimeoutMs
+        case wifiSecurityMode
+    }
 
     public init(
         baseUrl: String = "https://192.168.1.1",
@@ -30,7 +113,8 @@ public struct GlobalSettings: Codable, Equatable, Sendable {
         dhcpEnd: String = "192.168.1.254",
         dhcpLease: Int = 1440,
         brName: String = "br-lan",
-        requestTimeoutMs: Int = 5000
+        requestTimeoutMs: Int = 5000,
+        wifiSecurityMode: String = WifiSecurityMode.wpa2Wpa3Psk.rawValue
     ) {
         self.baseUrl = baseUrl
         self.adminDefaultPass = adminDefaultPass
@@ -46,5 +130,25 @@ public struct GlobalSettings: Codable, Equatable, Sendable {
         self.dhcpLease = dhcpLease
         self.brName = brName
         self.requestTimeoutMs = requestTimeoutMs
+        self.wifiSecurityMode = wifiSecurityMode
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.baseUrl = try container.decodeIfPresent(String.self, forKey: .baseUrl) ?? "https://192.168.1.1"
+        self.adminDefaultPass = try container.decodeIfPresent(String.self, forKey: .adminDefaultPass) ?? "admin"
+        self.adminNewPass = try container.decodeIfPresent(String.self, forKey: .adminNewPass) ?? "Passwd2@"
+        self.vlanId = try container.decodeIfPresent(Int.self, forKey: .vlanId) ?? 11
+        self.mtu = try container.decodeIfPresent(Int.self, forKey: .mtu) ?? 1492
+        self.defaultWifi5Ssid = try container.decodeIfPresent(String.self, forKey: .defaultWifi5Ssid) ?? "VNPT 5G"
+        self.defaultWifi5Pass = try container.decodeIfPresent(String.self, forKey: .defaultWifi5Pass) ?? "1234567890"
+        self.lanIp = try container.decodeIfPresent(String.self, forKey: .lanIp) ?? "192.168.1.1"
+        self.lanMask = try container.decodeIfPresent(String.self, forKey: .lanMask) ?? "255.255.255.0"
+        self.dhcpStart = try container.decodeIfPresent(String.self, forKey: .dhcpStart) ?? "192.168.1.2"
+        self.dhcpEnd = try container.decodeIfPresent(String.self, forKey: .dhcpEnd) ?? "192.168.1.254"
+        self.dhcpLease = try container.decodeIfPresent(Int.self, forKey: .dhcpLease) ?? 1440
+        self.brName = try container.decodeIfPresent(String.self, forKey: .brName) ?? "br-lan"
+        self.requestTimeoutMs = try container.decodeIfPresent(Int.self, forKey: .requestTimeoutMs) ?? 5000
+        self.wifiSecurityMode = try container.decodeIfPresent(String.self, forKey: .wifiSecurityMode) ?? WifiSecurityMode.wpa2Wpa3Psk.rawValue
     }
 }

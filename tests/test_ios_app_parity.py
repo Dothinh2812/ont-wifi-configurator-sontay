@@ -212,3 +212,36 @@ def test_phase4_documentation_includes_ios_sideload_and_operation_guide():
     assert "Sideloadly" in readme
     assert "ONT_WiFi_Configurator_Unsigned.ipa" in huong_dan
     assert "Sideloadly" in huong_dan
+
+
+def test_phase5_wifi_security_mode_cross_platform_parity():
+    """Verify 6 Wi-Fi security modes parity across iOS GlobalSettings, Validator, Driver, SwiftUI, and Docs."""
+    settings_swift = (IOS_APP_DIR / "Data" / "Model" / "GlobalSettings.swift").read_text(encoding="utf-8")
+    assert "public enum WifiSecurityMode: String, Codable, CaseIterable, Sendable" in settings_swift
+    for mode_val in ["wpa2_wpa3_psk", "wpa2_psk", "wpa_wpa2_psk", "wpa3_psk", "wpa_psk", "open"]:
+        assert f'"{mode_val}"' in settings_swift
+    assert "tkip+aes" in settings_swift
+    assert "decodeIfPresent(String.self, forKey: .wifiSecurityMode)" in settings_swift
+
+    val_swift = (IOS_APP_DIR / "Core" / "Validation" / "OntInputValidator.swift").read_text(encoding="utf-8")
+    assert "WifiSecurityMode(rawValue:" in val_swift
+    assert "requiresPassword" in val_swift
+
+    driver_swift = (IOS_APP_DIR / "Core" / "Driver" / "OntMobileDriver.swift").read_text(encoding="utf-8")
+    assert "public let wifiSecurityMode: String" in driver_swift
+    assert "conflict_mesh" in driver_swift
+    assert "catch let err as OntDriverException" in driver_swift
+    assert "secMode: String" in driver_swift
+
+    review_swift = (IOS_APP_DIR / "UI" / "Screens" / "ConfigReviewView.swift").read_text(encoding="utf-8")
+    assert "Chuẩn bảo mật Wi-Fi" in review_swift
+    assert "WifiSecurityMode.allCases" in review_swift
+
+    sheet_swift = (IOS_APP_DIR / "UI" / "Components" / "ExecutionProgressSheet.swift").read_text(encoding="utf-8")
+    assert "wifiSecurityMode" in sheet_swift
+    assert "Không mật khẩu" in sheet_swift
+
+    readme = (ROOT_DIR / "README.md").read_text(encoding="utf-8")
+    huong_dan = (ROOT_DIR / "HUONG_DAN_SU_DUNG_TOOL_ONT.md").read_text(encoding="utf-8")
+    assert "wpa2_wpa3_psk" in readme and "wpa2_psk" in readme
+    assert "Chuẩn bảo mật Wi-Fi" in huong_dan

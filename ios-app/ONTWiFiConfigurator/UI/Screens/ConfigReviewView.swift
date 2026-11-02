@@ -171,7 +171,25 @@ public struct ConfigReviewView: View {
         _ record: SubscriberRecord,
         validation: ValidationResult
     ) -> some View {
-        Section("Cấu hình Wi-Fi 2.4GHz & 5GHz") {
+        let selectedSecMode = WifiSecurityMode(rawValue: viewModel.globalSettings.wifiSecurityMode) ?? .wpa2Wpa3Psk
+        return Section("Cấu hình Wi-Fi 2.4GHz & 5GHz") {
+            Picker(
+                "Chuẩn bảo mật Wi-Fi",
+                selection: Binding(
+                    get: { viewModel.globalSettings.wifiSecurityMode },
+                    set: { newMode in
+                        var s = viewModel.globalSettings
+                        s.wifiSecurityMode = newMode
+                        viewModel.updateGlobalSettings(s)
+                    }
+                )
+            ) {
+                ForEach(WifiSecurityMode.allCases, id: \.rawValue) { mode in
+                    Text(mode.displayLabel).tag(mode.rawValue)
+                }
+            }
+            .disabled(viewModel.isRunningSetup)
+
             Toggle(
                 "Tự động đồng bộ Wi-Fi 5G theo 2.4G",
                 isOn: Binding(
@@ -179,7 +197,6 @@ public struct ConfigReviewView: View {
                     set: { viewModel.setAutoSyncWifi5g($0) }
                 )
             )
-
             VStack(alignment: .leading, spacing: 4) {
                 Text("Tên Wi-Fi 2.4GHz (SSID 1..32 ký tự ASCII)")
                     .font(.caption)
@@ -206,7 +223,7 @@ public struct ConfigReviewView: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Mật khẩu Wi-Fi 2.4GHz (8..63 ký tự ASCII)")
+                Text(selectedSecMode.requiresPassword ? "Mật khẩu Wi-Fi 2.4GHz (8..63 ký tự ASCII)" : "Mật khẩu Wi-Fi 2.4GHz (Open - Không mật khẩu)")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 HStack {
@@ -265,7 +282,7 @@ public struct ConfigReviewView: View {
             }
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("Mật khẩu Wi-Fi 5GHz (8..63 ký tự ASCII)")
+                Text(selectedSecMode.requiresPassword ? "Mật khẩu Wi-Fi 5GHz (8..63 ký tự ASCII)" : "Mật khẩu Wi-Fi 5GHz (Open - Không mật khẩu)")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 TextField(

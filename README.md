@@ -13,7 +13,7 @@ ONT-config/
 │   ├── core/                       # Tầng giao thức & driver ONT
 │   │   ├── config_models.py        # Model cấu hình (DeviceConfig, GlobalConfig)
 │   │   ├── network_probe.py        # Thăm dò gateway ONT (debounce 3s)
-│   │   └── ont_driver.py           # LuCI CGI driver (10 bước cấu hình an toàn)
+│   │   └── ont_driver.py           # LuCI CGI driver (10 bước cấu hình + tùy chọn Bước 11 Update Firmware)
 │   ├── data/                       # Quản lý dữ liệu & Excel
 │   │   ├── models.py               # Data models & trạng thái thiết bị
 │   │   └── excel_manager.py        # Xử lý Excel (openpyxl), validation, checkpoint
@@ -25,7 +25,7 @@ ONT-config/
 │       └── audio_alert.py          # Chuông báo hoàn tất đa nền tảng
 ├── tests/                          # Bộ kiểm thử tự động & benchmark
 │   ├── test_excel_manager.py       # Kiểm tra đọc, ghi, validate Excel
-│   ├── test_ont_driver_mock.py     # Kiểm tra 10 bước driver ONT trên Mock LuCI
+│   ├── test_ont_driver_mock.py     # Kiểm tra 10/11 bước driver ONT & Update Firmware trên Mock LuCI
 │   ├── test_ui_components.py       # Kiểm thử giao diện & tương tác người dùng
 │   ├── test_e2e_workflow.py        # Kiểm thử tích hợp toàn trình (E2E)
 │   ├── mock_luci_server.py         # Mock HTTP Server mô phỏng LuCI CGI ONT
@@ -121,10 +121,14 @@ Bên cạnh bản Desktop Windows chạy qua cáp LAN, dự án cung cấp ứng
 2. **Màn Hình Kiểm Tra & Chỉnh Sửa Trước Khi RUN (`ConfigReviewScreen`):**
    - Hợp nhất tham số định danh GPON về duy nhất **`SLID / Mã MEN`** (loại bỏ ô nhập `Số máy` trùng lặp), cho phép KTV kiểm tra và sửa trực tiếp `SLID`, `Account / Mật khẩu PPPoE`, `SSID / Pass Wi-Fi 2.4G & 5G` (tự động đồng bộ SSID mặc định `VNPT_{SLID}` và 5G theo 2.4G, đồng thời ghi đồng bộ vào cả cột `SO_MAY` và `Mã MEN` khi xuất file Excel).
    - Kiểm tra hợp lệ 2 tầng (`validateOnImport` & `validateBeforeRun`): chặn đủ 11 ký tự shell metacharacters (`&|;$><`\!'"`), kiểm tra `SLID <= 10` ký tự ASCII, và cung cấp nút **1 chạm "Thêm số 0 ở đầu"** cho các mật khẩu Wi-Fi 7 chữ số (do Excel mất số `0` đầu ngày sinh).
+   - **Tùy chọn 6 chuẩn bảo mật Wi-Fi (`sec_mode`):** Hỗ trợ chọn đầy đủ 6 chế độ bảo mật trên cả Windows, Android và iOS khớp với firmware GW040-NSv2 (`wpa2_wpa3_psk` mặc định, `wpa2_psk` tương thích rộng/Mesh, `wpa_wpa2_psk` thiết bị cũ/Mesh, `wpa3_psk`, `wpa_psk`, `open` không mật khẩu).
 3. **Tự Động Bắt Wi-Fi Mặc Định ONT & Tối Ưu Hóa Đổi Wi-Fi 2.4G Ở Bước Cuối (Bước 7/7):**
    - Tự động lọc sóng xuất xưởng `GW040-NSv2_2.4G_XXXXXX` / `GW040-NSv2_5G_XXXXXX` (đối chiếu hậu tố MAC với BSSID) và định tuyến HTTP qua `wifiNetwork.socketFactory` ngay cả khi máy đang bật 4G/5G.
-   - **Dynamic Band Ordering:** Cấu hình băng tần không kết nối (5GHz `wl_unit=1`) ở Bước 6 kèm nghỉ ổn định driver `2.0s`, và đặt bước **đổi tên & mật khẩu Wi-Fi 2.4GHz (`wl_unit=0`) ở Bước 7 cuối cùng**, xử lý thông minh hiện tượng ngắt socket khi radio khởi động lại (`Commit Ambiguity`), tự động giải phóng phiên `logout.cmd` trong `finally` và khôi phục 4G/5G ngay lập tức để chia sẻ báo cáo `.xlsx` qua Zalo.
+   - **Dynamic Band Ordering & Band-Hopping Handover (Bước 6 $\rightarrow$ Bước 7):** Cấu hình băng tần phụ (ví dụ 5GHz `wl_unit=1`) ở Bước 6 kèm `wlrestart.json` và giải phóng phiên `logout.cmd`; sau đó **tự động chuyển kết nối Wi-Fi của máy sang chính tên Wi-Fi phụ vừa đổi thành công** (điền sẵn mật khẩu WPA2), xác thực lại `192.168.1.1` rồi mới **đổi tên & mật khẩu băng tần còn lại ở Bước 7 cuối cùng**, đảm bảo 100% lệnh lưu NVRAM (`wirelesscfg.json`) và `wlrestart.json` thực thi thành công trên đường truyền sống trước khi khôi phục 4G/5G để chia sẻ báo cáo `.xlsx` qua Zalo.
 
+4. **Nâng Cấp Firmware ONT Trước Bước Đổi Wi-Fi Kết Nối Chính (Tùy chọn 8 Bước):**
+   - Cho phép KTV bật công tắc **"Nâng cấp Firmware trước bước đổi Wi-Fi kết nối chính"** và chọn file image (`.signed`, `.bin`, `.img`, kích thước $64\text{ KB} \dots 64\text{ MB}$) qua Android SAF (tự động lưu đệm an toàn trong `noBackupFilesDir/firmware_cache/`).
+   - Khi bật: ứng dụng giữ nguyên kết nối Wi-Fi hiện tại sau Bước 6 (đã lưu xong WAN, SLID, LAN, Wi-Fi băng tần phụ), thực hiện **Bước 7/8: Upload & Cập nhật Firmware** (`updatefwsessioncheck.json` $\rightarrow$ `imagesize.json` $\rightarrow$ `uploadsoftware.conf` multipart streaming), xóa ngay `sessionKey` khi nhận `"status": "valid"` (không bắn `logout.cmd` làm gián đoạn quá trình ghi flash), khôi phục 4G/5G ngay lập tức và chuyển **Bước 8/8 (Đổi Wi-Fi kết nối chính)** sang hoàn tất thủ công (hoặc bấm nút tiện ích **"2. Đổi nốt Wi-Fi chính"** ngay trên bảng tiến trình) sau khi ONT khởi động lại xong (~2 phút).
 ### Chạy Unit Test & Đóng Gói APK (`android-app/`)
 ```bash
 cd android-app

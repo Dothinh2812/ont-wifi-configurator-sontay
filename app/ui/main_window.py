@@ -1,6 +1,7 @@
 """Main Window for VNPT iGate GW040-NSv2 Automated Configuration Desktop Application."""
 
 import os
+import dataclasses
 import datetime
 import ipaddress
 from typing import Optional, List
@@ -9,12 +10,17 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
     QTableView, QPushButton, QLabel, QLineEdit, QCheckBox,
     QProgressBar, QPlainTextEdit, QGroupBox, QFileDialog,
-    QMessageBox, QHeaderView, QFormLayout, QSpinBox, QAbstractItemView
+    QMessageBox, QHeaderView, QFormLayout, QSpinBox, QAbstractItemView, QComboBox
 )
 
-from app.core.config_models import GlobalConfig, get_app_path
+from app.core.config_models import GlobalConfig, get_app_path, get_app_base_dir
 from app.core.network_probe import NetworkProbe
-from app.core.ont_driver import validate_password_complexity
+from app.core.ont_driver import (
+    validate_password_complexity,
+    WIFI_SECURITY_MODES,
+    validate_wifi_ssid_and_pass,
+    ONTValidationError,
+)
 from app.data.models import DeviceRecord, DeviceStatus
 from app.data.excel_manager import ExcelManager, ExcelFileLockedError
 from app.ui.device_table_model import DeviceTableModel, validate_device_record
@@ -48,6 +54,7 @@ class MainWindow(QMainWindow):
         self.active_worker: Optional[ONTExecutionWorker] = None
         self.selected_row: int = -1
         self._awaiting_next_ont: bool = False
+        self._awaiting_fw_reboot_disconnect: bool = False
         self._completion_dialog_open: bool = False
         self._completion_msg_box: Optional[QMessageBox] = None
         self._build_ui()
@@ -158,6 +165,15 @@ class MainWindow(QMainWindow):
         self.txt_wifi5_pass = QLineEdit(self.global_cfg.default_wifi5_pass)
         form_layout.addRow("WiFi 5G Pass mặc định:", self.txt_wifi5_pass)
 
+        self.cmb_wifi_sec_mode = QComboBox()
+        for mode_key, mode_info in WIFI_SECURITY_MODES.items():
+            self.cmb_wifi_sec_mode.addItem(mode_info["label"], mode_key)
+        default_sec_idx = self.cmb_wifi_sec_mode.findData(self.global_cfg.wifi_security_mode)
+        if default_sec_idx >= 0:
+            self.cmb_wifi_sec_mode.setCurrentIndex(default_sec_idx)
+        self.cmb_wifi_sec_mode.currentIndexChanged.connect(self._on_wifi_sec_mode_changed)
+        form_layout.addRow("Chuẩn bảo mật Wi-Fi:", self.cmb_wifi_sec_mode)
+
         # LAN IPv4 Settings (Locked by default)
         self.chk_unlock_lan = QCheckBox("Mở khóa chỉnh sửa IP LAN")
         self.chk_unlock_lan.toggled.connect(self._on_unlock_lan_toggled)
@@ -187,6 +203,36 @@ class MainWindow(QMainWindow):
         form_layout.addRow("MTU:", self.spn_mtu)
 
         settings_layout.addWidget(grp_settings)
+
+        # Optional Firmware Update GroupBox
+        grp_fw = QGroupBox("Cập Nhật Firmware Tự Động (Tùy Chọn)")
+        fw_layout = QVBoxLayout(grp_fw)
+        fw_layout.setSpacing(6)
+
+        self.chk_enable_fw_update = QCheckBox("Update Firmware ở bước cuối cùng")
+        self.chk_enable_fw_update.setChecked(self.global_cfg.enable_firmware_update)
+        self.chk_enable_fw_update.toggled.connect(self._on_fw_config_changed)
+        fw_layout.addWidget(self.chk_enable_fw_update)
+
+        fw_path_row = QHBoxLayout()
+        self.txt_fw_path = QLineEdit(self.global_cfg.firmware_path)
+        self.txt_fw_path.setPlaceholderText("Chọn file .signed / .bin firmware...")
+        self.txt_fw_path.setEnabled(False)
+        self.txt_fw_path.textChanged.connect(self._on_fw_config_changed)
+        fw_path_row.addWidget(self.txt_fw_path, stretch=1)
+
+        self.btn_browse_fw = QPushButton("Chọn...")
+        self.btn_browse_fw.setEnabled(False)
+        self.btn_browse_fw.clicked.connect(self._browse_firmware)
+        fw_path_row.addWidget(self.btn_browse_fw)
+        fw_layout.addLayout(fw_path_row)
+
+        self.lbl_fw_status = QLabel("Chế độ mặc định: Không nâng cấp Firmware (10 bước)")
+        self.lbl_fw_status.setWordWrap(True)
+        self.lbl_fw_status.setStyleSheet("color: #6B7280; font-size: 11px;")
+        fw_layout.addWidget(self.lbl_fw_status)
+
+        settings_layout.addWidget(grp_fw)
         settings_layout.addStretch()
 
         content_splitter.addWidget(settings_container)
@@ -267,6 +313,7 @@ class MainWindow(QMainWindow):
         footer_layout.addWidget(self.lbl_footer_signature)
 
         main_layout.addLayout(footer_layout)
+        self._auto_detect_default_firmware()
 
     def _configure_table_columns(self) -> None:
         """Set balanced default widths so all 10 columns including Status & Notes are visible at 1200x780."""
@@ -303,7 +350,7 @@ class MainWindow(QMainWindow):
         """Handle keyboard shortcuts (Space / Enter to trigger RUN) when not editing inputs."""
         if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
             focused = self.focusWidget()
-            if isinstance(focused, (QLineEdit, QSpinBox, QPlainTextEdit)):
+            if isinstance(focused, (QLineEdit, QSpinBox, QPlainTextEdit, QComboBox)):
                 super().keyPressEvent(event)
                 return
             if self.table_view.state() == QAbstractItemView.State.EditingState:
@@ -361,6 +408,7 @@ class MainWindow(QMainWindow):
                         r.start_time = item.get("start_time")
                         r.end_time = item.get("end_time")
             self._awaiting_next_ont = False
+            self._awaiting_fw_reboot_disconnect = False
             self._update_summary_stats()
             self._select_first_pending_row()
             self._log(f"Đã nạp thành công {len(self.records)} bản ghi từ '{os.path.basename(file_path)}'.")
@@ -446,6 +494,34 @@ class MainWindow(QMainWindow):
             self.lbl_pass_complexity.setStyleSheet("color: #EF4444; font-size: 11px;")
         self._update_run_button_state()
 
+
+    def _on_wifi_sec_mode_changed(self, _index: int = 0) -> None:
+        if hasattr(self, "cmb_wifi_sec_mode"):
+            self.global_cfg.wifi_security_mode = str(
+                self.cmb_wifi_sec_mode.currentData() or "wpa2_wpa3_psk"
+            )
+        self._update_run_button_state()
+
+    def _validate_record_wifi(self, rec: DeviceRecord, sec_mode: str) -> None:
+        dev_cfg = rec.to_device_config()
+        wifi24_ssid = dev_cfg.ssid_24g or f"VNPT_{dev_cfg.slid}"
+        wifi24_pass = (
+            (dev_cfg.pass_24g or "")
+            if sec_mode == "open"
+            else (dev_cfg.pass_24g or "1234567890")
+        )
+        default_w5_ssid = self.txt_wifi5_ssid.text() or self.global_cfg.default_wifi5_ssid
+        default_w5_pass = self.txt_wifi5_pass.text() or self.global_cfg.default_wifi5_pass
+        wifi5_ssid = dev_cfg.ssid_5g or (
+            f"{wifi24_ssid} 5G" if wifi24_ssid else default_w5_ssid
+        )
+        wifi5_pass = (
+            (dev_cfg.pass_5g or "")
+            if sec_mode == "open"
+            else (dev_cfg.pass_5g or wifi24_pass or default_w5_pass)
+        )
+        validate_wifi_ssid_and_pass(wifi24_ssid, wifi24_pass, sec_mode, "Wi-Fi 2.4GHz")
+        validate_wifi_ssid_and_pass(wifi5_ssid, wifi5_pass, sec_mode, "Wi-Fi 5GHz")
     def _on_unlock_lan_toggled(self, checked: bool) -> None:
         if checked:
             reply = QMessageBox.warning(
@@ -468,6 +544,61 @@ class MainWindow(QMainWindow):
             self.txt_lan_mask.setReadOnly(True)
             self.txt_dhcp_range.setReadOnly(True)
 
+
+    def _is_firmware_file_valid(self) -> bool:
+        fw_path = self.txt_fw_path.text().strip()
+        return bool(fw_path and os.path.isfile(fw_path) and os.path.getsize(fw_path) > 0)
+
+    def _auto_detect_default_firmware(self) -> None:
+        """Pre-fill firmware path if a .signed / .signed.* image exists in app base dir (checkbox stays unchecked)."""
+        try:
+            base_dir = get_app_base_dir()
+            candidates = []
+            for fname in os.listdir(base_dir):
+                lower_name = fname.lower()
+                if lower_name.endswith(".signed") or ".signed." in lower_name:
+                    full_path = os.path.join(base_dir, fname)
+                    if os.path.isfile(full_path) and os.path.getsize(full_path) > 0:
+                        candidates.append(full_path)
+            if candidates:
+                candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                self.txt_fw_path.setText(candidates[0])
+        except Exception:
+            pass
+
+    def _browse_firmware(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Chọn File Firmware ONT (.signed / .bin)",
+            get_app_base_dir(),
+            "Firmware Files (*.signed *.signed.* *.bin *.img);;All Files (*)",
+        )
+        if file_path:
+            self.txt_fw_path.setText(file_path)
+
+    def _on_fw_config_changed(self, *_args) -> None:
+        enabled = self.chk_enable_fw_update.isChecked()
+        is_running = bool(self.active_worker and self.active_worker.isRunning())
+        self.txt_fw_path.setEnabled(enabled and not is_running)
+        self.btn_browse_fw.setEnabled(enabled and not is_running)
+        fw_path = self.txt_fw_path.text().strip()
+        self.global_cfg.enable_firmware_update = enabled
+        self.global_cfg.firmware_path = fw_path
+
+        if not enabled:
+            self.lbl_fw_status.setText("Chế độ mặc định: Không nâng cấp Firmware (10 bước)")
+            self.lbl_fw_status.setStyleSheet("color: #6B7280; font-size: 11px;")
+        elif self._is_firmware_file_valid():
+            size_mb = os.path.getsize(fw_path) / (1024 * 1024)
+            self.lbl_fw_status.setText(
+                f"✓ Sẵn sàng nâng cấp: {os.path.basename(fw_path)} ({size_mb:.2f} MB) - 11 bước"
+            )
+            self.lbl_fw_status.setStyleSheet("color: #10B981; font-size: 11px;")
+        else:
+            self.lbl_fw_status.setText("✗ Vui lòng chọn file Firmware hợp lệ trước khi ấn RUN")
+            self.lbl_fw_status.setStyleSheet("color: #EF4444; font-size: 11px;")
+
+        self._update_run_button_state()
     def _on_probe_status_changed(self, is_online: bool, consecutive_count: int) -> None:
         if is_online:
             self.lbl_link_status.setText(f"● ONLINE (Đã giữ ổn định {consecutive_count}s)")
@@ -477,15 +608,19 @@ class MainWindow(QMainWindow):
             self.lbl_link_status.setText("○ OFFLINE (Chưa kết nối ONT)")
             self.lbl_link_status.setObjectName("lblStatusOffline")
             self.lbl_link_status.setStyleSheet("color: #EF4444; font-weight: bold;")
+        if is_online and self.probe.has_seen_offline and not self.probe.is_same_device_as_last_reset:
+            self._awaiting_fw_reboot_disconnect = False
         self._update_run_button_state()
         if is_online:
             if (
                 self._completion_dialog_open
                 and self._completion_msg_box is not None
                 and self.probe.has_seen_offline
+                and not self.probe.is_same_device_as_last_reset
             ):
                 self._completion_msg_box.accept()
             self._maybe_auto_run_next_device()
+
     def _maybe_auto_run_next_device(self) -> None:
         """Automatically trigger configuration for the next pending ONT once a new connection is detected."""
         if not self._awaiting_next_ont:
@@ -498,6 +633,11 @@ class MainWindow(QMainWindow):
             return
         if not self.probe.is_online or not self.probe.has_seen_offline:
             return
+        if self.probe.is_same_device_as_last_reset or self._awaiting_fw_reboot_disconnect:
+            return
+        if hasattr(self, "chk_enable_fw_update") and self.chk_enable_fw_update.isChecked():
+            if not self._is_firmware_file_valid():
+                return
         if self.selected_row < 0:
             return
         rec = self.table_model.get_record(self.selected_row)
@@ -506,31 +646,61 @@ class MainWindow(QMainWindow):
         if not validate_password_complexity(self.txt_admin_pass.text()):
             return
 
+        sec_mode = (
+            str(self.cmb_wifi_sec_mode.currentData() or "wpa2_wpa3_psk")
+            if hasattr(self, "cmb_wifi_sec_mode")
+            else (self.global_cfg.wifi_security_mode or "wpa2_wpa3_psk")
+        )
+        try:
+            self._validate_record_wifi(rec, sec_mode)
+        except ONTValidationError:
+            return
         self._awaiting_next_ont = False
         self._log(
             f"Đã tự động nhận kết nối ONT mới. Bắt đầu đổ cấu hình tiếp cho thiết bị {rec.slid}..."
         )
         self.run_current_device()
+
     def _update_run_button_state(self) -> None:
+        if not hasattr(self, "btn_cancel"):
+            return
         if self.active_worker and self.active_worker.isRunning():
             self.btn_run.setEnabled(False)
             self.btn_cancel.setEnabled(True)
             self.btn_skip.setEnabled(False)
             self.btn_retry.setEnabled(False)
+            if hasattr(self, "cmb_wifi_sec_mode"):
+                self.cmb_wifi_sec_mode.setEnabled(False)
+            if hasattr(self, "chk_enable_fw_update"):
+                self.chk_enable_fw_update.setEnabled(False)
+                self.txt_fw_path.setEnabled(False)
+                self.btn_browse_fw.setEnabled(False)
             return
 
         self.btn_cancel.setEnabled(False)
         self.btn_skip.setEnabled(self.selected_row >= 0)
         self.btn_retry.setEnabled(self.selected_row >= 0)
+        if hasattr(self, "cmb_wifi_sec_mode"):
+            self.cmb_wifi_sec_mode.setEnabled(True)
+        if hasattr(self, "chk_enable_fw_update"):
+            self.chk_enable_fw_update.setEnabled(True)
+            self.txt_fw_path.setEnabled(self.chk_enable_fw_update.isChecked())
+            self.btn_browse_fw.setEnabled(self.chk_enable_fw_update.isChecked())
 
         can_run = False
         if self.probe.is_online and self.selected_row >= 0:
             rec = self.table_model.get_record(self.selected_row)
             if rec and rec.is_valid and validate_password_complexity(self.txt_admin_pass.text()):
                 can_run = True
+                if hasattr(self, "chk_enable_fw_update") and self.chk_enable_fw_update.isChecked():
+                    if not self._is_firmware_file_valid():
+                        can_run = False
+                if self._awaiting_fw_reboot_disconnect and (
+                    not self.probe.has_seen_offline or self.probe.is_same_device_as_last_reset
+                ):
+                    can_run = False
 
         self.btn_run.setEnabled(can_run)
-
     def run_current_device(self) -> None:
         """Start execution worker for the currently selected device record."""
         if self.selected_row < 0 or not self.records:
@@ -541,8 +711,27 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Dữ Liệu Không Hợp Lệ", "Dòng được chọn bị lỗi dữ liệu hoặc thiếu pass PPPoE.")
             return
 
-        self._awaiting_next_ont = False
+        sec_mode = (
+            str(self.cmb_wifi_sec_mode.currentData() or "wpa2_wpa3_psk")
+            if hasattr(self, "cmb_wifi_sec_mode")
+            else (self.global_cfg.wifi_security_mode or "wpa2_wpa3_psk")
+        )
+        try:
+            self._validate_record_wifi(rec, sec_mode)
+        except ONTValidationError as e:
+            QMessageBox.warning(self, "Cấu Hình Wi-Fi Không Hợp Lệ", str(e))
+            return
+        if hasattr(self, "chk_enable_fw_update") and self.chk_enable_fw_update.isChecked():
+            if not self._is_firmware_file_valid():
+                QMessageBox.warning(
+                    self,
+                    "File Firmware Không Hợp Lệ",
+                    "Vui lòng chọn đường dẫn file Firmware (.signed / .bin) hợp lệ và khác 0 byte trước khi chạy.",
+                )
+                return
 
+        self._awaiting_next_ont = False
+        self._awaiting_fw_reboot_disconnect = False
         # Validate and apply LAN settings from UI
         lan_ip = self.txt_lan_ip.text().strip()
         lan_mask = self.txt_lan_mask.text().strip()
@@ -573,6 +762,13 @@ class MainWindow(QMainWindow):
         self.global_cfg.default_wifi5_pass = self.txt_wifi5_pass.text()
         self.global_cfg.vlan_id = self.spn_vlan.value()
         self.global_cfg.mtu = self.spn_mtu.value()
+        self.global_cfg.enable_firmware_update = self.chk_enable_fw_update.isChecked()
+        self.global_cfg.firmware_path = self.txt_fw_path.text().strip()
+        self.global_cfg.wifi_security_mode = sec_mode
+
+        total_steps = 11 if self.global_cfg.enable_firmware_update else 10
+        self.progress_bar.setRange(0, total_steps)
+
         start_time_str = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
         self.table_model.update_record_status(
             self.selected_row, DeviceStatus.RUNNING, message="Đang đổ cấu hình...", start_time=start_time_str
@@ -580,7 +776,8 @@ class MainWindow(QMainWindow):
         self._update_summary_stats()
 
         device_cfg = rec.to_device_config()
-        self.active_worker = ONTExecutionWorker(device_cfg, self.global_cfg, parent=self)
+        worker_global_cfg = dataclasses.replace(self.global_cfg)
+        self.active_worker = ONTExecutionWorker(device_cfg, worker_global_cfg, parent=self)
 
         # Wire Signals
         self.active_worker.step_progress.connect(self._on_worker_progress)
@@ -612,6 +809,8 @@ class MainWindow(QMainWindow):
             self.selected_row, status, message=message, end_time=end_time_str
         )
         self._update_summary_stats()
+        fw_updated = bool(result.get("firmware_updated"))
+        self._awaiting_fw_reboot_disconnect = bool(success and fw_updated)
         self.probe_worker.resume()
         self._update_run_button_state()
 
@@ -627,13 +826,18 @@ class MainWindow(QMainWindow):
             if has_next:
                 next_rec = self.table_model.get_record(self.selected_row)
                 next_slid = next_rec.slid if next_rec else "N/A"
-                self.lbl_progress_step.setText(
-                    f"Đã xong [{slid}]. Đang chờ cắm ONT tiếp theo cho [{next_slid}]..."
-                )
+                if fw_updated:
+                    self.lbl_progress_step.setText(
+                        f"Đã xong & nạp FW [{slid}]. Rút cáp cắm ngay ONT tiếp theo [{next_slid}]..."
+                    )
+                else:
+                    self.lbl_progress_step.setText(
+                        f"Đã xong [{slid}]. Đang chờ cắm ONT tiếp theo cho [{next_slid}]..."
+                    )
             play_alert_sound()
             self._completion_dialog_open = True
             try:
-                self._show_completion_dialog(slid)
+                self._show_completion_dialog(slid, firmware_updated=fw_updated)
             finally:
                 self._completion_dialog_open = False
                 self._completion_msg_box = None
@@ -648,12 +852,19 @@ class MainWindow(QMainWindow):
                 "Bạn có thể ấn THỬ LẠI (RETRY) hoặc BỎ QUA (SKIP).",
             )
 
-    def _show_completion_dialog(self, slid: str) -> None:
+    def _show_completion_dialog(self, slid: str, firmware_updated: bool = False) -> None:
         """Show completion dialog that also auto-closes when the next ONT is plugged in and online."""
-        text = (
-            f"ĐÃ HOÀN TẤT CẤU HÌNH THIẾT BỊ [{slid}]!\n\n"
-            "Vui lòng rút cáp mạng và cắm thiết bị tiếp theo."
-        )
+        if firmware_updated:
+            text = (
+                f"ĐÃ CẤU HÌNH & TẢI LÊN FIRMWARE THÀNH CÔNG CHO [{slid}]!\n\n"
+                "Thiết bị đang tự động ghi Flash & Khởi động lại ngầm (~2 phút).\n"
+                "BẠN CÓ THỂ RÚT CÁP MẠNG NGAY LẬP TỨC và cắm sang ONT tiếp theo!"
+            )
+        else:
+            text = (
+                f"ĐÃ HOÀN TẤT CẤU HÌNH THIẾT BỊ [{slid}]!\n\n"
+                "Vui lòng rút cáp mạng và cắm thiết bị tiếp theo."
+            )
         # Preserve mock compatibility if QMessageBox.information is patched in unit tests
         if hasattr(QMessageBox.information, "_mock_name") or not callable(QMessageBox.information):
             QMessageBox.information(self, "Hoàn Tất Thiết Bị", text)

@@ -15,9 +15,10 @@ Simulates all 10 configuration steps:
 import json
 import threading
 import urllib.parse
+from email.parser import BytesParser
+from email.policy import default as default_email_policy
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, Tuple, Optional
-
 
 class MockLuCIHandler(BaseHTTPRequestHandler):
     """HTTP request handler simulating VNPT ONT LuCI CGI endpoints."""
@@ -51,13 +52,30 @@ class MockLuCIHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
-        raw_body = self.rfile.read(length).decode("utf-8", errors="ignore")
+        raw_bytes = self.rfile.read(length)
+        content_type = self.headers.get("Content-Type", "")
 
-        # Parse urlencoded params (handling ont_encode_query \x7f or &)
-        normalized_body = raw_body.replace("\x7f", "&")
-        parsed = urllib.parse.parse_qs(normalized_body)
-        post_data = {k: v[0] for k, v in parsed.items()}
+        uploaded_bytes = 0
+        uploaded_filename = ""
+        post_data: Dict[str, str] = {}
 
+        if "multipart/form-data" in content_type:
+            header_bytes = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
+            msg = BytesParser(policy=default_email_policy).parsebytes(header_bytes + raw_bytes)
+            for part in msg.iter_parts():
+                field_name = part.get_param("name", header="content-disposition")
+                filename = part.get_filename()
+                payload = part.get_payload(decode=True) or b""
+                if field_name == "file" or filename:
+                    uploaded_bytes = len(payload)
+                    uploaded_filename = filename or ""
+                elif field_name:
+                    post_data[field_name] = payload.decode("utf-8", errors="ignore")
+        else:
+            raw_body = raw_bytes.decode("utf-8", errors="ignore")
+            normalized_body = raw_body.replace("\x7f", "&")
+            parsed = urllib.parse.parse_qs(normalized_body.replace("+", "%2B"), keep_blank_values=True)
+            post_data = {k: v[0] for k, v in parsed.items()}
         server: MockLuCIServer = self.server  # type: ignore
 
         # 1. Login Endpoint
@@ -194,7 +212,19 @@ class MockLuCIHandler(BaseHTTPRequestHandler):
         if "/cgi-bin/luci/wirelesscfg.json" in self.path:
             unit = post_data.get("wl_unit", "0")
             ssid = post_data.get("wl_ssid", "")
-            server.wifi_configs[unit] = {"ssid": ssid, "pass": post_data.get("wl_wpa_psk", "")}
+            sec_mode = post_data.get("sec_mode", "wpa2_wpa3_psk")
+            if server.simulate_conflict_mesh:
+                self._send_json({"status": "conflict_mesh"})
+                server.request_history.append(("wirelesscfg.json", post_data))
+                return
+            server.wifi_configs[unit] = {
+                "ssid": ssid,
+                "pass": post_data.get("wl_wpa_psk", ""),
+                "sec_mode": sec_mode,
+                "wl_akm_psk": post_data.get("wl_akm_psk", ""),
+                "wl_akm_psk2": post_data.get("wl_akm_psk2", ""),
+                "wl_crypto": post_data.get("wl_crypto", ""),
+            }
             self._send_json({"status": "OK"})
             server.request_history.append(("wirelesscfg.json", post_data))
             return
@@ -216,6 +246,47 @@ class MockLuCIHandler(BaseHTTPRequestHandler):
             server.request_history.append(("savelanv4cfg.cmd", post_data))
             return
 
+
+        # 10b. Firmware Update Session Check
+        if "/cgi-bin/luci/updatefwsessioncheck.json" in self.path:
+            if post_data.get("sessionKey") != server.active_session:
+                self._send_json({"status": "FAIL"}, status=403)
+                return
+            self._send_json({"status": "OK"})
+            server.request_history.append(("updatefwsessioncheck.json", post_data))
+            return
+
+        # 10c. Firmware Image RAM Size Check
+        if "/cgi-bin/luci/imagesize.json" in self.path:
+            if post_data.get("sessionKey") != server.active_session:
+                self._send_json({"status": "FAIL"}, status=403)
+                return
+            self._send_json({
+                "ramFree": str(server.ram_free_kb),
+                "sessionKey": server.active_session,
+            })
+            server.request_history.append(("imagesize.json", post_data))
+            return
+
+        # 10d. Upload Software Multipart Endpoint
+        if "/cgi-bin/luci/uploadsoftware.conf" in self.path:
+            cur_session = server.active_session
+            if "multipart/form-data" not in content_type or post_data.get("sessionKey") != cur_session:
+                self._send_json({"status": "invalid", "sessionKey": cur_session}, status=400)
+                return
+            server.uploaded_firmware_bytes = uploaded_bytes
+            server.uploaded_firmware_name = uploaded_filename
+            if server.reject_firmware or uploaded_bytes <= 0:
+                self._send_json({"status": "invalid", "sessionKey": cur_session})
+                server.request_history.append(("uploadsoftware.conf", {"size": uploaded_bytes, "status": "invalid"}))
+                return
+            server.firmware_updated = True
+            server.active_session = ""
+            self._send_json({"status": "valid", "sessionKey": cur_session})
+            server.request_history.append(
+                ("uploadsoftware.conf", {"size": uploaded_bytes, "filename": uploaded_filename, "status": "valid"})
+            )
+            return
         # 11. Logout Endpoint
         if "/cgi-bin/luci/logout.cmd" in self.path:
             server.active_session = ""
@@ -244,6 +315,12 @@ class MockLuCIServer(HTTPServer):
             {"action": "false", "vlanId": "4000", "idx": 1, "ifcStr": "veip0.4000", "srvcStr": "tr069"}
         ]
         self.request_history = []
+        self.ram_free_kb: int = 251696
+        self.firmware_updated: bool = False
+        self.uploaded_firmware_bytes: int = 0
+        self.uploaded_firmware_name: str = ""
+        self.reject_firmware: bool = False
+        self.simulate_conflict_mesh: bool = False
 
 
 def run_mock_server(host: str = "127.0.0.1", port: int = 0) -> Tuple[MockLuCIServer, threading.Thread, str]:

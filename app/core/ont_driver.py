@@ -5,8 +5,10 @@ hardware lockout protection (numberLogin), idempotency for WAN,
 WiFi driver settling pause, and mandatory logout in finally block.
 """
 
+import os
 import re
 import time
+import urllib.parse
 import urllib3
 import requests
 from typing import Callable, Optional, Dict, Any
@@ -18,6 +20,45 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Shell metacharacters blocked by LuCI
 UNSAFE_SHELL_METACHARS = {'&', '|', ';', '$', '>', '<', '`', '\\', '!', "'", '"'}
 
+
+WIFI_SECURITY_MODES: Dict[str, Dict[str, str]] = {
+    "wpa2_wpa3_psk": {
+        "label": "WPA2-PSK / WPA3-PSK (Mặc định)",
+        "wl_akm_psk": "enabled",
+        "wl_akm_psk2": "enabled",
+        "wl_crypto": "aes",
+    },
+    "wpa2_psk": {
+        "label": "WPA2-PSK (Tương thích rộng / Mesh)",
+        "wl_akm_psk": "enabled",
+        "wl_akm_psk2": "enabled",
+        "wl_crypto": "aes",
+    },
+    "wpa_wpa2_psk": {
+        "label": "WPA-PSK / WPA2-PSK (Thiết bị cũ / Mesh)",
+        "wl_akm_psk": "enabled",
+        "wl_akm_psk2": "enabled",
+        "wl_crypto": "tkip+aes",
+    },
+    "wpa3_psk": {
+        "label": "WPA3-PSK",
+        "wl_akm_psk": "enabled",
+        "wl_akm_psk2": "enabled",
+        "wl_crypto": "aes",
+    },
+    "wpa_psk": {
+        "label": "WPA-PSK",
+        "wl_akm_psk": "enabled",
+        "wl_akm_psk2": "enabled",
+        "wl_crypto": "tkip+aes",
+    },
+    "open": {
+        "label": "Open (Không mật khẩu)",
+        "wl_akm_psk": "disabled",
+        "wl_akm_psk2": "disabled",
+        "wl_crypto": "aes",
+    },
+}
 
 class ONTDriverError(Exception):
     """Base exception for ONT Driver operations."""
@@ -64,12 +105,64 @@ def sanitize_input_metacharacters(text: str) -> str:
     if not isinstance(text, str):
         text = str(text or "")
     for char in text:
-        if char in UNSAFE_SHELL_METACHARS:
+        if char in UNSAFE_SHELL_METACHARS or ord(char) < 0x20 or ord(char) == 0x7F:
             raise ONTValidationError(
-                f"Ký tự '{char}' không an toàn cho hệ thống LuCI CGI (chứa shell metacharacter)."
+                f"Ký tự '{char}' không an toàn cho hệ thống LuCI CGI (chứa shell metacharacter hoặc ký tự điều khiển)."
             )
     return text
 
+
+
+def url_encode_form_value(text: str) -> str:
+    """Percent-encode a form value for LuCI CGI payload (RFC 3986 unreserved chars safe)."""
+    if not isinstance(text, str):
+        text = str(text or "")
+    return urllib.parse.quote(text, safe="-._~")
+
+
+def resolve_wifi_security_params(sec_mode: str) -> Dict[str, str]:
+    """Resolve wl_akm_psk, wl_akm_psk2, and wl_crypto for a given Wi-Fi security mode."""
+    mode = (sec_mode or "").strip()
+    if mode not in WIFI_SECURITY_MODES:
+        raise ONTValidationError(f"Chế độ bảo mật Wi-Fi '{sec_mode}' không hợp lệ.")
+    return WIFI_SECURITY_MODES[mode]
+
+
+def validate_wifi_ssid_and_pass(
+    ssid: str, password: str, sec_mode: str = "wpa2_wpa3_psk", band_label: str = "Wi-Fi"
+) -> None:
+    """Validate Wi-Fi SSID and password according to the selected security mode."""
+    mode = (sec_mode or "").strip()
+    resolve_wifi_security_params(mode)
+
+    if not isinstance(ssid, str):
+        ssid = str(ssid or "")
+    if not isinstance(password, str):
+        password = str(password or "")
+
+    sanitize_input_metacharacters(ssid)
+    sanitize_input_metacharacters(password)
+
+    if not (1 <= len(ssid) <= 32) or not ssid.strip():
+        raise ONTValidationError(
+            f"SSID {band_label} phải từ 1 đến 32 ký tự và không được chứa toàn dấu cách."
+        )
+    if any(ord(c) < 0x20 or ord(c) > 0x7E for c in ssid):
+        raise ONTValidationError(
+            f"SSID {band_label} chỉ cho phép ký tự ASCII không dấu (0x20..0x7E)."
+        )
+
+    if any(ord(c) < 0x20 or ord(c) > 0x7E for c in password):
+        raise ONTValidationError(
+            f"Mật khẩu {band_label} chỉ cho phép ký tự ASCII không dấu (0x20..0x7E)."
+        )
+
+    if mode != "open":
+        if not (8 <= len(password) <= 63) or not password.strip():
+            raise ONTValidationError(
+                f"Mật khẩu {band_label} phải từ 8 đến 63 ký tự ASCII và không được chứa toàn dấu cách "
+                f"khi chọn chuẩn bảo mật '{mode}'."
+            )
 
 def validate_password_complexity(password: str) -> bool:
     """Check ONT password complexity: min 8 chars, uppercase, lowercase, digit, special char."""
@@ -303,35 +396,61 @@ class ONTDriver:
         return resp.json() if resp.text else {"status": "OK"}
 
     def configure_wifi(
-        self, unit: int, ssid: str, password: str, pause_settling: bool = True
+        self,
+        unit: int,
+        ssid: str,
+        password: str,
+        pause_settling: bool = True,
+        sec_mode: str = "wpa2_wpa3_psk",
     ) -> Dict[str, Any]:
         """Configure WiFi band: unit 0 for 2.4GHz, unit 1 for 5GHz."""
-        sanitize_input_metacharacters(ssid)
-        sanitize_input_metacharacters(password)
+        sec_mode_clean = (sec_mode or "wpa2_wpa3_psk").strip()
+        params = resolve_wifi_security_params(sec_mode_clean)
+        validate_wifi_ssid_and_pass(ssid, password, sec_mode_clean, f"unit={unit}")
+
+        enc_ssid = url_encode_form_value(ssid)
+        enc_pass = url_encode_form_value(password)
+        enc_sec = url_encode_form_value(sec_mode_clean)
+        enc_key = url_encode_form_value(self.session_key)
 
         cfg_url = f"{self.base_url}/cgi-bin/luci/wirelesscfg.json"
         payload = (
             f"page=ssid.asp&action=Apply&wl_unit={unit}&wl_radio=1&wl_bssid=0&wl_bss_enabled=1"
-            f"&wl_ssid={ssid}&wl_bss_maxassoc=32&wl_closed=0&sec_mode=wpa2_wpa3_psk"
-            f"&wl_wpa_psk={password}&wl_mode=null&wl_auth=0&wl_auth_mode=radius&wl_osenen=0"
-            f"&wl_akm=&wl_akm_wpa=disabled&wl_akm_psk=enabled&wl_akm_wpa2=disabled&wl_akm_psk2=enabled"
-            f"&wl_akm_brcm_psk=disabled&wl_preauth=disabled&wl_wep=disabled&wl_crypto=aes"
-            f"&wl_radius_ipaddr=0.0.0.0&wl_radius_port=1812&wl_radius_key=1234&sessionKey={self.session_key}"
+            f"&wl_ssid={enc_ssid}&wl_bss_maxassoc=32&wl_closed=0&sec_mode={enc_sec}"
+            f"&wl_wpa_psk={enc_pass}&wl_mode=null&wl_auth=0&wl_auth_mode=radius&wl_osenen=0"
+            f"&wl_akm=&wl_akm_wpa=disabled&wl_akm_psk={params['wl_akm_psk']}"
+            f"&wl_akm_wpa2=disabled&wl_akm_psk2={params['wl_akm_psk2']}"
+            f"&wl_akm_brcm_psk=disabled&wl_preauth=disabled&wl_wep=disabled&wl_crypto={params['wl_crypto']}"
+            f"&wl_radius_ipaddr=0.0.0.0&wl_radius_port=1812&wl_radius_key=1234&sessionKey={enc_key}"
         )
         resp = self.session.post(cfg_url, data=payload, timeout=self.timeout)
         if resp.status_code != 200:
             raise ONTDriverError(f"Cài đặt WiFi unit={unit} thất bại (HTTP {resp.status_code})")
 
+        try:
+            cfg_data = resp.json() if resp.text else {}
+        except Exception:
+            cfg_data = {}
+        if isinstance(cfg_data, dict):
+            cfg_status = str(cfg_data.get("status", "")).strip()
+            if cfg_status == "conflict_mesh":
+                raise ONTDriverError(
+                    "ONT đang bật Mesh nên không cho phép đổi chế độ bảo mật Wi-Fi sang Open "
+                    "(chỉ hỗ trợ WPA2-PSK hoặc WPA-PSK/WPA2-PSK)."
+                )
+            if cfg_status and cfg_status != "OK":
+                raise ONTDriverError(f"Cài đặt WiFi unit={unit} bị từ chối (status={cfg_status})")
+
         # Restart WiFi driver to apply
         restart_url = f"{self.base_url}/cgi-bin/luci/wlrestart.json"
-        restart_payload = f"undefined&sessionKey={self.session_key}"
+        restart_payload = f"undefined&sessionKey={enc_key}"
         self.session.post(restart_url, data=restart_payload, timeout=self.timeout)
 
         # Broadcom radio driver settling pause between bands
         if unit == 0 and pause_settling:
             time.sleep(2.0)
 
-        return {"status": "OK", "unit": unit}
+        return {"status": "OK", "unit": unit, "sec_mode": sec_mode_clean}
 
     def configure_lan(
         self,
@@ -354,6 +473,100 @@ class ONTDriver:
             raise ONTDriverError(f"Lưu cấu hình LAN thất bại (HTTP {resp.status_code})")
         return resp.json() if resp.text else {"status": "OK"}
 
+
+    def update_firmware(self, firmware_path: str, upload_timeout: float = 120.0) -> Dict[str, Any]:
+        """Upload firmware image via LuCI CGI and trigger automatic ONT flash & reboot."""
+        fw_path = (firmware_path or "").strip()
+        if not fw_path or not os.path.isfile(fw_path):
+            raise ONTValidationError(f"File firmware không tồn tại: '{fw_path}'")
+        file_size = os.path.getsize(fw_path)
+        if file_size <= 0:
+            raise ONTValidationError(f"File firmware rỗng (0 byte): '{fw_path}'")
+
+        raw_name = os.path.basename(fw_path)
+        safe_filename = re.sub(r"[^a-zA-Z0-9_.\-]", "_", raw_name) or "firmware.signed"
+        referer_hdr = {"Referer": f"{self.base_url}/update_software.html"}
+
+        # 1. Check firmware update session
+        chk_url = f"{self.base_url}/cgi-bin/luci/updatefwsessioncheck.json"
+        try:
+            chk_resp = self.session.post(
+                chk_url, data=f"sessionKey={self.session_key}", headers=referer_hdr, timeout=self.timeout
+            )
+        except requests.RequestException as e:
+            raise ONTNetworkError(f"Lỗi mạng khi kiểm tra phiên nâng cấp firmware: {e}") from e
+        if chk_resp.status_code != 200:
+            raise ONTDriverError(f"Kiểm tra phiên nâng cấp firmware thất bại (HTTP {chk_resp.status_code})")
+        try:
+            chk_data = chk_resp.json() if chk_resp.text else {}
+        except ValueError as e:
+            raise ONTDriverError("Phản hồi updatefwsessioncheck.json không đúng định dạng JSON.") from e
+        if chk_data.get("status") != "OK":
+            raise ONTDriverError(f"Phiên nâng cấp firmware không hợp lệ (status={chk_data.get('status')}).")
+
+        # 2. Query available RAM size (KB)
+        img_url = f"{self.base_url}/cgi-bin/luci/imagesize.json"
+        try:
+            img_resp = self.session.post(
+                img_url, data=f"sessionKey={self.session_key}", headers=referer_hdr, timeout=self.timeout
+            )
+        except requests.RequestException as e:
+            raise ONTNetworkError(f"Lỗi mạng khi kiểm tra dung lượng RAM trống của ONT: {e}") from e
+        if img_resp.status_code != 200:
+            raise ONTDriverError(f"Không thể kiểm tra dung lượng RAM trống của ONT (HTTP {img_resp.status_code})")
+        try:
+            img_data = img_resp.json() if img_resp.text else {}
+        except ValueError as e:
+            raise ONTDriverError("Phản hồi imagesize.json không đúng định dạng JSON.") from e
+        if img_data.get("sessionKey"):
+            self.session_key = img_data["sessionKey"]
+        ram_free_str = str(img_data.get("ramFree", "")).strip()
+        if not ram_free_str.isdigit():
+            raise ONTDriverError(f"Không đọc được thông số ramFree hợp lệ từ ONT (ramFree={ram_free_str!r}).")
+        ram_free_kb = int(ram_free_str)
+        file_size_kb = file_size / 1024.0
+        if ram_free_kb <= 0 or file_size_kb > ram_free_kb:
+            raise ONTDriverError(
+                f"Không đủ bộ nhớ RAM trống trên ONT ({ram_free_kb} KB) để tải file firmware ({int(file_size_kb)} KB)."
+            )
+
+        # 3. Upload firmware binary via multipart/form-data
+        upload_url = f"{self.base_url}/cgi-bin/luci/uploadsoftware.conf"
+        try:
+            with open(fw_path, "rb") as fw_file:
+                multipart_files = [
+                    ("file", (safe_filename, fw_file, "application/octet-stream")),
+                    ("sessionKey", (None, self.session_key)),
+                ]
+                up_resp = self.session.post(
+                    upload_url,
+                    files=multipart_files,
+                    headers={
+                        "Content-Type": None,
+                        "Referer": f"{self.base_url}/update_software.html",
+                        "Accept": "application/json, text/javascript, */*; q=0.01",
+                    },
+                    timeout=upload_timeout,
+                )
+        except requests.RequestException as e:
+            raise ONTNetworkError(f"Lỗi kết nối trong khi tải lên file firmware: {e}") from e
+        if up_resp.status_code != 200:
+            raise ONTDriverError(f"Tải lên file firmware thất bại (HTTP {up_resp.status_code})")
+
+        try:
+            up_data = up_resp.json() if up_resp.text else {}
+        except ValueError as e:
+            raise ONTDriverError("Phản hồi uploadsoftware.conf không đúng định dạng JSON.") from e
+        if up_data.get("sessionKey"):
+            self.session_key = up_data["sessionKey"]
+        if up_data.get("status") != "valid":
+            raise ONTDriverError(
+                f"File firmware không hợp lệ hoặc sai chữ ký (status={up_data.get('status', 'unknown')})."
+            )
+        # Crucial [Red Team RT-01]: Clear session_key immediately before returning so finally: self.logout()
+        # never sends logout.cmd into an ONT that has already started flashing/rebooting.
+        self.session_key = ""
+        return up_data
     def logout(self) -> None:
         """Step 10: Mandatory session release to prevent 'user exist' lockout."""
         if not self.session_key:
@@ -373,14 +586,39 @@ class ONTDriver:
         global_cfg: GlobalConfig,
         progress_cb: Optional[Callable[[str, int, int, str, str], None]] = None,
     ) -> Dict[str, Any]:
-        """Execute full 10-step sequence with try ... finally: self.logout()."""
-        total_steps = 10
+        """Execute full 10-step (or 11-step with firmware update) sequence with try ... finally: self.logout()."""
+        do_fw_update = bool(global_cfg.enable_firmware_update)
+        fw_path = (global_cfg.firmware_path or "").strip()
+        total_steps = 11 if do_fw_update else 10
 
         def emit(step_name: str, step_num: int, status: str = "RUNNING", detail: str = ""):
             if progress_cb:
                 progress_cb(step_name, step_num, total_steps, status, detail)
 
         try:
+            sec_mode = (global_cfg.wifi_security_mode or "wpa2_wpa3_psk").strip()
+            wifi24_ssid = device_cfg.ssid_24g or f"VNPT_{device_cfg.slid}"
+            wifi24_pass = (
+                (device_cfg.pass_24g or "")
+                if sec_mode == "open"
+                else (device_cfg.pass_24g or "1234567890")
+            )
+            wifi5_ssid = device_cfg.ssid_5g or (
+                f"{wifi24_ssid} 5G" if wifi24_ssid else global_cfg.default_wifi5_ssid
+            )
+            wifi5_pass = (
+                (device_cfg.pass_5g or "")
+                if sec_mode == "open"
+                else (device_cfg.pass_5g or wifi24_pass or global_cfg.default_wifi5_pass)
+            )
+            validate_wifi_ssid_and_pass(wifi24_ssid, wifi24_pass, sec_mode, "Wi-Fi 2.4GHz")
+            validate_wifi_ssid_and_pass(wifi5_ssid, wifi5_pass, sec_mode, "Wi-Fi 5GHz")
+
+            if do_fw_update:
+                if not fw_path or not os.path.isfile(fw_path):
+                    raise ONTValidationError(f"File firmware không tồn tại: '{fw_path}'")
+                if os.path.getsize(fw_path) <= 0:
+                    raise ONTValidationError(f"File firmware rỗng (0 byte): '{fw_path}'")
             # Step 1: Probe Gateway
             emit("Probe Gateway ONT", 1, "RUNNING", f"Kiểm tra kết nối {self.base_url}")
             if not self.probe_gateway():
@@ -411,17 +649,17 @@ class ONTDriver:
             emit("Cài đặt GPON Password (SLID)", 4, "SUCCESS", f"SLID {device_cfg.slid} đã nạp thành công")
 
             # Step 5: WiFi 2.4GHz
-            wifi24_ssid = device_cfg.ssid_24g or f"VNPT_{device_cfg.slid}"
-            wifi24_pass = device_cfg.pass_24g or "1234567890"
             emit("Cấu hình Wi-Fi 2.4GHz", 5, "RUNNING", f"SSID: {wifi24_ssid}")
-            self.configure_wifi(unit=0, ssid=wifi24_ssid, password=wifi24_pass, pause_settling=True)
+            self.configure_wifi(
+                unit=0, ssid=wifi24_ssid, password=wifi24_pass, pause_settling=True, sec_mode=sec_mode
+            )
             emit("Cấu hình Wi-Fi 2.4GHz", 5, "SUCCESS", "Wi-Fi 2.4GHz đã lưu và nạp driver")
 
             # Step 6: WiFi 5GHz
-            wifi5_ssid = device_cfg.ssid_5g or (f"{wifi24_ssid} 5G" if wifi24_ssid else global_cfg.default_wifi5_ssid)
-            wifi5_pass = device_cfg.pass_5g or wifi24_pass or global_cfg.default_wifi5_pass
             emit("Cấu hình Wi-Fi 5GHz", 6, "RUNNING", f"SSID: {wifi5_ssid}")
-            self.configure_wifi(unit=1, ssid=wifi5_ssid, password=wifi5_pass, pause_settling=False)
+            self.configure_wifi(
+                unit=1, ssid=wifi5_ssid, password=wifi5_pass, pause_settling=False, sec_mode=sec_mode
+            )
             emit("Cấu hình Wi-Fi 5GHz", 6, "SUCCESS", "Wi-Fi 5GHz đã lưu và nạp driver")
 
             # Step 7: LAN IPv4 Verification
@@ -440,6 +678,38 @@ class ONTDriver:
             emit("Đo kiểm & Xác thực dịch vụ", 8, "SUCCESS", "Các tham số dịch vụ đã kích hoạt")
             emit("Đồng bộ dữ liệu trạng thái", 9, "SUCCESS", "Chuẩn bị hoàn tất phiên")
 
+            if do_fw_update:
+                fw_basename = os.path.basename(fw_path)
+                emit("Nâng cấp Firmware (Update Software)", 10, "RUNNING", f"Đang tải lên {fw_basename}...")
+                try:
+                    self.update_firmware(fw_path, upload_timeout=global_cfg.firmware_upload_timeout)
+                except ONTDriverError as e:
+                    raise type(e)(
+                        f"Đã đổ xong cấu hình (Bước 1-9), nhưng lỗi Nâng cấp Firmware (Bước 10): {e}"
+                    ) from e
+                emit(
+                    "Nâng cấp Firmware (Update Software)",
+                    10,
+                    "SUCCESS",
+                    "Đã tải lên Firmware hợp lệ, ONT bắt đầu cập nhật",
+                )
+                emit(
+                    "Hoàn tất & Tự động Khởi động lại ONT",
+                    11,
+                    "SUCCESS",
+                    "ONT đang tự nâng cấp và khởi động lại. Có thể rút cáp ngay!",
+                )
+                return {
+                    "status": "SUCCESS",
+                    "slid": device_cfg.slid,
+                    "so_may": device_cfg.slid,
+                    "account_pppoe": device_cfg.account_pppoe,
+                    "firmware_updated": True,
+                    "firmware_file": fw_basename,
+                    "wifi_security_mode": sec_mode,
+                    "message": "Cấu hình thiết bị và nâng cấp Firmware hoàn tất 11/11 bước an toàn",
+                }
+
             # Step 10: Step marker for UI before logout
             emit("Đăng xuất & Dọn dẹp phiên (Logout)", 10, "SUCCESS", "Giải phóng phiên làm việc an toàn")
 
@@ -448,9 +718,10 @@ class ONTDriver:
                 "slid": device_cfg.slid,
                 "so_may": device_cfg.slid,
                 "account_pppoe": device_cfg.account_pppoe,
+                "firmware_updated": False,
+                "wifi_security_mode": sec_mode,
                 "message": "Cấu hình thiết bị hoàn tất 10/10 bước an toàn",
             }
-
         finally:
             # Crucial: Always call logout to prevent "user exist" session locks
             self.logout()

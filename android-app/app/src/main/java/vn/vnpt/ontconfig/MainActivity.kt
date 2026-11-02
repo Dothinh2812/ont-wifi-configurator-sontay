@@ -82,6 +82,14 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
+                    val firmwarePickerLauncher = rememberLauncherForActivityResult(
+                        contract = ActivityResultContracts.OpenDocument()
+                    ) { uri ->
+                        if (uri != null) {
+                            viewModel.importFirmwareFromUri(uri)
+                        }
+                    }
+
                     val wifiPermissionLauncher = rememberLauncherForActivityResult(
                         contract = ActivityResultContracts.RequestMultiplePermissions()
                     ) {
@@ -142,7 +150,14 @@ class MainActivity : ComponentActivity() {
                             connectedBand = uiState.connectedBand,
                             isOntGatewayOnline = uiState.isOntGatewayOnline,
                             statusMessage = uiState.statusMessage,
+                            isRunningSetup = uiState.isRunningSetup,
+                            isImportingFirmware = uiState.isImportingFirmware,
                             onOpenWifiScanner = ::ensurePermissionsAndOpenWifiScanner,
+                            onPickFirmwareFile = {
+                                firmwarePickerLauncher.launch(
+                                    arrayOf("application/octet-stream", "*/*")
+                                )
+                            },
                             onAutoSyncWifi5gChange = viewModel::setAutoSyncWifi5g,
                             onUpdateRecord = viewModel::updateSelectedRecord,
                             onUpdateSettings = viewModel::updateGlobalSettings,
@@ -197,12 +212,16 @@ class MainActivity : ComponentActivity() {
                             steps = uiState.stepProgressList,
                             setupResult = uiState.setupResult,
                             errorMessage = uiState.executionError,
+                            manualWifiError = uiState.manualWifiError,
                             onJoinNewWifi = viewModel::joinNewlyConfiguredWifi,
                             onExportAndShareReport = viewModel::exportAndShareExcelReport,
                             onOpenWifiScanner = {
-                                viewModel.dismissExecutionSheet()
+                                if (uiState.setupResult?.manualWifiStepPending != true) {
+                                    viewModel.dismissExecutionSheet()
+                                }
                                 ensurePermissionsAndOpenWifiScanner()
                             },
+                            onRunManualConnectedWifi = viewModel::runManualConnectedWifiStep,
                             onRetryRun = viewModel::runOntConfiguration,
                             onDismiss = viewModel::dismissExecutionSheet
                         )

@@ -11,6 +11,7 @@ import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.OpenableColumns
 import androidx.core.content.FileProvider
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -63,9 +64,11 @@ data class MainUiState(
     val scannedOntCandidates: List<WifiScanCandidate> = emptyList(),
     val showExecutionSheet: Boolean = false,
     val isRunningSetup: Boolean = false,
+    val isImportingFirmware: Boolean = false,
     val stepProgressList: List<StepProgress> = defaultSevenSteps(),
     val setupResult: MobileSetupResult? = null,
     val executionError: String? = null,
+    val manualWifiError: String? = null,
     val statusMessage: String? = null
 ) {
     companion object {
@@ -76,7 +79,18 @@ data class MainUiState(
             StepProgress(4, 7, "Bước 4/7: Cài đặt GPON Password (SLID / Mã MEN)", StepStatus.PENDING),
             StepProgress(5, 7, "Bước 5/7: Kiểm tra & Lưu cấu hình LAN IPv4", StepStatus.PENDING),
             StepProgress(6, 7, "Bước 6/7: Cấu hình Wi-Fi băng tần phụ", StepStatus.PENDING),
-            StepProgress(7, 7, "Bước 7/7: Đổi tên & mật khẩu Wi-Fi băng tần kết nối (Bước cuối)", StepStatus.PENDING)
+            StepProgress(7, 7, "Bước 7/7: Kết nối Wi-Fi phụ & Đổi tên Wi-Fi còn lại (Bước cuối)", StepStatus.PENDING)
+        )
+
+        fun defaultEightStepsWithFirmware(): List<StepProgress> = listOf(
+            StepProgress(1, 8, "Bước 1/8: Kiểm tra kết nối & nhận diện ONT Gateway", StepStatus.PENDING),
+            StepProgress(2, 8, "Bước 2/8: Đăng nhập & Đổi mật khẩu Admin", StepStatus.PENDING),
+            StepProgress(3, 8, "Bước 3/8: Cấu hình WAN PPPoE (VLAN 11)", StepStatus.PENDING),
+            StepProgress(4, 8, "Bước 4/8: Cài đặt GPON Password (SLID / Mã MEN)", StepStatus.PENDING),
+            StepProgress(5, 8, "Bước 5/8: Kiểm tra & Lưu cấu hình LAN IPv4", StepStatus.PENDING),
+            StepProgress(6, 8, "Bước 6/8: Cấu hình Wi-Fi băng tần phụ", StepStatus.PENDING),
+            StepProgress(7, 8, "Bước 7/8: Tải lên & Cập nhật Firmware ONT (Trước bước cuối)", StepStatus.PENDING),
+            StepProgress(8, 8, "Bước 8/8: Đổi Wi-Fi kết nối chính (Thực hiện thủ công sau khi ONT reboot)", StepStatus.PENDING)
         )
     }
 }
@@ -103,9 +117,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile
     private var consecutiveMisses = 0
 
+    // [Red Team RT-01] Suppress passive Wi-Fi auto-bind & probe immediately after firmware upload
+    // so the phone keeps 4G/5G cellular and never probes/binds the flashing ONT.
+    @Volatile
+    private var suppressAutoBindAfterFirmware = false
+
     init {
         loadPersistedRecords()
-        wifiConnector.startMonitoringSystemWifi {
+        loadCachedFirmwareOnInit()
+        wifiConnector.startMonitoringSystemWifi(
+            shouldAutoBind = { !suppressAutoBindAfterFirmware && !_uiState.value.isRunningSetup }
+        ) {
             viewModelScope.launch(Dispatchers.IO) {
                 performGatewayProbeOnce()
             }
@@ -113,6 +135,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         startBackgroundGatewayProbeLoop()
     }
 
+    private fun loadCachedFirmwareOnInit() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val fwDir = File(appContext.noBackupFilesDir, "firmware_cache")
+                val cachedFile = fwDir.listFiles()
+                    ?.filter {
+                        it.isFile &&
+                            OntInputValidator.isValidFirmwareExtension(it.name) &&
+                            it.length() in OntInputValidator.MIN_FIRMWARE_SIZE_BYTES..OntInputValidator.MAX_FIRMWARE_SIZE_BYTES
+                    }
+                    ?.maxByOrNull { it.lastModified() }
+                if (cachedFile != null) {
+                    _uiState.update { state ->
+                        if (state.globalSettings.firmwareFilePath.isBlank()) {
+                            state.copy(
+                                globalSettings = state.globalSettings.copy(
+                                    firmwareFilePath = cachedFile.absolutePath,
+                                    firmwareFileName = cachedFile.name,
+                                    firmwareFileSize = cachedFile.length()
+                                )
+                            )
+                        } else {
+                            state
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
     private fun loadPersistedRecords() {
         viewModelScope.launch(Dispatchers.IO) {
             val entities = dao.getAll()
@@ -127,7 +179,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * is detected immediately, and transitions to ONLINE on the first verified ONT HTML signature.
      */
     private suspend fun performGatewayProbeOnce(): Boolean {
-        if (_uiState.value.isRunningSetup || !probePauseMutex.tryLock()) {
+        if (_uiState.value.isRunningSetup || suppressAutoBindAfterFirmware || !probePauseMutex.tryLock()) {
             return _uiState.value.isOntGatewayOnline
         }
         try {
@@ -154,7 +206,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { state ->
                 val effectiveSsid = ssid.ifBlank { state.connectedWifiSsid }
                 val effectiveBssid = bssid.ifBlank { state.connectedWifiBssid }
-                val effectiveBand = wifiConnector.detectConnectedBand(effectiveSsid)
+                val sel = state.selectedRecord
+                val effectiveBand = wifiConnector.detectConnectedBand(
+                    ssidHint = effectiveSsid,
+                    configured24Ssid = sel?.effectiveWifi24Ssid,
+                    configured5Ssid = sel?.effectiveWifi5Ssid
+                )
                 state.copy(
                     connectedWifiSsid = effectiveSsid,
                     connectedWifiBssid = effectiveBssid,
@@ -274,6 +331,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectSubscriber(record: SubscriberRecord?) {
+        if (record != null) {
+            suppressAutoBindAfterFirmware = false
+        }
         _uiState.update { state ->
             val latest = if (record != null) {
                 state.allRecords.find { it.rowIndex == record.rowIndex } ?: record
@@ -353,14 +413,157 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateGlobalSettings(newSettings: GlobalSettings) {
-        val urlChanged = _uiState.value.globalSettings.baseUrl != newSettings.baseUrl
-        _uiState.update { it.copy(globalSettings = newSettings) }
+        val prevSettings = _uiState.value.globalSettings
+        val urlChanged = prevSettings.baseUrl != newSettings.baseUrl
+        val fwToggleChanged = prevSettings.enableFirmwareUpdate != newSettings.enableFirmwareUpdate
+        _uiState.update { state ->
+            val updatedSteps = if (fwToggleChanged && !state.isRunningSetup) {
+                if (newSettings.enableFirmwareUpdate) {
+                    MainUiState.defaultEightStepsWithFirmware()
+                } else {
+                    MainUiState.defaultSevenSteps()
+                }
+            } else {
+                state.stepProgressList
+            }
+            state.copy(
+                globalSettings = newSettings,
+                stepProgressList = updatedSteps
+            )
+        }
         if (urlChanged) {
             probeDriver = OntMobileDriver(
                 baseUrl = newSettings.baseUrl,
                 timeoutMs = 1200L,
                 socketFactory = wifiConnector.boundWifiNetwork?.socketFactory
             )
+        }
+    }
+
+    /**
+     * [Red Team RT-04] Stream and cache selected firmware image from Android SAF URI into
+     * non-exported `noBackupFilesDir/firmware_cache/` via atomic `.tmp` copy.
+     */
+    fun importFirmwareFromUri(uri: Uri) {
+        if (_uiState.value.isRunningSetup || _uiState.value.isImportingFirmware) return
+        _uiState.update {
+            it.copy(
+                isImportingFirmware = true,
+                statusMessage = "Đang kiểm tra và nạp file Firmware..."
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val tmpFile = File(appContext.cacheDir, "fw_upload_${SystemClock.elapsedRealtime()}.tmp")
+            try {
+                var displayName = ""
+                var reportedSize = -1L
+                appContext.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (nameIdx >= 0 && !cursor.isNull(nameIdx)) {
+                            displayName = cursor.getString(nameIdx).orEmpty().trim()
+                        }
+                        val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                        if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
+                            reportedSize = cursor.getLong(sizeIdx)
+                        }
+                    }
+                }
+                if (displayName.isBlank()) {
+                    displayName = uri.lastPathSegment
+                        ?.substringAfterLast('/')
+                        ?.substringAfterLast(':')
+                        ?.trim()
+                        .orEmpty()
+                        .ifBlank { "firmware.signed" }
+                }
+                if (!OntInputValidator.isValidFirmwareExtension(displayName)) {
+                    throw IllegalArgumentException(
+                        "Định dạng file '$displayName' không hợp lệ (chỉ hỗ trợ .signed, .bin, .img)."
+                    )
+                }
+                if (
+                    reportedSize > 0L &&
+                    reportedSize !in OntInputValidator.MIN_FIRMWARE_SIZE_BYTES..OntInputValidator.MAX_FIRMWARE_SIZE_BYTES
+                ) {
+                    throw IllegalArgumentException(
+                        "Dung lượng file Firmware không hợp lệ (${reportedSize / 1024} KB — yêu cầu từ 64 KB đến 64 MB)."
+                    )
+                }
+
+                var totalBytes = 0L
+                appContext.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(tmpFile).use { output ->
+                        val buffer = ByteArray(32 * 1024)
+                        var read: Int
+                        while (input.read(buffer).also { read = it } != -1) {
+                            totalBytes += read
+                            if (totalBytes > OntInputValidator.MAX_FIRMWARE_SIZE_BYTES) {
+                                throw IllegalArgumentException("File Firmware vượt quá giới hạn tối đa 64 MB.")
+                            }
+                            output.write(buffer, 0, read)
+                        }
+                        output.flush()
+                    }
+                } ?: throw IllegalArgumentException("Không thể mở luồng đọc file Firmware từ bộ nhớ.")
+
+                if (totalBytes !in OntInputValidator.MIN_FIRMWARE_SIZE_BYTES..OntInputValidator.MAX_FIRMWARE_SIZE_BYTES) {
+                    throw IllegalArgumentException(
+                        "Dung lượng file Firmware không hợp lệ (${totalBytes / 1024} KB — yêu cầu từ 64 KB đến 64 MB)."
+                    )
+                }
+
+                val fwDir = File(appContext.noBackupFilesDir, "firmware_cache").apply { mkdirs() }
+                val safeName = OntInputValidator.sanitizeFirmwareFilename(displayName)
+                val destFile = File(fwDir, safeName)
+                fwDir.listFiles()?.forEach { existing ->
+                    if (existing.absolutePath != destFile.absolutePath) {
+                        try {
+                            existing.delete()
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+                if (destFile.exists()) {
+                    destFile.delete()
+                }
+                val moved = tmpFile.renameTo(destFile)
+                if (!moved) {
+                    tmpFile.copyTo(destFile, overwrite = true)
+                    tmpFile.delete()
+                }
+                val finalSize = destFile.length()
+                val sizeMbStr = String.format(Locale.US, "%.2f", finalSize / (1024.0 * 1024.0))
+
+                _uiState.update { state ->
+                    state.copy(
+                        isImportingFirmware = false,
+                        globalSettings = state.globalSettings.copy(
+                            enableFirmwareUpdate = true,
+                            firmwareFilePath = destFile.absolutePath,
+                            firmwareFileName = displayName,
+                            firmwareFileSize = finalSize
+                        ),
+                        stepProgressList = if (!state.isRunningSetup) {
+                            MainUiState.defaultEightStepsWithFirmware()
+                        } else {
+                            state.stepProgressList
+                        },
+                        statusMessage = "Đã nạp file Firmware: $displayName ($sizeMbStr MB)"
+                    )
+                }
+            } catch (e: Exception) {
+                try {
+                    if (tmpFile.exists()) tmpFile.delete()
+                } catch (_: Exception) {
+                }
+                _uiState.update { state ->
+                    state.copy(
+                        isImportingFirmware = false,
+                        statusMessage = "Lỗi chọn file Firmware: ${e.message}"
+                    )
+                }
+            }
         }
     }
 
@@ -374,6 +577,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openWifiScanner() {
+        suppressAutoBindAfterFirmware = false
         val candidates = wifiConnector.scanOntNetworks(triggerStartScan = true)
         _uiState.update {
             it.copy(
@@ -406,6 +610,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connectToOntCandidate(candidate: WifiScanCandidate, passphrase: String?) {
+        suppressAutoBindAfterFirmware = false
         viewModelScope.launch {
             _uiState.update { it.copy(isConnectingWifi = true) }
             try {
@@ -447,12 +652,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun bindExistingWifiConnection() {
+        suppressAutoBindAfterFirmware = false
         viewModelScope.launch {
             val net = withContext(Dispatchers.IO) {
                 wifiConnector.bindCurrentWifiNetworkIfConnected()
             }
             val (ssid, bssid) = wifiConnector.getConnectedSsidAndBssid()
-            val band = wifiConnector.detectConnectedBand()
+            val sel = _uiState.value.selectedRecord
+            val band = wifiConnector.detectConnectedBand(
+                ssidHint = ssid,
+                configured24Ssid = sel?.effectiveWifi24Ssid,
+                configured5Ssid = sel?.effectiveWifi5Ssid
+            )
             _uiState.update {
                 it.copy(
                     showWifiScannerDialog = false,
@@ -485,6 +696,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Execute the 7-step wireless ONT configuration sequence for the selected subscriber.
      */
     fun runOntConfiguration() {
+        if (_uiState.value.isRunningSetup || _uiState.value.isImportingFirmware) return
         val record = _uiState.value.selectedRecord ?: return
         val settings = _uiState.value.globalSettings
         val preRun = OntInputValidator.validateBeforeRun(record, settings)
@@ -495,16 +707,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
+        suppressAutoBindAfterFirmware = false
         val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
         val startTimeStr = timeFormat.format(Date())
+        val initialSteps = if (settings.enableFirmwareUpdate) {
+            MainUiState.defaultEightStepsWithFirmware()
+        } else {
+            MainUiState.defaultSevenSteps()
+        }
 
         _uiState.update {
             it.copy(
                 showExecutionSheet = true,
                 isRunningSetup = true,
-                stepProgressList = MainUiState.defaultSevenSteps(),
+                stepProgressList = initialSteps,
                 setupResult = null,
-                executionError = null
+                executionError = null,
+                manualWifiError = null
             )
         }
         viewModelScope.launch {
@@ -517,16 +736,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val (detectedSsid, detectedBssid) = wifiConnector.getConnectedSsidAndBssid()
             val effectiveSsid = detectedSsid.ifBlank { _uiState.value.connectedWifiSsid }
             val effectiveBssid = detectedBssid.ifBlank { _uiState.value.connectedWifiBssid }
-            val connectedBand = wifiConnector.detectConnectedBand(effectiveSsid)
-
+            val connectedBand = wifiConnector.detectConnectedBand(
+                ssidHint = effectiveSsid,
+                configured24Ssid = record.effectiveWifi24Ssid,
+                configured5Ssid = record.effectiveWifi5Ssid
+            )
+            val cleanEffSsid = effectiveSsid.trim()
+            val alreadyConfiguredOppositeBand = cleanEffSsid.isNotEmpty() &&
+                !OntWifiConnector.isDefaultOntSsid(cleanEffSsid, effectiveBssid) &&
+                (cleanEffSsid.equals(record.effectiveWifi24Ssid.trim(), ignoreCase = true) ||
+                    cleanEffSsid.equals(record.effectiveWifi5Ssid.trim(), ignoreCase = true))
             val step7StartMicros = SystemClock.elapsedRealtimeNanos() / 1000L
             var latestAdminPass = record.lastKnownAdminPass
-
+            var activeTargetSsid = effectiveSsid
+            var activeTargetPass = ""
+            var activeTargetBand = connectedBand
+            var hasSwitchedToSecondaryBand = false
             val driver = OntMobileDriver(
                 baseUrl = settings.baseUrl,
                 timeoutMs = settings.requestTimeoutMs,
                 socketFactory = socketFactory,
-                settlingDelayMs = 200L,
+                settlingDelayMs = 1500L,
                 probePauseMutex = probePauseMutex,
                 onUnbindNetwork = {
                     wifiConnector.unbindOntWifi(clearSelectedMetadata = false)
@@ -547,26 +777,87 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     dao.update(SubscriberEntity.fromRecord(updatedWithPass))
                 },
                 onRebindWifiNetwork = {
-                    var rebound = wifiConnector.bindCurrentWifiNetworkIfConnected()
-                    if (rebound == null) {
-                        for (waitAttempt in 1..6) {
-                            delay(250L)
-                            rebound = wifiConnector.bindCurrentWifiNetworkIfConnected()
-                            if (rebound != null) break
-                        }
-                    }
-                    if (rebound == null && effectiveSsid.isNotBlank()) {
-                        rebound = try {
-                            wifiConnector.connectToOntWifi(
-                                ssid = effectiveSsid,
-                                bssid = effectiveBssid.ifBlank { null },
-                                timeoutMs = 6000L
+                    if (hasSwitchedToSecondaryBand) {
+                        // After Step 6 handover: never fall back to the old factory SSID!
+                        val currentBound = wifiConnector.boundWifiNetwork
+                        if (
+                            currentBound != null &&
+                            wifiConnector.isSystemConnectedToTargetWifi(
+                                targetSsid = activeTargetSsid,
+                                targetBand = activeTargetBand,
+                                previousSsid = effectiveSsid
                             )
-                        } catch (_: Exception) {
-                            wifiConnector.bindCurrentWifiNetworkIfConnected()
+                        ) {
+                            currentBound.socketFactory
+                        } else {
+                            val reSwitched = try {
+                                wifiConnector.switchToConfiguredOntWifi(
+                                    ssid = activeTargetSsid,
+                                    passphrase = activeTargetPass,
+                                    targetBand = activeTargetBand,
+                                    previousSsid = effectiveSsid,
+                                    timeoutMs = 10000L,
+                                    securityMode = settings.wifiSecurityMode
+                                )
+                            } catch (_: Exception) {
+                                if (
+                                    wifiConnector.isSystemConnectedToTargetWifi(
+                                        targetSsid = activeTargetSsid,
+                                        targetBand = activeTargetBand,
+                                        previousSsid = effectiveSsid
+                                    )
+                                ) {
+                                    wifiConnector.bindCurrentWifiNetworkIfConnected()
+                                } else {
+                                    null
+                                }
+                            }
+                            reSwitched?.socketFactory
                         }
+                    } else {
+                        var rebound = wifiConnector.bindCurrentWifiNetworkIfConnected()
+                        if (rebound == null) {
+                            for (waitAttempt in 1..6) {
+                                delay(250L)
+                                rebound = wifiConnector.bindCurrentWifiNetworkIfConnected()
+                                if (rebound != null) break
+                            }
+                        }
+                        if (rebound == null && effectiveSsid.isNotBlank()) {
+                            rebound = try {
+                                wifiConnector.connectToOntWifi(
+                                    ssid = effectiveSsid,
+                                    bssid = effectiveBssid.ifBlank { null },
+                                    timeoutMs = 6000L
+                                )
+                            } catch (_: Exception) {
+                                wifiConnector.bindCurrentWifiNetworkIfConnected()
+                            }
+                        }
+                        rebound?.socketFactory
                     }
-                    rebound?.socketFactory
+                },
+                onSwitchToConfiguredWifi = { targetSsid, targetPass, targetBand ->
+                    hasSwitchedToSecondaryBand = true
+                    activeTargetSsid = targetSsid
+                    activeTargetPass = targetPass
+                    activeTargetBand = targetBand
+                    val switchedNet = wifiConnector.switchToConfiguredOntWifi(
+                        ssid = targetSsid,
+                        passphrase = targetPass,
+                        targetBand = targetBand,
+                        previousSsid = effectiveSsid,
+                        timeoutMs = 25000L,
+                        securityMode = settings.wifiSecurityMode
+                    )
+                    _uiState.update {
+                        it.copy(
+                            connectedWifiSsid = targetSsid,
+                            connectedBand = targetBand,
+                            statusMessage = "Đã kết nối Wi-Fi phụ '$targetSsid' (${targetBand.label}). Đang đổi băng tần còn lại..."
+                        )
+                    }
+                    switchedNet.socketFactory
                 }
             )
 
@@ -575,24 +866,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     record = record,
                     settings = settings,
                     connectedBand = connectedBand,
-                    bssid = effectiveBssid
+                    bssid = effectiveBssid,
+                    alreadyConfiguredOppositeBand = alreadyConfiguredOppositeBand
                 ) { stepUpdate ->
                     _uiState.update { state ->
-                        val updatedSteps = state.stepProgressList.map { existing ->
-                            if (existing.stepNumber == stepUpdate.stepNumber) stepUpdate else existing
+                        val exists = state.stepProgressList.any { it.stepNumber == stepUpdate.stepNumber }
+                        val updatedSteps = if (exists) {
+                            state.stepProgressList.map { existing ->
+                                if (existing.stepNumber == stepUpdate.stepNumber) stepUpdate else existing
+                            }
+                        } else {
+                            (state.stepProgressList + stepUpdate).sortedBy { it.stepNumber }
                         }
                         state.copy(stepProgressList = updatedSteps)
                     }
                 }
 
+                if (result.firmwareUpdated) {
+                    suppressAutoBindAfterFirmware = true
+                    wifiConnector.unbindOntWifi(clearSelectedMetadata = false)
+                }
+
                 val endTimeStr = timeFormat.format(Date())
+                val pendingWifiNote = if (result.manualWifiStepPending) {
+                    "Đã nạp FW (${result.firmwareFileName}), chờ đổi Wi-Fi ${result.manualWifiBandLabel} ('${result.manualWifiSsid}') thủ công sau khi ONT khởi động lại"
+                } else {
+                    ""
+                }
                 val completedRecord = record.copy(
                     status = SubscriberStatus.SUCCESS,
                     isValid = true,
                     validationErrors = emptyList(),
                     startTime = startTimeStr,
                     endTime = endTimeStr,
-                    errorMessage = "",
+                    errorMessage = pendingWifiNote,
                     lastKnownAdminPass = settings.adminNewPass
                 )
 
@@ -656,7 +963,135 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun joinNewlyConfiguredWifi(ssid: String, pass: String) {
-        wifiConnector.promptJoinCustomerWifi(ssid, pass)
+        suppressAutoBindAfterFirmware = false
+        val secMode = _uiState.value.setupResult?.wifiSecurityMode
+            ?: _uiState.value.globalSettings.wifiSecurityMode
+        wifiConnector.promptJoinCustomerWifi(ssid, pass, secMode)
+    }
+
+    /**
+     * [Red Team RT-06] Execute ONLY the remaining connected Wi-Fi step manually after ONT finishes
+     * its ~2-minute firmware flash & reboot, without re-running Steps 1..7.
+     */
+    fun runManualConnectedWifiStep() {
+        val record = _uiState.value.selectedRecord ?: return
+        val currentResult = _uiState.value.setupResult ?: return
+        if (_uiState.value.isRunningSetup || !currentResult.manualWifiStepPending) return
+
+        suppressAutoBindAfterFirmware = false
+        val settings = _uiState.value.globalSettings
+        val step8Title = "Bước 8/8: Đổi Wi-Fi ${currentResult.manualWifiBandLabel} kết nối chính (Sau khi ONT reboot)"
+
+        _uiState.update { state ->
+            val updatedSteps = state.stepProgressList.map { st ->
+                if (st.stepNumber == 8) {
+                    st.copy(
+                        title = step8Title,
+                        status = StepStatus.RUNNING,
+                        detail = "Đang kiểm tra kết nối ONT & đổi Wi-Fi ${currentResult.manualWifiBandLabel} sang '${currentResult.manualWifiSsid}'..."
+                    )
+                } else {
+                    st
+                }
+            }
+            state.copy(
+                isRunningSetup = true,
+                manualWifiError = null,
+                stepProgressList = updatedSteps
+            )
+        }
+
+        viewModelScope.launch {
+            wifiConnector.bindCurrentWifiNetworkIfConnected()
+            val socketFactory = wifiConnector.boundWifiNetwork?.socketFactory
+            val (_, detectedBssid) = wifiConnector.getConnectedSsidAndBssid()
+            val effectiveBssid = detectedBssid.ifBlank { _uiState.value.connectedWifiBssid }
+
+            val driver = OntMobileDriver(
+                baseUrl = settings.baseUrl,
+                timeoutMs = settings.requestTimeoutMs,
+                socketFactory = socketFactory,
+                settlingDelayMs = 1500L,
+                probePauseMutex = probePauseMutex,
+                onUnbindNetwork = {
+                    wifiConnector.unbindOntWifi(clearSelectedMetadata = false)
+                }
+            )
+
+            try {
+                val manualResult = driver.executeManualConnectedWifiOnly(
+                    record = record,
+                    settings = settings,
+                    targetUnit = currentResult.manualWifiUnit,
+                    targetBandLabel = currentResult.manualWifiBandLabel,
+                    targetSsid = currentResult.manualWifiSsid,
+                    targetPass = currentResult.manualWifiPass,
+                    targetSecMode = currentResult.wifiSecurityMode,
+                    bssid = effectiveBssid
+                )
+                val endTimeStr = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+                val updatedRecord = record.copy(
+                    status = SubscriberStatus.SUCCESS,
+                    isValid = true,
+                    validationErrors = emptyList(),
+                    endTime = endTimeStr,
+                    errorMessage = "",
+                    lastKnownAdminPass = settings.adminNewPass
+                )
+                withContext(Dispatchers.IO) {
+                    dao.update(SubscriberEntity.fromRecord(updatedRecord))
+                    val all = dao.getAll().map { it.toRecord() }
+                    updateRecordsList(all, manualResult.message)
+                }
+                _uiState.update { state ->
+                    val updatedSteps = state.stepProgressList.map { st ->
+                        if (st.stepNumber == 8) {
+                            st.copy(
+                                title = step8Title,
+                                status = StepStatus.SUCCESS,
+                                detail = "Đã đổi xong Wi-Fi ${currentResult.manualWifiBandLabel} sang '${currentResult.manualWifiSsid}'!"
+                            )
+                        } else {
+                            st
+                        }
+                    }
+                    state.copy(
+                        isRunningSetup = false,
+                        stepProgressList = updatedSteps,
+                        setupResult = currentResult.copy(
+                            manualWifiStepPending = false,
+                            message = manualResult.message
+                        ),
+                        manualWifiError = null,
+                        selectedRecord = updatedRecord,
+                        isOntGatewayOnline = false,
+                        consecutiveProbeSuccess = 0
+                    )
+                }
+                notifyCompletionFeedback(success = true)
+            } catch (e: Exception) {
+                val maskedErr = OntInputValidator.maskSensitiveCredentials(e.message ?: "Chưa kết nối được ONT")
+                _uiState.update { state ->
+                    val updatedSteps = state.stepProgressList.map { st ->
+                        if (st.stepNumber == 8) {
+                            st.copy(
+                                title = step8Title,
+                                status = StepStatus.PENDING,
+                                detail = maskedErr
+                            )
+                        } else {
+                            st
+                        }
+                    }
+                    state.copy(
+                        isRunningSetup = false,
+                        stepProgressList = updatedSteps,
+                        manualWifiError = maskedErr
+                    )
+                }
+                notifyCompletionFeedback(success = false)
+            }
+        }
     }
 
     /**

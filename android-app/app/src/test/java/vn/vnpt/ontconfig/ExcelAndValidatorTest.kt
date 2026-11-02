@@ -10,6 +10,7 @@ import vn.vnpt.ontconfig.data.excel.ExcelManager
 import vn.vnpt.ontconfig.data.model.GlobalSettings
 import vn.vnpt.ontconfig.data.model.SubscriberRecord
 import vn.vnpt.ontconfig.data.model.SubscriberStatus
+import vn.vnpt.ontconfig.data.model.WifiSecurityMode
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -266,5 +267,159 @@ class ExcelAndValidatorTest {
         assertEquals(records[0].accountPppoe, restored.accountPppoe)
         assertEquals(30, restored.rawRowData.size)
         assertEquals(records[0].rawRowData, restored.rawRowData)
+    }
+
+    @Test
+    fun `validateBeforeRun enforces firmware file extension and size bounds when enableFirmwareUpdate is true`() {
+        val validRecord = SubscriberRecord(
+            rowIndex = 2,
+            stt = 1,
+            soMay = "005501941",
+            accountPppoe = "manh9653",
+            passPppoe = "6l6s8z2a",
+            maMen = "005501941",
+            slid = "005501941",
+            ssid24g = "Manh Ngoc",
+            pass24g = "28121995",
+            ssid5g = "Manh Ngoc 5G",
+            pass5g = "28121995"
+        )
+
+        // 1. Missing firmware file when enableFirmwareUpdate = true
+        val missingFwCheck = OntInputValidator.validateBeforeRun(
+            record = validRecord,
+            settings = GlobalSettings(enableFirmwareUpdate = true)
+        )
+        assertFalse(missingFwCheck.isValid)
+        assertTrue(missingFwCheck.errors.any { it.contains("Firmware", ignoreCase = true) })
+
+        // 2. Invalid extension (.txt)
+        val badExtCheck = OntInputValidator.validateBeforeRun(
+            record = validRecord,
+            settings = GlobalSettings(
+                enableFirmwareUpdate = true,
+                firmwareFilePath = "/data/user/0/vn.vnpt.ontconfig/no_backup/firmware_cache/fw.txt",
+                firmwareFileName = "fw.txt",
+                firmwareFileSize = 1024 * 1024L
+            )
+        )
+        assertFalse(badExtCheck.isValid)
+        assertTrue(badExtCheck.errors.any { it.contains(".signed") || it.contains("Định dạng", ignoreCase = true) })
+
+        // 3. Size too small (< 64 KB)
+        val tooSmallCheck = OntInputValidator.validateBeforeRun(
+            record = validRecord,
+            settings = GlobalSettings(
+                enableFirmwareUpdate = true,
+                firmwareFilePath = "/data/user/0/vn.vnpt.ontconfig/no_backup/firmware_cache/fw.signed",
+                firmwareFileName = "GW040_NSv2.signed",
+                firmwareFileSize = 1024L
+            )
+        )
+        assertFalse(tooSmallCheck.isValid)
+
+        // 4. Size too large (> 64 MB)
+        val tooLargeCheck = OntInputValidator.validateBeforeRun(
+            record = validRecord,
+            settings = GlobalSettings(
+                enableFirmwareUpdate = true,
+                firmwareFilePath = "/data/user/0/vn.vnpt.ontconfig/no_backup/firmware_cache/fw.signed",
+                firmwareFileName = "GW040_NSv2.signed",
+                firmwareFileSize = 65L * 1024L * 1024L
+            )
+        )
+        assertFalse(tooLargeCheck.isValid)
+
+        // 5. Valid .signed / .bin / .img within 64 KB .. 64 MB
+        val validFwCheck = OntInputValidator.validateBeforeRun(
+            record = validRecord,
+            settings = GlobalSettings(
+                enableFirmwareUpdate = true,
+                firmwareFilePath = "/data/user/0/vn.vnpt.ontconfig/no_backup/firmware_cache/GW040_NSv2.signed",
+                firmwareFileName = "GW040_NSv2.signed",
+                firmwareFileSize = 24L * 1024L * 1024L
+            )
+        )
+        assertTrue("Expected valid firmware config but got: ${validFwCheck.errors}", validFwCheck.isValid)
+    }
+
+    @Test
+    fun `sanitizeFirmwareFilename and isValidFirmwareExtension handle special characters and JSON sessionKey masking`() {
+        assertTrue(OntInputValidator.isValidFirmwareExtension("GW040-NSv2_V1.2.3.signed"))
+        assertTrue(OntInputValidator.isValidFirmwareExtension("fw.signed.bin"))
+        assertTrue(OntInputValidator.isValidFirmwareExtension("image_update.BIN"))
+        assertTrue(OntInputValidator.isValidFirmwareExtension("rootfs.img"))
+        assertFalse(OntInputValidator.isValidFirmwareExtension("notes.xlsx"))
+        assertFalse(OntInputValidator.isValidFirmwareExtension(""))
+
+        assertEquals(
+            "GW040_NSv2_2026_.signed",
+            OntInputValidator.sanitizeFirmwareFilename("GW040 NSv2(2026)\".signed")
+        )
+        assertEquals("firmware.signed", OntInputValidator.sanitizeFirmwareFilename("   "))
+
+        // JSON sessionKey masking (including truncated JSON from parseJsonOrThrow)
+        val rawJsonError = """Lỗi JSON: {"status":"invalid","sessionKey": "secret_token_998877"""
+        val masked = OntInputValidator.maskSensitiveCredentials(rawJsonError)
+        assertFalse("JSON sessionKey must be masked: $masked", masked.contains("secret_token_998877"))
+        assertTrue(masked.contains("***"))
+    }
+
+    @Test
+    fun `exportResults writes manual Wi-Fi pending note instead of OK when firmware update leaves connected Wi-Fi for manual step`() {
+        val bytes = loadSampleExcelBytes()
+        val records = ExcelManager.parseExcel(ByteArrayInputStream(bytes)).toMutableList()
+        val pendingNote = "Đã nạp FW (GW040.signed), chờ đổi Wi-Fi 2.4GHz ('Manh Ngoc') thủ công sau khi ONT khởi động lại"
+
+        records[0] = records[0].copy(
+            passPppoe = "6l6s8z2a",
+            status = SubscriberStatus.SUCCESS,
+            startTime = "11:00:00",
+            endTime = "11:01:30",
+            errorMessage = pendingNote
+        )
+
+        val outStream = ByteArrayOutputStream()
+        ExcelManager.exportResults(ByteArrayInputStream(bytes), outStream, records)
+        val reParsed = ExcelManager.parseExcel(ByteArrayInputStream(outStream.toByteArray()))
+        assertEquals("SUCCESS", reParsed[0].rawRowData["Trạng thái cấu hình"])
+        assertEquals(pendingNote, reParsed[0].rawRowData["Ghi chú chi tiết"])
+    }
+
+    @Test
+    fun `WifiSecurityMode maps all 6 modes and validateBeforeRun enforces password length only when requiresPassword is true`() {
+        assertEquals(6, WifiSecurityMode.entries.size)
+        assertEquals("aes", WifiSecurityMode.WPA2_WPA3_PSK.crypto)
+        assertEquals("tkip+aes", WifiSecurityMode.WPA_WPA2_PSK.crypto)
+        assertEquals("tkip+aes", WifiSecurityMode.WPA_PSK.crypto)
+        assertEquals("disabled", WifiSecurityMode.OPEN.akmPsk)
+        assertFalse(WifiSecurityMode.OPEN.requiresPassword)
+
+        val shortPassRecord = SubscriberRecord(
+            rowIndex = 2,
+            soMay = "005501941",
+            accountPppoe = "manh9653",
+            passPppoe = "6l6s8z2a",
+            slid = "005501941",
+            ssid24g = "Manh Ngoc",
+            pass24g = "3011965",
+            ssid5g = "Manh Ngoc 5G",
+            pass5g = "3011965"
+        )
+
+        // Fails in PSK mode
+        val pskCheck = OntInputValidator.validateBeforeRun(shortPassRecord, GlobalSettings(wifiSecurityMode = "wpa2_psk"))
+        assertFalse(pskCheck.isValid)
+        assertTrue(pskCheck.canPrependZero24g)
+
+        // Passes in Open mode and disables canPrependZero
+        val openCheck = OntInputValidator.validateBeforeRun(shortPassRecord, GlobalSettings(wifiSecurityMode = "open"))
+        assertTrue("Expected open mode to allow short/blank password: ${openCheck.errors}", openCheck.isValid)
+        assertFalse(openCheck.canPrependZero24g)
+        assertFalse(openCheck.canPrependZero5g)
+
+        // Rejects control character 0x7F in validateOnImport and sanitizeInputMetacharacters
+        val delCharRecord = shortPassRecord.copy(ssid24g = "VNPT\u007fInject", pass24g = "12345678", pass5g = "12345678")
+        assertFalse(OntInputValidator.validateOnImport(delCharRecord).isValid)
     }
 }

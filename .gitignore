@@ -37,6 +37,8 @@ Desktop.ini
 *.signed
 tclinux.bin*
 *.jsonl
+update_firmware_040nsv2.jsonl
+ont-040NSv2-setup.jsonl
 ONT_Configurator_Source.zip
 firmware_unpack/out/
 android-app/.gradle/

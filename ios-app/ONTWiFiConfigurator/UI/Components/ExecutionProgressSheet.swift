@@ -114,31 +114,37 @@ public struct ExecutionProgressSheet: View {
     }
 
     private func successSummaryCard(_ result: MobileSetupResult) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let secMode = WifiSecurityMode(rawValue: result.wifiSecurityMode) ?? .wpa2Wpa3Psk
+        let isOpenWifi = secMode == .open
+        return VStack(alignment: .leading, spacing: 8) {
             Text("Thông tin Wi-Fi mới của khách hàng:")
                 .font(.subheadline.weight(.bold))
+            Text("• Bảo mật Wi-Fi: \(secMode.displayLabel)")
+                .font(.subheadline)
             Text("• Wi-Fi 2.4GHz: \(result.newSsid24g)")
                 .font(.subheadline)
             Text("• Wi-Fi 5GHz: \(result.newSsid5g)")
                 .font(.subheadline)
-            Text("• Mật khẩu Wi-Fi: \(result.newPass24g)")
+            Text("• Mật khẩu Wi-Fi: \(isOpenWifi ? "Không mật khẩu (Open)" : result.newPass24g)")
                 .font(.subheadline.monospaced())
 
-            Button {
-                copyPasswordLocalExpiring(result.newPass24g)
-                copiedWifiPassToast = true
-            } label: {
-                Label(
-                    copiedWifiPassToast
-                        ? "Đã sao chép mật khẩu Wi-Fi (tự xóa sau 120s)"
-                        : "Sao chép mật khẩu Wi-Fi mới",
-                    systemImage: "doc.on.doc.fill"
-                )
-                .font(.subheadline.weight(.semibold))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
+            if !isOpenWifi && !result.newPass24g.isEmpty {
+                Button {
+                    copyPasswordLocalExpiring(result.newPass24g)
+                    copiedWifiPassToast = true
+                } label: {
+                    Label(
+                        copiedWifiPassToast
+                            ? "Đã sao chép mật khẩu Wi-Fi (tự xóa sau 120s)"
+                            : "Sao chép mật khẩu Wi-Fi mới",
+                        systemImage: "doc.on.doc.fill"
+                    )
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                }
+                .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(.borderedProminent)
         }
         .padding()
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.green.opacity(0.12)))

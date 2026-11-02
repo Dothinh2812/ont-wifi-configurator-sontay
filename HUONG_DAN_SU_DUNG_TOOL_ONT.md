@@ -6,18 +6,19 @@
 
 Ứng dụng **VNPT ONT GW040-NSv2 Configurator** là phần mềm Desktop đồ họa (PyQt6) độc lập, giúp kỹ thuật viên tự động hóa toàn bộ quy trình cài đặt và cấu hình thiết bị ONT iGate GW040-NSv2 theo phương thức **1-by-1** (lần lượt từng thiết bị) từ file dữ liệu mẫu Excel (`file-mau.xlsx`).
 
-### 10 Bước Cấu Hình Tự Động Hóa Chuẩn:
+### 10 Bước Cấu Hình Tự Động Hóa Chuẩn (Và Tùy Chọn Bước 11 Nâng Cấp Firmware):
 1. **Probe Gateway:** Kiểm tra kết nối ổn định tới `https://192.168.1.1/` (yêu cầu 3 lần HTTP 200 liên tiếp với bộ lọc debounce 3s).
 2. **Đăng nhập mặc định:** Đăng nhập `admin` / `admin`, kiểm tra `firstlog == "1"` và kiểm soát `numberLogin` chống khóa phần cứng.
 3. **Đổi mật khẩu quản trị:** Đổi mật khẩu sang mật khẩu mới (mặc định `Passwd2@`, hỗ trợ tùy chỉnh trên giao diện) kèm kiểm tra độ phức tạp.
 4. **Đăng nhập lại:** Xác thực bằng mật khẩu mới để lấy `sessionKey` phiên làm việc chính thức.
 5. **Cài đặt WAN PPPoE Lũy Thừa (Idempotent):** Kiểm tra `wancfg.json`, nếu đã có VLAN 11 gọi `editwan.json`, nếu chưa có gọi `addwan.json` và `sendwan.cmd` (VLAN 11, MTU 1492, NAT=1, Firewall=1).
 6. **Cài đặt GPON Password (SLID):** Tự động hợp nhất và nạp `SLID` (lấy từ `Mã MEN` hoặc `SO_MAY` trong file Excel), kiểm tra độ dài $\le 10$ ký tự ASCII và lọc ký tự đặc biệt nguy hiểm.
-7. **Cấu hình Wi-Fi 2.4 GHz:** Nạp SSID và Mật khẩu từ Excel, bảo mật WPA2/WPA3 PSK AES, restart driver Wi-Fi và dừng nghỉ 2 giây cho driver Broadcom ổn định.
-8. **Cấu hình Wi-Fi 5 GHz (Kế thừa thông minh):** Tự động tạo tên Wi-Fi 5G bằng `{SSID_2.4G} 5G` (độ dài $\le 32$ ký tự) và mật khẩu lấy giống hệt Wi-Fi 2.4G (fallback `VNPT 5G` và `1234567890`).
+7. **Cấu hình Wi-Fi 2.4 GHz:** Nạp SSID và Mật khẩu từ Excel, hỗ trợ tùy chọn **Chuẩn bảo mật Wi-Fi** (6 chế độ: `WPA2-PSK / WPA3-PSK` mặc định, `WPA2-PSK`, `WPA-PSK / WPA2-PSK`, `WPA3-PSK`, `WPA-PSK`, `Open`), restart driver Wi-Fi và dừng nghỉ 2 giây cho driver Broadcom ổn định.
+8. **Cấu hình Wi-Fi 5 GHz (Kế thừa thông minh):** Tự động tạo tên Wi-Fi 5G bằng `{SSID_2.4G} 5G` (độ dài $\le 32$ ký tự), áp dụng đồng bộ chuẩn bảo mật Wi-Fi đã chọn và mật khẩu lấy giống hệt Wi-Fi 2.4G (fallback `VNPT 5G` và `1234567890` đối với các chế độ có mật khẩu).
 9. **Xác nhận LAN IPv4:** Cấu hình mạng LAN `192.168.1.1`, mask `255.255.255.0`, DHCP range `192.168.1.2` - `192.168.1.254` (mặc định khóa chỉnh sửa để bảo vệ gateway).
-10. **Đăng xuất & Dọn dẹp phiên (Logout):** Luôn gửi lệnh `POST /cgi-bin/luci/logout.cmd` trong khối `finally` để giải phóng phiên, triệt tiêu lỗi `"user exist"`.
-
+10. **Đăng xuất & Dọn dẹp phiên (Chế độ mặc định 10 bước) HOẶC Nâng cấp Firmware tự động (Chế độ 11 bước):**
+    - Khi **không tích chọn** `"Update Firmware ở bước cuối cùng"` (mặc định): gửi lệnh `POST /cgi-bin/luci/logout.cmd` trong khối `finally` để giải phóng phiên, triệt tiêu lỗi `"user exist"`.
+    - Khi **tích chọn** `"Update Firmware ở bước cuối cùng"` và chọn file firmware `.signed` / `.bin`: sau khi hoàn tất lưu cấu hình ở Bước 1–9, ứng dụng tự động kiểm tra phiên nâng cấp (`updatefwsessioncheck.json`), kiểm tra bộ nhớ RAM trống (`imagesize.json`), tải lên file image (`uploadsoftware.conf`) ở Bước 10 và hoàn tất ở Bước 11. Ngay khi ONT xác nhận `"status": "valid"`, ONT tự động ghi Flash & khởi động lại ngầm (~2 phút), cho phép kỹ thuật viên **rút cáp mạng ngay lập tức** để cắm sang ONT tiếp theo làm tiếp mà không phải chờ.
 ---
 
 ## 2. Chuẩn Bị Thiết Bị & Kết Nối Vật Lý
@@ -155,16 +156,18 @@ Dành cho kỹ thuật viên đi lắp đặt/đổi ONT cơ động tại nhà 
      - `SLID / Mã MEN` ($\le 10$ ký tự ASCII; đã hợp nhất tham số `Số máy` về `SLID` duy nhất và tự động đồng bộ tên Wi-Fi mặc định `VNPT_{SLID}`).
      - `Account PPPoE (ma_tb)` và `Mật khẩu PPPoE` (nếu file Excel bị khuyết mật khẩu PPPoE, ô này sẽ viền đỏ để KTV nhập bổ sung).
      - `Tên Wi-Fi 2.4G` & `Pass Wi-Fi 2.4G` (tự động đồng bộ sang `Wi-Fi 5G`; nếu mật khẩu trong Excel chỉ có 7 chữ số do mất số `0` đầu ngày sinh, bấm nút 1 chạm **"Thêm số 0 ở đầu"** để đủ 8 ký tự chuẩn WPA2).
-4. **Bấm `RUN - ĐỔ CẤU HÌNH ONT` (7 Bước Tự Động):**
-   - Ứng dụng tự động giữ sáng màn hình, tạm dừng luồng thăm dò nền và thực thi 7 bước:
-     - **Bước 1/7:** Kiểm tra kết nối & xác thực chữ ký ONT (`192.168.1.1`).
-     - **Bước 2/7:** Đăng nhập thông minh & đổi mật khẩu Admin (`Passwd2@`).
-     - **Bước 3/7:** Cấu hình WAN PPPoE VLAN 11 (`serviceId=1` khi sửa).
-     - **Bước 4/7:** Nạp GPON Password (`SLID / Mã MEN`).
-     - **Bước 5/7:** Lưu cấu hình LAN IPv4 (`192.168.1.1`).
-     - **Bước 6/7:** Cấu hình Wi-Fi băng tần phụ (`5GHz`) + nghỉ `2.0s` ổn định driver.
-     - **Bước 7/7 (Bước cuối):** Đổi tên & mật khẩu Wi-Fi băng tần đang kết nối (`2.4GHz`) ở bước cuối cùng, tự động xử lý khi sóng mặc định tắt để khởi động lại radio mới.
-   - Ngay khi hoàn tất Bước 7, máy phát âm báo + rung, tự động khôi phục mạng 4G/5G để KTV bấm **"Xuất & Chia Sẻ Báo Cáo (.xlsx) Qua Zalo"** (giữ nguyên đủ 30 cột gốc + cập nhật các trường đã sửa + 3 cột kết quả) hoặc bấm **"Kết nối vào Wi-Fi mới để kiểm tra mạng"**.
+     - **Chuẩn bảo mật Wi-Fi (2.4G & 5G):** Mặc định `WPA2-PSK / WPA3-PSK (Mặc định)`; KTV có thể đổi sang `WPA2-PSK (Tương thích rộng / Mesh)`, `WPA-PSK / WPA2-PSK`, `WPA3-PSK`, `WPA-PSK` hoặc `Open (Không mật khẩu)`.
+     - **Mục 4 — Cập Nhật Firmware ONT (Tùy chọn trước bước đổi Wi-Fi chính):** Nếu cần nâng cấp Firmware cho ONT, bật công tắc **"Nâng cấp Firmware trước bước đổi Wi-Fi kết nối chính"** và bấm **"Chọn file Firmware (.signed / .bin / .img)"** để chọn file từ bộ nhớ máy (ứng dụng tự động lưu đệm cho các thuê bao tiếp theo).
+4. **Bấm `RUN - ĐỔ CẤU HÌNH ONT` (7 Bước Mặc Định hoặc 8 Bước Kèm Up Firmware):**
+   - **Khi TẮT Cập nhật Firmware (Chế độ 7/7 bước mặc định):**
+     - **Bước 1/7..5/7:** Kiểm tra chữ ký ONT (`192.168.1.1`), đăng nhập & đổi mật khẩu Admin (`Passwd2@`), lưu WAN PPPoE VLAN 11, nạp GPON Password (`SLID / Mã MEN`), lưu LAN IPv4.
+     - **Bước 6/7:** Cấu hình Wi-Fi băng tần phụ (`5GHz` hoặc `2.4GHz`), gọi `wlrestart.json` và giải phóng phiên `logout.cmd`.
+     - **Bước 7/7 (Bước cuối):** Tự động kết nối lại với ONT qua chính **tên Wi-Fi phụ vừa đổi ở Bước 6**, xác thực lại `192.168.1.1`, sau đó đổi tên & mật khẩu cho băng tần Wi-Fi còn lại.
+   - **Khi BẬT Cập nhật Firmware (Chế độ 8/8 bước — Nạp Firmware trước bước đổi Wi-Fi kết nối chính):**
+     - **Bước 1/8..6/8:** Đổ xong toàn bộ WAN PPPoE, SLID, LAN IPv4 và **Wi-Fi băng tần phụ**; giữ nguyên sóng Wi-Fi đang kết nối (không chuyển sóng ở cuối Bước 6) và kiểm tra sẵn sàng phiên làm việc.
+     - **Bước 7/8 (Trước bước cuối):** Kiểm tra phiên nâng cấp (`updatefwsessioncheck.json`), kiểm tra RAM trống (`imagesize.json`) và tải lên file Firmware (`uploadsoftware.conf`). Ngay khi ONT trả về `"status": "valid"`, ONT tự ghi flash & khởi động lại (~2 phút 15 giây), ứng dụng tự động ngắt gắn kết Wi-Fi ONT để khôi phục 4G/5G ngay lập tức.
+     - **Bước 8/8 (Bước cuối — Đổi Wi-Fi kết nối chính thủ công sau khi ONT reboot):** Bảng tiến trình hiển thị đầy đủ thông số Wi-Fi chính cần đổi và cung cấp 2 nút thao tác nhanh sau khi ONT khởi động lại xong (~2 phút): bấm **"1. Bắt lại Wi-Fi ONT"** rồi bấm **"2. Đổi nốt Wi-Fi chính"** để hoàn tất băng tần còn lại mà không chạy lại từ đầu.
+   - Ngay khi hoàn tất, máy phát âm báo + rung, tự động khôi phục mạng 4G/5G để KTV bấm **"Xuất & Chia Sẻ Báo Cáo (.xlsx) Qua Zalo"** (giữ nguyên đủ 30 cột gốc + cập nhật các trường đã sửa + 3 cột kết quả) hoặc bấm **"Kết nối vào Wi-Fi mới để kiểm tra mạng"**.
 
 
 ---
