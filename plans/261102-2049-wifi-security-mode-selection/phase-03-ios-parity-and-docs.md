@@ -1,7 +1,7 @@
 ---
 phase: 3
 title: "Phase 3: iOS Parity, Automated Test Suites & Documentation"
-status: pending
+status: completed
 priority: P1
 effort: "1h"
 dependencies: [1, 2]
@@ -73,15 +73,15 @@ dependencies: [1, 2]
    - Cập nhật bảng tính năng và hướng dẫn chọn loại bảo mật Wi-Fi trong `README.md` và `HUONG_DAN_SU_DUNG_TOOL_ONT.md`.
 
 ## Todo
-- [ ] Thêm `WifiSecurityMode`, `wifiSecurityMode` và custom `init(from decoder:)` vào `GlobalSettings.swift`
-- [ ] Cập nhật `OntInputValidator.swift` và `OntMobileDriver.swift` (bao gồm `MobileSetupResult.wifiSecurityMode` và xử lý `conflict_mesh`)
-- [ ] Bổ sung `Picker` chọn chuẩn bảo mật Wi-Fi trong `ConfigReviewView.swift` và hiển thị trong `ExecutionProgressSheet.swift`
-- [ ] Cập nhật `OntMobileDriverTests.swift`, `ExcelAndValidatorTests.swift`, `tests/test_ios_app_parity.py`
-- [ ] Cập nhật `README.md` và `HUONG_DAN_SU_DUNG_TOOL_ONT.md`
+- [x] Thêm `WifiSecurityMode`, `wifiSecurityMode` và custom `init(from decoder:)` vào `GlobalSettings.swift`
+- [x] Cập nhật `OntInputValidator.swift` và `OntMobileDriver.swift` (bao gồm `MobileSetupResult.wifiSecurityMode` và xử lý `conflict_mesh`)
+- [x] Bổ sung `Picker` chọn chuẩn bảo mật Wi-Fi trong `ConfigReviewView.swift` và hiển thị trong `ExecutionProgressSheet.swift`
+- [x] Cập nhật `OntMobileDriverTests.swift`, `ExcelAndValidatorTests.swift`, `tests/test_ios_app_parity.py`
+- [x] Cập nhật `README.md` và `HUONG_DAN_SU_DUNG_TOOL_ONT.md`
 
 ## Success Criteria
-- [ ] Chạy toàn bộ `pytest` (`37+` tests trên Desktop Windows & iOS parity) và `./gradlew testDebugUnitTest` (trên Android) đạt PASS 100%.
-- [ ] Tài liệu `README.md` và `HUONG_DAN_SU_DUNG_TOOL_ONT.md` mô tả đầy đủ cách chọn loại bảo mật Wi-Fi trên cả Windows và Mobile.
+- [x] Chạy toàn bộ `pytest` (`37+` tests trên Desktop Windows & iOS parity) và `./gradlew testDebugUnitTest` (trên Android) đạt PASS 100%.
+- [x] Tài liệu `README.md` và `HUONG_DAN_SU_DUNG_TOOL_ONT.md` mô tả đầy đủ cách chọn loại bảo mật Wi-Fi trên cả Windows và Mobile.
 
 ## Risk Assessment
 - **Risk:** Khối `do { ... } catch` không định kiểu trong `OntMobileDriver.swift:543-559` bắt mọi lỗi ném ra bên trong và bọc lại thành `OntNetworkError`, làm mất thông báo lỗi `conflict_mesh`.

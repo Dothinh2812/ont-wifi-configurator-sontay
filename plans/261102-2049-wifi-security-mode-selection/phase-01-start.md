@@ -1,7 +1,7 @@
 ---
 phase: 1
 title: "Phase 1: Desktop Windows Wi-Fi Security Mode Selection & Mock Server"
-status: pending
+status: completed
 priority: P1
 effort: "1h"
 dependencies: []
@@ -120,14 +120,14 @@ Bổ sung tùy chọn loại bảo mật Wi-Fi (`wifi_security_mode`) vào tần
    - Bổ sung unit test và UI test kiểm tra đầy đủ 6 chế độ bảo mật, kịch bản `conflict_mesh`, và kiểm tra pre-flight mật khẩu ngắn.
 
 ## Todo
-- [ ] Thêm `wifi_security_mode` vào `GlobalConfig` trong `app/core/config_models.py`
-- [ ] Cập nhật `WIFI_SECURITY_MODES`, `resolve_wifi_security_params`, `validate_wifi_ssid_and_pass`, `configure_wifi` và `execute_full_setup` trong `app/core/ont_driver.py` + `app/ui/worker.py`
-- [ ] Thêm `QComboBox` `cmb_wifi_sec_mode` và kiểm tra pre-flight vào `MainWindow` (`app/ui/main_window.py`)
-- [ ] Cập nhật `tests/mock_luci_server.py`, `tests/test_ont_driver_mock.py`, `tests/test_ui_components.py` và `tests/test_e2e_workflow.py`
+- [x] Thêm `wifi_security_mode` vào `GlobalConfig` trong `app/core/config_models.py`
+- [x] Cập nhật `WIFI_SECURITY_MODES`, `resolve_wifi_security_params`, `validate_wifi_ssid_and_pass`, `configure_wifi` và `execute_full_setup` trong `app/core/ont_driver.py` + `app/ui/worker.py`
+- [x] Thêm `QComboBox` `cmb_wifi_sec_mode` và kiểm tra pre-flight vào `MainWindow` (`app/ui/main_window.py`)
+- [x] Cập nhật `tests/mock_luci_server.py`, `tests/test_ont_driver_mock.py`, `tests/test_ui_components.py` và `tests/test_e2e_workflow.py`
 
 ## Success Criteria
-- [ ] `pytest tests/test_ont_driver_mock.py tests/test_ui_components.py tests/test_e2e_workflow.py` chạy PASS 100%.
-- [ ] `MockLuCIServer` ghi nhận đúng `sec_mode`, `wl_akm_psk`, `wl_akm_psk2`, `wl_crypto` cho cả 6 chế độ bảo mật và xử lý đúng `conflict_mesh` cũng như mật khẩu rỗng ở chế độ `open`.
+- [x] `pytest tests/test_ont_driver_mock.py tests/test_ui_components.py tests/test_e2e_workflow.py` chạy PASS 100%.
+- [x] `MockLuCIServer` ghi nhận đúng `sec_mode`, `wl_akm_psk`, `wl_akm_psk2`, `wl_crypto` cho cả 6 chế độ bảo mật và xử lý đúng `conflict_mesh` cũng như mật khẩu rỗng ở chế độ `open`.
 
 ## Risk Assessment
 - **Risk:** KTV chạy dòng dữ liệu có mật khẩu Wi-Fi 7 ký tự ở chế độ PSK khiến ONT bị đổi mật khẩu Admin/WAN/SLID ở Bước 2–4 rồi mới báo lỗi ở Bước 5.

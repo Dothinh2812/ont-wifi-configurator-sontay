@@ -40,7 +40,7 @@ tclinux.bin*
 update_firmware_040nsv2.jsonl
 ont-040NSv2-setup.jsonl
 ONT_Configurator_Source.zip
-firmware_unpack/out/
+firmware_unpack/
 android-app/.gradle/
 android-app/build/
 android-app/app/build/

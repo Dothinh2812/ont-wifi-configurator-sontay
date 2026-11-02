@@ -1,7 +1,7 @@
 ---
 phase: 2
 title: "Phase 2: Android Mobile Wi-Fi Security Mode, Connector & Compose UI"
-status: pending
+status: completed
 priority: P1
 effort: "1h"
 dependencies: [1]
@@ -109,16 +109,16 @@ sequenceDiagram
    - Bổ sung bài test kiểm tra payload `wirelesscfg.json` cho cả 6 chế độ bảo mật, kiểm tra `conflict_mesh` không bị retry 3 lần ở Bước 7, kiểm tra `MobileSetupResult.wifiSecurityMode` ở Bước 8 thủ công, và `validateBeforeRun` khi chọn `open` vs PSK.
 
 ## Todo
-- [ ] Thêm `WifiSecurityMode` vào `GlobalSettings.kt` và cập nhật `SubscriberRecord.kt`
-- [ ] Cập nhật `OntInputValidator.kt` hỗ trợ kiểm tra theo `wifiSecurityMode` và chặn ký tự điều khiển `\u007f`
-- [ ] Cập nhật `OntMobileDriver.kt` (`MobileSetupResult`, `configureWifiBand`, `executeMobileSetup`, `executeManualConnectedWifiOnly`)
-- [ ] Cập nhật `OntWifiConnector.kt` và `MainViewModel.kt` hỗ trợ `securityMode` ở cả `onSwitchToConfiguredWifi` và `onRebindWifiNetwork`
-- [ ] Thêm bộ chọn chuẩn bảo mật Wi-Fi trên `ConfigReviewScreen.kt` và hiển thị trên `ExecutionProgressSheet.kt`
-- [ ] Bổ sung Unit Tests trong `OntMobileDriverTest.kt` và `ExcelAndValidatorTest.kt`
+- [x] Thêm `WifiSecurityMode` vào `GlobalSettings.kt` và cập nhật `SubscriberRecord.kt`
+- [x] Cập nhật `OntInputValidator.kt` hỗ trợ kiểm tra theo `wifiSecurityMode` và chặn ký tự điều khiển `\u007f`
+- [x] Cập nhật `OntMobileDriver.kt` (`MobileSetupResult`, `configureWifiBand`, `executeMobileSetup`, `executeManualConnectedWifiOnly`)
+- [x] Cập nhật `OntWifiConnector.kt` và `MainViewModel.kt` hỗ trợ `securityMode` ở cả `onSwitchToConfiguredWifi` và `onRebindWifiNetwork`
+- [x] Thêm bộ chọn chuẩn bảo mật Wi-Fi trên `ConfigReviewScreen.kt` và hiển thị trên `ExecutionProgressSheet.kt`
+- [x] Bổ sung Unit Tests trong `OntMobileDriverTest.kt` và `ExcelAndValidatorTest.kt`
 
 ## Success Criteria
-- [ ] `./gradlew testDebugUnitTest` trong `android-app/` chạy PASS 100%.
-- [ ] Payload `wirelesscfg.json` trên Android khớp tuyệt đối với đặc tả trong `ont-040NSv2-setup.jsonl` cho cả 6 chế độ bảo mật.
+- [x] `./gradlew testDebugUnitTest` trong `android-app/` chạy PASS 100%.
+- [x] Payload `wirelesscfg.json` trên Android khớp tuyệt đối với đặc tả trong `ont-040NSv2-setup.jsonl` cho cả 6 chế độ bảo mật.
 
 ## Risk Assessment
 - **Risk:** Khi KTV chọn chế độ `open` hoặc `wpa3_psk`, ở Bước 7 (khi không bật nạp Firmware) điện thoại Android tự chuyển sang sóng Wi-Fi phụ vừa đổi ở Bước 6 hoặc gọi `onRebindWifiNetwork`; nếu `OntWifiConnector` vẫn gọi cứng `setWpa2Passphrase(passphrase)`, Android sẽ không bắt được sóng Open hoặc sóng thuần WPA3-SAE.

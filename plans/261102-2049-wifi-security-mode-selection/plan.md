@@ -1,7 +1,7 @@
 ---
 title: "Bổ sung tùy chọn loại bảo mật Wi-Fi (Security Mode) khi đổ cấu hình ONT trên Windows, Android và iOS"
 description: "Cho phép kỹ thuật viên lựa chọn loại bảo mật Wi-Fi (WPA2-PSK/WPA3-PSK, WPA2-PSK, WPA-PSK/WPA2-PSK, WPA3-PSK, WPA-PSK, Open) khi đổ cấu hình ONT GW040-NSv2 trên cả ứng dụng Desktop Windows (PyQt6) và ứng dụng Di động (Android Jetpack Compose & iOS SwiftUI)."
-status: pending
+status: completed
 priority: P1
 effort: "3h"
 issue: null
@@ -79,21 +79,21 @@ flowchart LR
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | [Phase 1: Desktop Windows Wi-Fi Security Mode Selection & Mock Server](./phase-01-start.md) | Pending |
-| 2 | [Phase 2: Android Mobile Wi-Fi Security Mode, Connector & Compose UI](./phase-02-android-wifi-security-mode.md) | Pending |
-| 3 | [Phase 3: iOS Parity, Automated Test Suites & Documentation](./phase-03-ios-parity-and-docs.md) | Pending |
+| 1 | [Phase 1: Desktop Windows Wi-Fi Security Mode Selection & Mock Server](./phase-01-start.md) | Completed |
+| 2 | [Phase 2: Android Mobile Wi-Fi Security Mode, Connector & Compose UI](./phase-02-android-wifi-security-mode.md) | Completed |
+| 3 | [Phase 3: iOS Parity, Automated Test Suites & Documentation](./phase-03-ios-parity-and-docs.md) | Completed |
 
 ---
 
 ## Success Criteria
 
-- [ ] Mặc định giữ nguyên `wpa2_wpa3_psk` (`WPA2-PSK / WPA3-PSK`) trên cả Windows, Android và iOS để đảm bảo tương thích ngược 100% với quy trình hiện tại.
-- [ ] Khi chọn bất kỳ chế độ nào trong 6 chế độ (`wpa2_wpa3_psk`, `wpa2_psk`, `wpa_wpa2_psk`, `wpa3_psk`, `wpa_psk`, `open`), payload `POST /cgi-bin/luci/wirelesscfg.json` cho cả `wl_unit=0` (2.4GHz) và `wl_unit=1` (5GHz) gửi chính xác bộ tham số `sec_mode`, `wl_akm_psk`, `wl_akm_psk2` và `wl_crypto` theo đúng `wireless.js` (`seq: 181` trong `ont-040NSv2-setup.jsonl`), đồng thời percent-encode an toàn `+`, `=`, `%` và chặn ký tự điều khiển `\x7f` (`[Red Team RT-04]`).
-- [ ] Kiểm tra pre-flight trước Bước 1 trên cả Windows, Android và iOS: khi `sec_mode != "open"`, mật khẩu Wi-Fi 2.4G/5G bắt buộc dài `8..63` ký tự ASCII in được (`0x20..0x7E`) và không chứa toàn dấu cách; không bao giờ để xảy ra lỗi dừng giữa chừng ở Bước 5 sau khi đã đổi mật khẩu Admin/WAN/SLID (`[Red Team RT-02, RT-06]`).
-- [ ] Khi chọn `open` (Không mật khẩu): bộ kiểm tra trước khi chạy (`validateBeforeRun` / `execute_full_setup`) không chặn lỗi độ dài mật khẩu Wi-Fi 8..63 ký tự; không gán mật khẩu giả `"1234567890"` vào `MobileSetupResult` hay thẻ bàn giao `ExecutionProgressSheet` (`[Red Team RT-05]`); trên Android, cả 2 điểm gọi `switchToConfiguredOntWifi` (`onSwitchToConfiguredWifi` và `onRebindWifiNetwork`) đều kết nối mạng Open không gắn passphrase WPA2 (`[Red Team RT-03]`).
-- [ ] Khi chọn `wpa3_psk` trên Android: `OntWifiConnector` kiểm tra `isWpa3SaeSupported` (hoặc fallback an toàn) và sử dụng `setWpa3Passphrase` cho `WifiNetworkSpecifier` và `WifiNetworkSuggestion` (`[Red Team RT-03]`).
-- [ ] Nếu ONT trả về `{"status": "conflict_mesh"}` từ `wirelesscfg.json`, Driver trên cả 3 nền tảng phát hiện và ném ngay `ONTDriverError` / `OntDriverException` (không bị bọc nhầm thành `OntNetworkError` trên iOS và không lặp lại 3 lần trong vòng retry Bước 7 `[Red Team RT-01]`).
-- [ ] Toàn bộ test suite (`pytest` cho Desktop Windows & iOS parity, `./gradlew testDebugUnitTest` cho Android) chạy PASS 100%.
+- [x] Mặc định giữ nguyên `wpa2_wpa3_psk` (`WPA2-PSK / WPA3-PSK`) trên cả Windows, Android và iOS để đảm bảo tương thích ngược 100% với quy trình hiện tại.
+- [x] Khi chọn bất kỳ chế độ nào trong 6 chế độ (`wpa2_wpa3_psk`, `wpa2_psk`, `wpa_wpa2_psk`, `wpa3_psk`, `wpa_psk`, `open`), payload `POST /cgi-bin/luci/wirelesscfg.json` cho cả `wl_unit=0` (2.4GHz) và `wl_unit=1` (5GHz) gửi chính xác bộ tham số `sec_mode`, `wl_akm_psk`, `wl_akm_psk2` và `wl_crypto` theo đúng `wireless.js` (`seq: 181` trong `ont-040NSv2-setup.jsonl`), đồng thời percent-encode an toàn `+`, `=`, `%` và chặn ký tự điều khiển `\x7f` (`[Red Team RT-04]`).
+- [x] Kiểm tra pre-flight trước Bước 1 trên cả Windows, Android và iOS: khi `sec_mode != "open"`, mật khẩu Wi-Fi 2.4G/5G bắt buộc dài `8..63` ký tự ASCII in được (`0x20..0x7E`) và không chứa toàn dấu cách; không bao giờ để xảy ra lỗi dừng giữa chừng ở Bước 5 sau khi đã đổi mật khẩu Admin/WAN/SLID (`[Red Team RT-02, RT-06]`).
+- [x] Khi chọn `open` (Không mật khẩu): bộ kiểm tra trước khi chạy (`validateBeforeRun` / `execute_full_setup`) không chặn lỗi độ dài mật khẩu Wi-Fi 8..63 ký tự; không gán mật khẩu giả `"1234567890"` vào `MobileSetupResult` hay thẻ bàn giao `ExecutionProgressSheet` (`[Red Team RT-05]`); trên Android, cả 2 điểm gọi `switchToConfiguredOntWifi` (`onSwitchToConfiguredWifi` và `onRebindWifiNetwork`) đều kết nối mạng Open không gắn passphrase WPA2 (`[Red Team RT-03]`).
+- [x] Khi chọn `wpa3_psk` trên Android: `OntWifiConnector` kiểm tra `isWpa3SaeSupported` (hoặc fallback an toàn) và sử dụng `setWpa3Passphrase` cho `WifiNetworkSpecifier` và `WifiNetworkSuggestion` (`[Red Team RT-03]`).
+- [x] Nếu ONT trả về `{"status": "conflict_mesh"}` từ `wirelesscfg.json`, Driver trên cả 3 nền tảng phát hiện và ném ngay `ONTDriverError` / `OntDriverException` (không bị bọc nhầm thành `OntNetworkError` trên iOS và không lặp lại 3 lần trong vòng retry Bước 7 `[Red Team RT-01]`).
+- [x] Toàn bộ test suite (`pytest` cho Desktop Windows & iOS parity, `./gradlew testDebugUnitTest` cho Android) chạy PASS 100%.
 
 ---
 
