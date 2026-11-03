@@ -159,10 +159,10 @@ Dành cho kỹ thuật viên đi lắp đặt/đổi ONT cơ động tại nhà 
      - **Chuẩn bảo mật Wi-Fi (2.4G & 5G):** Mặc định `WPA2-PSK / WPA3-PSK (Mặc định)`; KTV có thể đổi sang `WPA2-PSK (Tương thích rộng / Mesh)`, `WPA-PSK / WPA2-PSK`, `WPA3-PSK`, `WPA-PSK` hoặc `Open (Không mật khẩu)`.
      - **Mục 4 — Cập Nhật Firmware ONT (Tùy chọn trước bước đổi Wi-Fi chính):** Nếu cần nâng cấp Firmware cho ONT, bật công tắc **"Nâng cấp Firmware trước bước đổi Wi-Fi kết nối chính"** và bấm **"Chọn file Firmware (.signed / .bin / .img)"** để chọn file từ bộ nhớ máy (ứng dụng tự động lưu đệm cho các thuê bao tiếp theo).
 4. **Bấm `RUN - ĐỔ CẤU HÌNH ONT` (7 Bước Mặc Định hoặc 8 Bước Kèm Up Firmware):**
-   - **Khi TẮT Cập nhật Firmware (Chế độ 7/7 bước mặc định):**
-     - **Bước 1/7..5/7:** Kiểm tra chữ ký ONT (`192.168.1.1`), đăng nhập & đổi mật khẩu Admin (`Passwd2@`), lưu WAN PPPoE VLAN 11, nạp GPON Password (`SLID / Mã MEN`), lưu LAN IPv4.
-     - **Bước 6/7:** Cấu hình Wi-Fi băng tần phụ (`5GHz` hoặc `2.4GHz`), gọi `wlrestart.json` và giải phóng phiên `logout.cmd`.
-     - **Bước 7/7 (Bước cuối):** Tự động kết nối lại với ONT qua chính **tên Wi-Fi phụ vừa đổi ở Bước 6**, xác thực lại `192.168.1.1`, sau đó đổi tên & mật khẩu cho băng tần Wi-Fi còn lại.
+   - **Khi TẮT Cập nhật Firmware (Chế độ 7/7 bước mặc định — Giữ nguyên 1 kết nối xuyên suốt):**
+     - **Bước 1/7..5/7:** Kiểm tra chữ ký ONT (`192.168.1.1`), đăng nhập & đổi mật khẩu Admin (`Passwd2@`), tự động đối chiếu băng tần Wi-Fi kết nối thực tế từ ONT (`dhcpclient.json` + `deviceinfo2.json`), lưu WAN PPPoE VLAN 11, nạp GPON Password (`SLID / Mã MEN`), lưu LAN IPv4.
+     - **Bước 6/7:** Cấu hình Wi-Fi băng tần phụ (`5GHz` hoặc `2.4GHz`) kèm `wlrestart.json` trong khi **vẫn giữ nguyên kết nối Wi-Fi hiện tại** (không ngắt mạng hay nhảy sóng giữa chừng).
+     - **Bước 7/7 (Bước cuối):** Kiểm tra đồng bộ kết nối & phiên làm việc (`ensureGatewayReadyBeforeStep7`), lưu hoàn tất tên & mật khẩu mới của **băng tần Wi-Fi đang kết nối** vào NVRAM ONT (`wirelesscfg.json` `action=Apply`), sau đó mới giải phóng phiên, ngắt kết nối Wi-Fi ONT và khôi phục ngay mạng 4G/5G.
    - **Khi BẬT Cập nhật Firmware (Chế độ 8/8 bước — Nạp Firmware trước bước đổi Wi-Fi kết nối chính):**
      - **Bước 1/8..6/8:** Đổ xong toàn bộ WAN PPPoE, SLID, LAN IPv4 và **Wi-Fi băng tần phụ**; giữ nguyên sóng Wi-Fi đang kết nối (không chuyển sóng ở cuối Bước 6) và kiểm tra sẵn sàng phiên làm việc.
      - **Bước 7/8 (Trước bước cuối):** Kiểm tra phiên nâng cấp (`updatefwsessioncheck.json`), kiểm tra RAM trống (`imagesize.json`) và tải lên file Firmware (`uploadsoftware.conf`). Ngay khi ONT trả về `"status": "valid"`, ONT tự ghi flash & khởi động lại (~2 phút 15 giây), ứng dụng tự động ngắt gắn kết Wi-Fi ONT để khôi phục 4G/5G ngay lập tức.
@@ -192,11 +192,11 @@ Dành cho kỹ thuật viên sử dụng iPhone (iOS 16.0 trở lên):
 2. **Kết Nối Sóng Wi-Fi Mặc Định Của ONT (`GW040-NSv2_2.4G_XXXXXX`):**
    - Quét mã QR Wi-Fi dưới đáy modem bằng Camera iPhone hoặc bấm **"Bắt Wi-Fi ONT" -> "Mở Cài Đặt Wi-Fi iOS"** để chọn sóng mặc định của ONT.
    - Quay lại ứng dụng: thanh trạng thái sẽ nhận diện IP `192.168.1.x` trên card Wi-Fi `en0` và báo **`ONLINE - Sẵn sàng đổ cấu hình (192.168.1.1)`** (không cần tắt 4G/5G; nếu đang bật VPN 1.1.1.1/WireGuard, ứng dụng sẽ nhắc tắt VPN).
-3. **Kiểm Tra Tham Số & Chọn Băng Tần Đang Bắt (`2.4GHz` / `5GHz`):**
+3. **Kiểm Tra Tham Số & Băng Tần Đang Bắt (`2.4GHz` / `5GHz`):**
    - Kiểm tra `SLID / Mã MEN` ($\le 10$ ký tự, hợp nhất từ `Mã MEN` / `SO_MAY`), nhập bổ sung `Mật khẩu PPPoE` nếu file Excel bị khuyết, hoặc bấm nút 1 chạm **"Thêm số 0 ở đầu"** nếu mật khẩu Wi-Fi chỉ có 7 số.
-   - Chọn đúng băng tần Wi-Fi ONT mà iPhone đang kết nối (**`Đang bắt 2.4GHz`** hoặc **`Đang bắt 5GHz`**) ngay phía trên nút **RUN**.
+   - Bộ chọn **`Đang bắt 2.4GHz` / `Đang bắt 5GHz`** phía trên nút **RUN** sẽ được ứng dụng **tự động đối chiếu và đồng bộ chính xác với ONT ngay sau Bước 2** (`dhcpclient.json` + `deviceinfo2.json` qua địa chỉ IP `en0`), đảm bảo không bao giờ đổi nhầm băng tần đang kết nối ở Bước 6 ngay cả khi quên gạt nút chọn tay.
 4. **Bấm `RUN - ĐỔ CẤU HÌNH ONT (7 BƯỚC)` & Chia Sẻ Báo Cáo Qua Zalo:**
-   - Ứng dụng giữ sáng màn hình, xin quyền chạy nền ngắn hạn (`beginBackgroundTask`), cấu hình băng tần phụ ở Bước 6 và **đổi tên/mật khẩu băng tần đang kết nối ở Bước 7 cuối cùng**.
+   - Ứng dụng giữ sáng màn hình, xin quyền chạy nền ngắn hạn (`beginBackgroundTask`), giữ nguyên kết nối Wi-Fi hiện tại xuyên suốt từ Bước 1 đến Bước 7, lưu băng tần phụ ở Bước 6 và **đảm bảo lưu xong tên/mật khẩu băng tần đang kết nối vào NVRAM ở Bước 7 cuối cùng trước khi ngắt kết nối**.
    - Sau khi hoàn tất 7/7 bước (có âm báo + rung Haptic), bấm **"Sao chép mật khẩu Wi-Fi mới"** (tự động xóa khỏi bộ nhớ tạm sau 120s bảo mật) hoặc bấm **"Xuất & Chia Sẻ Báo Cáo Excel (.xlsx)"** để gửi kết quả qua Zalo.
 ---
 

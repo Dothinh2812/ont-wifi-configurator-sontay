@@ -120,6 +120,7 @@ class OntMobileDriverTest {
         val driver = OntMobileDriver(
             baseUrl = baseUrl,
             settlingDelayMs = 10L,
+            recoveryRetryDelayMs = 20L,
             probePauseMutex = probeMutex,
             onUnbindNetwork = { unbindCalled.set(true) },
             onVerifyNewSsid = { _, _ -> true }
@@ -176,6 +177,7 @@ class OntMobileDriverTest {
         val driver = OntMobileDriver(
             baseUrl = baseUrl,
             settlingDelayMs = 10L,
+            recoveryRetryDelayMs = 20L,
             onVerifyNewSsid = { _, _ -> true }
         )
 
@@ -194,20 +196,26 @@ class OntMobileDriverTest {
     @Test
     fun `Step 7 Commit Ambiguity handles socket disconnect during radio reload by verifying new SSID beacon`() = runBlocking {
         var wirelessCallCount = 0
+        val step7Dropped = AtomicBoolean(false)
         val verifyCalled = AtomicBoolean(false)
         val unbindCalled = AtomicBoolean(false)
 
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
+                if (step7Dropped.get()) {
+                    return MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START)
+                }
                 return when (request.path) {
                     "/" -> MockResponse().setResponseCode(200).setBody("<html>VNPT iGate</html>")
                     "/cgi-bin/luci/login.cmd" -> MockResponse().setResponseCode(200).setBody("""{"status":"OK","firstlog":"0","sessionKey":"sess_drop"}""")
                     "/cgi-bin/luci/wancfg.json" -> MockResponse().setResponseCode(200).setBody("""{"wanCfg":[]}""")
                     "/cgi-bin/luci/wirelesscfg.json" -> {
+                        request.body.readUtf8()
                         wirelessCallCount++
                         if (wirelessCallCount == 2) {
                             // Step 7: simulate ONT 2.4GHz radio dropping socket immediately upon receiving Apply
-                            MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_END)
+                            step7Dropped.set(true)
+                            MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
                         } else {
                             MockResponse().setResponseCode(200).setBody("""{"status":"OK"}""")
                         }
@@ -220,13 +228,13 @@ class OntMobileDriverTest {
         val driver = OntMobileDriver(
             baseUrl = baseUrl,
             settlingDelayMs = 10L,
+            recoveryRetryDelayMs = 20L,
             onUnbindNetwork = { unbindCalled.set(true) },
             onVerifyNewSsid = { ssid24, _ ->
                 verifyCalled.set(ssid24 == "Manh Ngoc")
                 true
             }
         )
-
         val result = driver.executeMobileSetup(
             record = sampleRecord,
             settings = GlobalSettings(baseUrl = baseUrl),
@@ -262,6 +270,7 @@ class OntMobileDriverTest {
         val driver = OntMobileDriver(
             baseUrl = baseUrl,
             settlingDelayMs = 10L,
+            recoveryRetryDelayMs = 20L,
             onUnbindNetwork = { unbindCalled.set(true) }
         )
 
@@ -305,6 +314,7 @@ class OntMobileDriverTest {
         val driver = OntMobileDriver(
             baseUrl = baseUrl,
             settlingDelayMs = 10L,
+            recoveryRetryDelayMs = 20L,
             onVerifyNewSsid = { _, _ -> true }
         )
 
@@ -390,6 +400,7 @@ class OntMobileDriverTest {
         val driver = OntMobileDriver(
             baseUrl = baseUrl,
             settlingDelayMs = 10L,
+            recoveryRetryDelayMs = 20L,
             onVerifyNewSsid = { _, _ -> false },
             onRebindWifiNetwork = { null }
         )
@@ -466,6 +477,7 @@ class OntMobileDriverTest {
         val driver = OntMobileDriver(
             baseUrl = baseUrl,
             settlingDelayMs = 10L,
+            recoveryRetryDelayMs = 20L,
             onUnbindNetwork = { unbindCalled.set(true) },
             onVerifyNewSsid = { _, _ -> false }, // Simulate Android OS scan throttle / Location off
             onRebindWifiNetwork = { null }
@@ -485,11 +497,9 @@ class OntMobileDriverTest {
     }
 
     @Test
-    fun `Step 6 logs out and Step 7 connects to newly configured secondary Wi-Fi before renaming remaining band`() = runBlocking {
+    fun `Step 6 keeps current Wi-Fi session alive without logout and Step 7 saves connected band last before final logout and unbind`() = runBlocking {
         val eventLog = CopyOnWriteArrayList<String>()
-        val switchedSsid = CopyOnWriteArrayList<String>()
-        val switchedPass = CopyOnWriteArrayList<String>()
-        val switchedBand = CopyOnWriteArrayList<WifiBand>()
+        val verifyCalled = AtomicBoolean(false)
         var loginCount = 0
 
         server.dispatcher = object : Dispatcher() {
@@ -533,13 +543,11 @@ class OntMobileDriverTest {
         val driver = OntMobileDriver(
             baseUrl = baseUrl,
             settlingDelayMs = 10L,
-            onVerifyNewSsid = { _, _ -> true },
-            onSwitchToConfiguredWifi = { ssid, pass, band ->
-                eventLog.add("switchWifi:$ssid:${band.label}")
-                switchedSsid.add(ssid)
-                switchedPass.add(pass)
-                switchedBand.add(band)
-                javax.net.SocketFactory.getDefault()
+            recoveryRetryDelayMs = 20L,
+            onUnbindNetwork = { eventLog.add("unbind") },
+            onVerifyNewSsid = { _, _ ->
+                verifyCalled.set(true)
+                true
             }
         )
 
@@ -551,65 +559,52 @@ class OntMobileDriverTest {
         )
 
         assertTrue(result.success)
-        assertEquals(listOf("Manh Ngoc 5G"), switchedSsid)
-        assertEquals(listOf("28121995"), switchedPass)
-        assertEquals(listOf(WifiBand.BAND_5_GHZ), switchedBand)
+        assertTrue(result.beaconVerified)
+        assertFalse("onVerifyNewSsid must be skipped when Step 7 wirelesscfg.json returned HTTP 200 OK", verifyCalled.get())
+        assertEquals("Must authenticate only ONCE across Steps 1..7 when session stays valid", 1, loginCount)
 
-        val step6CfgIdx = eventLog.indexOfFirst { it.startsWith("wirelesscfg:unit=1") }
-        val preSwitchLogoutIdx = eventLog.indexOf("logout:sess_1")
-        val switchIdx = eventLog.indexOf("switchWifi:Manh Ngoc 5G:5GHz")
-        val postSwitchLoginIdx = eventLog.indexOf("login:sess_2")
-        val step7CfgIdx = eventLog.indexOf("wirelesscfg:unit=0:sess=sess_2")
-        val finalLogoutIdx = eventLog.indexOf("logout:sess_2")
+        val step6CfgIdx = eventLog.indexOf("wirelesscfg:unit=1:sess=sess_1")
+        val step7CfgIdx = eventLog.indexOf("wirelesscfg:unit=0:sess=sess_1")
+        val logoutIndices = eventLog.mapIndexedNotNull { idx, ev -> if (ev.startsWith("logout:")) idx else null }
+        val unbindIdx = eventLog.indexOf("unbind")
 
-        assertTrue("Step 6 must configure unit=1 first", step6CfgIdx >= 0)
-        assertTrue("Step 6 must logout before switching bands", preSwitchLogoutIdx > step6CfgIdx)
-        assertTrue("Must switch to configured secondary Wi-Fi after Step 6 logout", switchIdx > preSwitchLogoutIdx)
-        assertTrue("Must re-authenticate on secondary Wi-Fi after switching", postSwitchLoginIdx > switchIdx)
-        assertTrue("Step 7 must configure unit=0 over the new session on secondary Wi-Fi", step7CfgIdx > postSwitchLoginIdx)
-        assertTrue("Step 7 must logout new session upon completion", finalLogoutIdx > step7CfgIdx)
+        assertTrue("Step 6 must configure secondary band unit=1 on sess_1", step6CfgIdx >= 0)
+        assertTrue("Step 7 must configure connected band unit=0 on the SAME sess_1", step7CfgIdx > step6CfgIdx)
+        assertEquals("Must only logout once at the end of Step 7 (never between Step 6 and Step 7)", 1, logoutIndices.size)
+        assertTrue("Final logout must occur AFTER Step 7 NVRAM save", logoutIndices.single() > step7CfgIdx)
+        assertTrue("Unbind must occur AFTER Step 7 logout", unbindIdx > logoutIndices.single())
+        val betweenStep6And7 = eventLog.subList(step6CfgIdx + 1, step7CfgIdx)
+        assertTrue("ensureGatewayReadyBeforeStep7 must probe gateway before Step 7", betweenStep6And7.contains("probe"))
+        assertTrue("ensureGatewayReadyBeforeStep7 must verify wlrestart.json before Step 7", betweenStep6And7.count { it == "wlrestart" } >= 2)
     }
 
     @Test
-    fun `Step 7 band handover recovers from user exist if Step 6 logout dropped during radio reload`() = runBlocking {
-        var postSwitchLoginAttempts = 0
-        var switched = false
-        var oldSessionReleasedOverNewLink = false
+    fun `resolveConnectedBandFromOnt overrides misdetected 2_4GHz client band using real 2D wirelessInfoList and wlAssociatedDevice schema`() = runBlocking {
+        val callSequence = CopyOnWriteArrayList<String>()
+        val resolvedCallbacks = CopyOnWriteArrayList<Pair<WifiBand, String?>>()
 
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.path ?: ""
                 val body = request.body.readUtf8()
+                callSequence.add(path)
                 return when (path) {
                     "/" -> MockResponse().setResponseCode(200).setBody("<html>VNPT iGate GW040-NSv2</html>")
-                    "/cgi-bin/luci/login.cmd" -> {
-                        if (!switched) {
-                            MockResponse().setResponseCode(200).setBody(
-                                """{"status":"OK","firstlog":"0","sessionKey":"sess_old","numberLogin":"0","timeoutLogin":"0"}"""
-                            )
-                        } else {
-                            postSwitchLoginAttempts++
-                            if (postSwitchLoginAttempts == 1 && !oldSessionReleasedOverNewLink) {
-                                MockResponse().setResponseCode(200).setBody("""{"status":"user exist"}""")
-                            } else {
-                                MockResponse().setResponseCode(200).setBody(
-                                    """{"status":"OK","firstlog":"0","sessionKey":"sess_new","numberLogin":"0","timeoutLogin":"0"}"""
-                                )
-                            }
-                        }
-                    }
-                    "/cgi-bin/luci/logout.cmd" -> {
-                        if (!switched) {
-                            // Simulate Step 6 logout dropping because old radio restarted
-                            MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START)
-                        } else {
-                            if (body.contains("sessionKey=sess_old")) {
-                                oldSessionReleasedOverNewLink = true
-                            }
-                            MockResponse().setResponseCode(200).setBody("""{"status":"OK"}""")
-                        }
-                    }
+                    "/cgi-bin/luci/login.cmd" -> MockResponse().setResponseCode(200).setBody(
+                        """{"status":"OK","firstlog":"0","sessionKey":"sess_band","numberLogin":"0","timeoutLogin":"0"}"""
+                    )
+                    "/cgi-bin/luci/dhcpclient.json" -> MockResponse().setResponseCode(200).setBody(
+                        """{"dhcpInfoList":["192.168.1.2|DHCP||aa:bb:cc:dd:ee:ff|phone|WiFi|1|wl0"],"wlAssociatedDevice":["aa:bb:cc:dd:ee:ff|192.168.1.2|1|wl1.1|-45"]}"""
+                    )
+                    "/cgi-bin/luci/deviceinfo2.json" -> MockResponse().setResponseCode(200).setBody(
+                        """{"wirelessInfoList":[["wl0|1|100|10\n|GW040-NSv2_2.4G_60BCD8\n|c4:2c:7b:60:bc:d9\n","GW040-NSv2_2.4G_60BCD8\n|wl0"],["wl1|1|100|120\n|GW040-NSv2_5G_60BCD8\n|c4:2c:7b:60:bc:da\n","GW040-NSv2_5G_60BCD8\n|wl1"]],"baseMacAddress":"C4:2C:7B:60:BC:D8\n"}"""
+                    )
                     "/cgi-bin/luci/wancfg.json" -> MockResponse().setResponseCode(200).setBody("""{"wanCfg":[]}""")
+                    "/cgi-bin/luci/wirelesscfg.json" -> {
+                        val unit = if (body.contains("wl_unit=1")) "1" else "0"
+                        callSequence.add("wirelesscfg:unit=$unit")
+                        MockResponse().setResponseCode(200).setBody("""{"status":"OK"}""")
+                    }
                     else -> MockResponse().setResponseCode(200).setBody("""{"status":"OK","_wlrestart_":"0"}""")
                 }
             }
@@ -618,11 +613,102 @@ class OntMobileDriverTest {
         val driver = OntMobileDriver(
             baseUrl = baseUrl,
             settlingDelayMs = 10L,
-            onVerifyNewSsid = { _, _ -> true },
-            onSwitchToConfiguredWifi = { _, _, _ ->
-                switched = true
-                javax.net.SocketFactory.getDefault()
+            recoveryRetryDelayMs = 20L
+        )
+
+        val result = driver.executeMobileSetup(
+            record = sampleRecord.copy(lastKnownAdminPass = "Passwd2@"),
+            settings = GlobalSettings(baseUrl = baseUrl),
+            connectedBand = WifiBand.BAND_2_4_GHZ, // Misdetected as 2.4GHz when GPS is off
+            bssid = null,
+            localWifiIpv4 = "192.168.1.2",
+            onBandResolved = { band, baseMac ->
+                resolvedCallbacks.add(band to baseMac)
             }
+        )
+
+        assertTrue(result.success)
+        assertEquals(WifiBand.BAND_5_GHZ, result.resolvedConnectedBand)
+        assertEquals(listOf(WifiBand.BAND_5_GHZ to "C4:2C:7B:60:BC:D8"), resolvedCallbacks)
+
+        // Verify band resolution ran immediately after Step 2 (BEFORE Step 3 wancfg.json & Step 5 savelanv4cfg.cmd)
+        val loginIdx = callSequence.indexOf("/cgi-bin/luci/login.cmd")
+        val dhcpIdx = callSequence.indexOf("/cgi-bin/luci/dhcpclient.json")
+        val devInfoIdx = callSequence.indexOf("/cgi-bin/luci/deviceinfo2.json")
+        val wanIdx = callSequence.indexOf("/cgi-bin/luci/wancfg.json")
+        val lanIdx = callSequence.indexOf("/cgi-bin/luci/savelanv4cfg.cmd")
+        assertTrue(dhcpIdx > loginIdx)
+        assertTrue(devInfoIdx > dhcpIdx)
+        assertTrue("resolveConnectedBandFromOnt must run before Step 3/5 dnsmasq reload", wanIdx > devInfoIdx && lanIdx > devInfoIdx)
+
+        // Verify wl1 (5GHz) was prioritized over stale dhcpInfoList wl0 so Step 6 configures unit=0 and Step 7 configures unit=1 LAST
+        val wirelessUnits = callSequence.filter { it.startsWith("wirelesscfg:unit=") }
+        assertEquals(listOf("wirelesscfg:unit=0", "wirelesscfg:unit=1"), wirelessUnits)
+    }
+
+    @Test
+    fun `ensureGatewayReadyBeforeStep7 recovers from fail authen and user exist using dynamic lastActiveSessionKey without double login`() = runBlocking {
+        var wlRestartCalls = 0
+        var reloginCalls = 0
+        val releasedSessions = CopyOnWriteArrayList<String>()
+        val step7SessionKeys = CopyOnWriteArrayList<String>()
+
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path ?: ""
+                val body = request.body.readUtf8()
+                return when (path) {
+                    "/" -> MockResponse().setResponseCode(200).setBody("<html>VNPT iGate GW040-NSv2</html>")
+                    "/cgi-bin/luci/login.cmd" -> {
+                        if (wlRestartCalls == 0) {
+                            MockResponse().setResponseCode(200).setBody(
+                                """{"status":"OK","firstlog":"0","sessionKey":"sess_initial","numberLogin":"0","timeoutLogin":"0"}"""
+                            )
+                        } else {
+                            reloginCalls++
+                            if (reloginCalls == 1 && !releasedSessions.contains("sess_initial")) {
+                                MockResponse().setResponseCode(200).setBody("""{"status":"user exist"}""")
+                            } else {
+                                MockResponse().setResponseCode(200).setBody(
+                                    """{"status":"OK","firstlog":"0","sessionKey":"sess_recovered","numberLogin":"0","timeoutLogin":"0"}"""
+                                )
+                            }
+                        }
+                    }
+                    "/cgi-bin/luci/wancfg.json" -> MockResponse().setResponseCode(200).setBody(
+                        // Include placeholder sessionKey="0" to verify RT-05 ignores "0"
+                        """{"wanCfg":[],"sessionKey":"0"}"""
+                    )
+                    "/cgi-bin/luci/wlrestart.json" -> {
+                        wlRestartCalls++
+                        if (wlRestartCalls == 2) {
+                            // Gate before Step 7 receives LuCI JSON expiry {"status":"fail authen"}
+                            MockResponse().setResponseCode(200).setBody("""{"status":"fail authen"}""")
+                        } else {
+                            MockResponse().setResponseCode(200).setBody("""{"_wlrestart_":"0"}""")
+                        }
+                    }
+                    "/cgi-bin/luci/wirelesscfg.json" -> {
+                        if (body.contains("wl_unit=0")) {
+                            val usedSess = Regex("sessionKey=([^&]+)").find(body)?.groupValues?.get(1).orEmpty()
+                            step7SessionKeys.add(usedSess)
+                        }
+                        MockResponse().setResponseCode(200).setBody("""{"status":"OK"}""")
+                    }
+                    "/cgi-bin/luci/logout.cmd" -> {
+                        val outSess = Regex("sessionKey=([^&]+)").find(body)?.groupValues?.get(1).orEmpty()
+                        releasedSessions.add(outSess)
+                        MockResponse().setResponseCode(200).setBody("""{"status":"OK"}""")
+                    }
+                    else -> MockResponse().setResponseCode(200).setBody("""{"status":"OK"}""")
+                }
+            }
+        }
+
+        val driver = OntMobileDriver(
+            baseUrl = baseUrl,
+            settlingDelayMs = 10L,
+            recoveryRetryDelayMs = 20L
         )
 
         val result = driver.executeMobileSetup(
@@ -632,37 +718,44 @@ class OntMobileDriverTest {
         )
 
         assertTrue(result.success)
-        assertTrue("Expected old session to be released over new link after user exist", oldSessionReleasedOverNewLink)
-        assertEquals(2, postSwitchLoginAttempts)
-    }
+        assertTrue("Must release dynamic lastActiveSessionKey 'sess_initial' on user exist", releasedSessions.contains("sess_initial"))
+        assertEquals(2, reloginCalls)
+        assertEquals(listOf("sess_recovered"), step7SessionKeys)
 
-    @Test
-    fun `Step 7 fails with OntNetworkError when switching to secondary Wi-Fi fails so false success never happens`() = runBlocking {
-        val wirelessUnitsConfigured = CopyOnWriteArrayList<String>()
-
+        // [Red Team RT-01] Verify no double-login if reloginAfterRadioBounce hits numberLogin == 2
+        var lockoutReloginCalls = 0
+        var gateTriggered = false
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.path ?: ""
-                val body = request.body.readUtf8()
-                if (path == "/cgi-bin/luci/wirelesscfg.json") {
-                    wirelessUnitsConfigured.add(if (body.contains("wl_unit=1")) "1" else "0")
-                }
+                request.body.readUtf8()
                 return when (path) {
                     "/" -> MockResponse().setResponseCode(200).setBody("<html>VNPT iGate GW040-NSv2</html>")
-                    "/cgi-bin/luci/login.cmd" -> MockResponse().setResponseCode(200).setBody(
-                        """{"status":"OK","firstlog":"0","sessionKey":"sess_1","numberLogin":"0","timeoutLogin":"0"}"""
-                    )
+                    "/cgi-bin/luci/login.cmd" -> {
+                        if (!gateTriggered) {
+                            MockResponse().setResponseCode(200).setBody(
+                                """{"status":"OK","firstlog":"0","sessionKey":"sess_lock","numberLogin":"0","timeoutLogin":"0"}"""
+                            )
+                        } else {
+                            lockoutReloginCalls++
+                            MockResponse().setResponseCode(200).setBody(
+                                """{"status":"FAIL","numberLogin":"2","timeoutLogin":"0"}"""
+                            )
+                        }
+                    }
                     "/cgi-bin/luci/wancfg.json" -> MockResponse().setResponseCode(200).setBody("""{"wanCfg":[]}""")
-                    else -> MockResponse().setResponseCode(200).setBody("""{"status":"OK","_wlrestart_":"0"}""")
+                    "/cgi-bin/luci/wlrestart.json" -> {
+                        if (!gateTriggered) {
+                            gateTriggered = true
+                            MockResponse().setResponseCode(200).setBody("""{"_wlrestart_":"0"}""")
+                        } else {
+                            MockResponse().setResponseCode(200).setBody("""{"status":"fail authen"}""")
+                        }
+                    }
+                    else -> MockResponse().setResponseCode(200).setBody("""{"status":"OK"}""")
                 }
             }
         }
-
-        val driver = OntMobileDriver(
-            baseUrl = baseUrl,
-            settlingDelayMs = 10L,
-            onSwitchToConfiguredWifi = { _, _, _ -> null }
-        )
 
         try {
             driver.executeMobileSetup(
@@ -670,26 +763,48 @@ class OntMobileDriverTest {
                 settings = GlobalSettings(baseUrl = baseUrl),
                 connectedBand = WifiBand.BAND_2_4_GHZ
             )
-            fail("Expected OntNetworkError when secondary Wi-Fi handover returns null")
-        } catch (e: OntNetworkError) {
-            assertTrue(e.message!!.contains("Manh Ngoc 5G"))
+            fail("Expected OntAccountLockoutWarning on numberLogin == 2")
+        } catch (_: OntAccountLockoutWarning) {
         }
-
-        // Only Step 6 (unit=1) ran; Step 7 (unit=0) was not falsely marked as completed
-        assertEquals(listOf("1"), wirelessUnitsConfigured)
+        assertEquals("Must NEVER double-call reloginAfterRadioBounce when numberLogin == 2", 1, lockoutReloginCalls)
     }
 
     @Test
-    fun `Step 7 after band handover requires wirelesscfg NVRAM commit and does not treat socket drop as false success`() = runBlocking {
-        var unit0Attempts = 0
+    fun `Step 7 retries all 3 attempts and throws OntNetworkError without false success when old gateway stays online or pre-flush fails`() = runBlocking {
+        val driver = OntMobileDriver(
+            baseUrl = baseUrl,
+            settlingDelayMs = 10L,
+            recoveryRetryDelayMs = 20L
+        )
 
+        // Direct unit verification of FlushTrackedIOException unwrap & byte-flush guard ([Red Team RT-04])
+        assertFalse(
+            "Unflushed SocketTimeoutException must NOT be treated as post-flush radio drop",
+            driver.isPostFlushRadioDrop(
+                OntMobileDriver.FlushTrackedIOException(java.net.SocketTimeoutException("timeout"), allBytesFlushed = false)
+            )
+        )
+        assertTrue(
+            "Flushed SocketTimeoutException (read timeout) IS a post-flush radio drop",
+            driver.isPostFlushRadioDrop(
+                OntMobileDriver.FlushTrackedIOException(java.net.SocketTimeoutException("Read timed out"), allBytesFlushed = true)
+            )
+        )
+        assertTrue(
+            "Wrapped ConnectException must still be recognized as pre-send connect failure",
+            driver.isPreSendConnectFailure(
+                OntMobileDriver.FlushTrackedIOException(java.net.ConnectException("Connection refused"), allBytesFlushed = false)
+            )
+        )
+
+        var unit0Attempts = 0
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 val path = request.path ?: ""
                 val body = request.body.readUtf8()
                 if (path == "/cgi-bin/luci/wirelesscfg.json" && body.contains("wl_unit=0")) {
                     unit0Attempts++
-                    // Simulate wirelesscfg.json dropping before HTTP 200 on all 3 attempts over secondary Wi-Fi
+                    // Drop before HTTP 200 on all 3 attempts while old gateway remains online!
                     return MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AFTER_REQUEST)
                 }
                 return when (path) {
@@ -703,25 +818,31 @@ class OntMobileDriverTest {
             }
         }
 
-        val driver = OntMobileDriver(
-            baseUrl = baseUrl,
-            settlingDelayMs = 10L,
-            onSwitchToConfiguredWifi = { _, _, _ -> javax.net.SocketFactory.getDefault() }
-        )
-
         try {
             driver.executeMobileSetup(
                 record = sampleRecord.copy(lastKnownAdminPass = "Passwd2@"),
                 settings = GlobalSettings(baseUrl = baseUrl),
                 connectedBand = WifiBand.BAND_2_4_GHZ
             )
-            fail("Expected OntNetworkError when Step 7 wirelesscfg.json fails to commit NVRAM over secondary Wi-Fi")
+            fail("Expected OntNetworkError when Step 7 drops on all 3 attempts while old Wi-Fi stays online")
         } catch (_: OntNetworkError) {
         }
+        assertEquals("Must try all 3 Step 7 attempts before failing", 3, unit0Attempts)
 
-        assertEquals("Must retry all 3 attempts when wirelesscfg.json drops over secondary Wi-Fi", 3, unit0Attempts)
+        // Also verify executeManualConnectedWifiOnly rejects false success when old Wi-Fi stays online
+        try {
+            driver.executeManualConnectedWifiOnly(
+                record = sampleRecord.copy(lastKnownAdminPass = "Passwd2@"),
+                settings = GlobalSettings(baseUrl = baseUrl),
+                targetUnit = 0,
+                targetBandLabel = "2.4GHz",
+                targetSsid = "Manh Ngoc",
+                targetPass = "28121995"
+            )
+            fail("Expected OntNetworkError when manual Step 8 drops while old Wi-Fi stays online")
+        } catch (_: OntNetworkError) {
+        }
     }
-
     private fun createTempFirmwareFile(sizeBytes: Int = 80 * 1024): File {
         val file = File.createTempFile("fw_test_GW040_", ".signed")
         val payload = ByteArray(sizeBytes) { idx ->
@@ -742,7 +863,6 @@ class OntMobileDriverTest {
         try {
             val recordedRequests = CopyOnWriteArrayList<Triple<String, String, ByteArray>>()
             val unbindCalled = AtomicBoolean(false)
-            val switchWifiCalled = AtomicBoolean(false)
             val progressUpdates = CopyOnWriteArrayList<StepProgress>()
             var wlRestartCount = 0
             var ensureRelogAttempts = 0
@@ -804,11 +924,8 @@ class OntMobileDriverTest {
             val driver = OntMobileDriver(
                 baseUrl = baseUrl,
                 settlingDelayMs = 10L,
-                onUnbindNetwork = { unbindCalled.set(true) },
-                onSwitchToConfiguredWifi = { _, _, _ ->
-                    switchWifiCalled.set(true)
-                    javax.net.SocketFactory.getDefault()
-                }
+                recoveryRetryDelayMs = 20L,
+                onUnbindNetwork = { unbindCalled.set(true) }
             )
 
             val settings = GlobalSettings(
@@ -838,8 +955,6 @@ class OntMobileDriverTest {
             assertEquals("5GHz", result.configuredSecondaryBandLabel)
             assertEquals("Manh Ngoc 5G", result.configuredSecondarySsid)
             assertTrue(unbindCalled.get())
-            assertFalse("Must NOT switch to secondary Wi-Fi before firmware upload", switchWifiCalled.get())
-
             // Verify only secondary Wi-Fi (wl_unit=1) was configured in Step 6, NOT connected Wi-Fi (wl_unit=0)
             val wirelessRequests = recordedRequests.filter { it.first == "/cgi-bin/luci/wirelesscfg.json" }
             assertEquals(1, wirelessRequests.size)
@@ -910,7 +1025,7 @@ class OntMobileDriverTest {
                 }
             }
 
-            val driver = OntMobileDriver(baseUrl = baseUrl, settlingDelayMs = 10L)
+            val driver = OntMobileDriver(baseUrl = baseUrl, settlingDelayMs = 10L, recoveryRetryDelayMs = 20L)
             val settings = GlobalSettings(
                 baseUrl = baseUrl,
                 enableFirmwareUpdate = true,
@@ -967,7 +1082,7 @@ class OntMobileDriverTest {
                 }
             }
 
-            val driver = OntMobileDriver(baseUrl = baseUrl, settlingDelayMs = 10L)
+            val driver = OntMobileDriver(baseUrl = baseUrl, settlingDelayMs = 10L, recoveryRetryDelayMs = 20L)
             val settings = GlobalSettings(
                 baseUrl = baseUrl,
                 enableFirmwareUpdate = true,
@@ -1022,6 +1137,7 @@ class OntMobileDriverTest {
         val driver = OntMobileDriver(
             baseUrl = baseUrl,
             settlingDelayMs = 10L,
+            recoveryRetryDelayMs = 20L,
             probePauseMutex = probeMutex,
             onUnbindNetwork = { unbindCalled.set(true) }
         )
@@ -1078,7 +1194,7 @@ class OntMobileDriverTest {
                 }
             }
 
-            val driver = OntMobileDriver(baseUrl = baseUrl, settlingDelayMs = 10L)
+            val driver = OntMobileDriver(baseUrl = baseUrl, settlingDelayMs = 10L, recoveryRetryDelayMs = 20L)
             val settings = GlobalSettings(
                 baseUrl = baseUrl,
                 enableFirmwareUpdate = true,
@@ -1128,7 +1244,7 @@ class OntMobileDriverTest {
                 }
             }
 
-            val driver = OntMobileDriver(baseUrl = baseUrl, settlingDelayMs = 10L)
+            val driver = OntMobileDriver(baseUrl = baseUrl, settlingDelayMs = 10L, recoveryRetryDelayMs = 20L)
             val settings = GlobalSettings(
                 baseUrl = baseUrl,
                 enableFirmwareUpdate = true,
@@ -1166,7 +1282,7 @@ class OntMobileDriverTest {
             }
         }
 
-        val driver = OntMobileDriver(baseUrl = baseUrl, settlingDelayMs = 5L)
+        val driver = OntMobileDriver(baseUrl = baseUrl, settlingDelayMs = 5L, recoveryRetryDelayMs = 20L)
         for (mode in WifiSecurityMode.entries) {
             wirelessBodies.clear()
             val pw = if (mode.requiresPassword) "28121995" else ""
@@ -1212,7 +1328,7 @@ class OntMobileDriverTest {
             }
         }
 
-        val driver = OntMobileDriver(baseUrl = baseUrl, settlingDelayMs = 5L)
+        val driver = OntMobileDriver(baseUrl = baseUrl, settlingDelayMs = 5L, recoveryRetryDelayMs = 20L)
         try {
             driver.executeMobileSetup(
                 record = sampleRecord.copy(pass24g = "", pass5g = ""),
@@ -1243,7 +1359,7 @@ class OntMobileDriverTest {
             }
         }
 
-        val driver = OntMobileDriver(baseUrl = baseUrl, settlingDelayMs = 5L, onVerifyNewSsid = { _, _ -> true })
+        val driver = OntMobileDriver(baseUrl = baseUrl, settlingDelayMs = 5L, recoveryRetryDelayMs = 20L, onVerifyNewSsid = { _, _ -> true })
         val blankPassRecord = sampleRecord.copy(pass24g = "", pass5g = "")
         val result = driver.executeMobileSetup(
             record = blankPassRecord,

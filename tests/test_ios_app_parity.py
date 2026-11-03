@@ -245,3 +245,106 @@ def test_phase5_wifi_security_mode_cross_platform_parity():
     huong_dan = (ROOT_DIR / "HUONG_DAN_SU_DUNG_TOOL_ONT.md").read_text(encoding="utf-8")
     assert "wpa2_wpa3_psk" in readme and "wpa2_psk" in readme
     assert "Chuẩn bảo mật Wi-Fi" in huong_dan
+
+
+def test_phase6_mobile_wifi_keepalive_band_ground_truth_and_save_before_disconnect_parity():
+    """Verify single-connection keep-alive, server-side 2D wirelessInfoList band resolution, and Step 7 save-before-disconnect across Android & iOS."""
+    android_driver = (
+        ROOT_DIR
+        / "android-app"
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "vn"
+        / "vnpt"
+        / "ontconfig"
+        / "core"
+        / "driver"
+        / "OntMobileDriver.kt"
+    ).read_text(encoding="utf-8")
+    android_wifi = (
+        ROOT_DIR
+        / "android-app"
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "vn"
+        / "vnpt"
+        / "ontconfig"
+        / "core"
+        / "wifi"
+        / "OntWifiConnector.kt"
+    ).read_text(encoding="utf-8")
+    android_vm = (
+        ROOT_DIR
+        / "android-app"
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "vn"
+        / "vnpt"
+        / "ontconfig"
+        / "ui"
+        / "MainViewModel.kt"
+    ).read_text(encoding="utf-8")
+    ios_driver = (IOS_APP_DIR / "Core" / "Driver" / "OntMobileDriver.swift").read_text(encoding="utf-8")
+    ios_vm = (IOS_APP_DIR / "UI" / "MainViewModel.swift").read_text(encoding="utf-8")
+    ios_tests = (IOS_TESTS_DIR / "OntMobileDriverTests.swift").read_text(encoding="utf-8")
+
+    # Clean cutover: Band-Hopping symbols completely removed from Android
+    for removed_symbol in [
+        "onSwitchToConfiguredWifi",
+        "switchToSecondaryWifiAndAuthenticate",
+        "switchToConfiguredOntWifi",
+        "isSystemConnectedToTargetWifi",
+        "hasSwitchedToSecondaryBand",
+    ]:
+        assert removed_symbol not in android_driver, f"Dead band-hopping symbol {removed_symbol} still in OntMobileDriver.kt"
+        assert removed_symbol not in android_wifi, f"Dead band-hopping symbol {removed_symbol} still in OntWifiConnector.kt"
+        assert removed_symbol not in android_vm, f"Dead band-hopping symbol {removed_symbol} still in MainViewModel.kt"
+
+    # Shared keep-alive, server-side band resolution, and session recovery contracts on BOTH platforms
+    for shared_token in [
+        "resolveConnectedBandFromOnt",
+        "reloginAfterRadioBounce",
+        "recoveryRetryDelayMs",
+        "lastActiveSessionKey",
+        "/cgi-bin/luci/dhcpclient.json",
+        "/cgi-bin/luci/deviceinfo2.json",
+        "wlAssociatedDevice",
+        "wirelessInfoList",
+        "fail authen",
+        "localWifiIpv4",
+        "onBandResolved",
+    ]:
+        assert shared_token in android_driver, f"Missing {shared_token} in OntMobileDriver.kt"
+        assert shared_token in ios_driver, f"Missing {shared_token} in OntMobileDriver.swift"
+
+    # iOS specific RT-03, RT-04, RT-07, RT-08 invariants
+    assert "NSURLErrorSecureConnectionFailed" not in ios_driver
+    assert "settlingDelayMs >= 500" not in ios_driver
+    assert "settlingDelayMs: 200" in ios_vm
+    assert "isOnOntSubnet" in ios_vm
+    assert "suppressProbeAfterCompletion" in ios_vm
+    assert "localWifiIpv4" in ios_vm and "onBandResolved" in ios_vm
+
+    # XCTest @Sendable-safe capture & coverage
+    assert "TestLockedBox" in ios_tests
+    for xctest_name in [
+        "testResolveConnectedBandFromOntParses2DWirelessInfoListAndOverridesMisdetectedBand",
+        "testEnsureGatewayReadyBeforeStep7RecoversFromFailAuthenAndUserExistWithoutDoubleLogin",
+        "testStep7Attempt3ThrowsNetworkErrorInsteadOfFalseSuccessWhenOldGatewayRemainsOnline",
+    ]:
+        assert xctest_name in ios_tests, f"Missing {xctest_name} in OntMobileDriverTests.swift"
+
+    # Field documentation reflects single-connection keep-alive & save-before-disconnect (no stale Band-Hopping prose)
+    readme = (ROOT_DIR / "README.md").read_text(encoding="utf-8")
+    huong_dan = (ROOT_DIR / "HUONG_DAN_SU_DUNG_TOOL_ONT.md").read_text(encoding="utf-8")
+    for stale_doc_phrase in ["Band-Hopping", "tên Wi-Fi phụ vừa đổi"]:
+        assert stale_doc_phrase not in readme, f"Stale phrase '{stale_doc_phrase}' still in README.md"
+        assert stale_doc_phrase not in huong_dan, f"Stale phrase '{stale_doc_phrase}' still in HUONG_DAN_SU_DUNG_TOOL_ONT.md"
+    assert "dhcpclient.json" in readme and "deviceinfo2.json" in readme
+    assert "dhcpclient.json" in huong_dan and "deviceinfo2.json" in huong_dan

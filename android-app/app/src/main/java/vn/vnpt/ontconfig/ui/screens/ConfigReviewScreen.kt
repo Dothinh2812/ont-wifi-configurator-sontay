@@ -262,8 +262,13 @@ fun ConfigReviewScreen(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Column(modifier = Modifier.padding(end = 8.dp)) {
+                            val ssidBannerText = when {
+                                connectedWifiSsid.isNotBlank() -> connectedWifiSsid
+                                isOntGatewayOnline -> "Wi-Fi ONT Đang Kết Nối"
+                                else -> "Chưa bắt Wi-Fi ONT"
+                            }
                             Text(
-                                text = "Sóng: ${connectedWifiSsid.ifBlank { "Chưa bắt Wi-Fi ONT" }} (${connectedBand.label})",
+                                text = "Sóng: $ssidBannerText (${connectedBand.label})",
                                 style = MaterialTheme.typography.bodySmall,
                                 fontWeight = FontWeight.Bold,
                                 color = if (isOntGatewayOnline) Color(0xFF1B5E20) else MaterialTheme.colorScheme.onSecondaryContainer,

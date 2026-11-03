@@ -45,7 +45,13 @@ public final class MainViewModel: ObservableObject {
     @Published public var isOntGatewayOnline: Bool = false
     @Published public var connectedBand: WifiBand = .band24GHz
 
-    @Published public var showWifiGuideSheet: Bool = false
+    @Published public var showWifiGuideSheet: Bool = false {
+        didSet {
+            if showWifiGuideSheet {
+                suppressProbeAfterCompletion = false
+            }
+        }
+    }
     @Published public var showExecutionSheet: Bool = false
     @Published public var isRunningSetup: Bool = false
     @Published public var stepProgressList: [StepProgress] = MainViewModel.defaultSevenSteps()
@@ -61,9 +67,9 @@ public final class MainViewModel: ObservableObject {
     private var probeDriver: OntMobileDriver
     private var backgroundProbeTask: Task<Void, Never>?
     private var consecutiveMisses: Int = 0
+    private var suppressProbeAfterCompletion: Bool = false
     private var cachedSourceExcelData: Data?
     private let backgroundFlagBox = LockedBox<Bool>(false)
-
     public init(
         database: AppDatabase = .shared,
         wifiMonitor: IosWifiMonitor = IosWifiMonitor(),
@@ -99,10 +105,16 @@ public final class MainViewModel: ObservableObject {
         updateRecordsList(records)
     }
 
+    private func applyWifiSnapshot(_ snapshot: WifiInterfaceSnapshot) {
+        en0IpAddress = snapshot.en0IpAddress
+        isOnOntSubnet = snapshot.isOnOntSubnet
+        hasActiveVpn = snapshot.hasActiveVpnInterface
+    }
+
     /// Single serialized gateway probe entry point guarded by `!isRunningSetup && probePauseMutex.tryLock()`.
     @discardableResult
     public func performGatewayProbeOnce() async -> Bool {
-        if isRunningSetup || !probePauseMutex.tryLock() {
+        if isRunningSetup || suppressProbeAfterCompletion || !probePauseMutex.tryLock() {
             return isOntGatewayOnline
         }
         defer {
@@ -110,6 +122,12 @@ public final class MainViewModel: ObservableObject {
         }
 
         let snapshot = wifiMonitor.inspectInterfaces()
+        if globalSettings.baseUrl.contains("192.168.1.") && !snapshot.isOnOntSubnet {
+            consecutiveMisses = 2
+            applyWifiSnapshot(snapshot)
+            self.isOntGatewayOnline = false
+            return false
+        }
         let reachable = await probeDriver.probeGateway()
 
         let isOnline: Bool
@@ -121,9 +139,7 @@ public final class MainViewModel: ObservableObject {
             isOnline = (isOntGatewayOnline && consecutiveMisses < 2 && snapshot.isOnOntSubnet)
         }
 
-        self.en0IpAddress = snapshot.en0IpAddress
-        self.isOnOntSubnet = snapshot.isOnOntSubnet
-        self.hasActiveVpn = snapshot.hasActiveVpnInterface
+        applyWifiSnapshot(snapshot)
         self.isOntGatewayOnline = isOnline
         return isOnline
     }
@@ -231,6 +247,7 @@ public final class MainViewModel: ObservableObject {
 
     public func selectSubscriber(_ record: SubscriberRecord?) {
         if let rec = record {
+            suppressProbeAfterCompletion = false
             selectedRecord = allRecords.first(where: { $0.rowIndex == rec.rowIndex }) ?? rec
         } else {
             selectedRecord = nil
@@ -295,6 +312,7 @@ public final class MainViewModel: ObservableObject {
     // MARK: - 7-Step Execution with Background Task & Idle Timer Protection
 
     public func runOntConfiguration() {
+        guard !isRunningSetup else { return }
         guard let record = selectedRecord else { return }
         let settings = globalSettings
         let preRun = OntInputValidator.validateBeforeRun(record, settings: settings)
@@ -303,6 +321,7 @@ public final class MainViewModel: ObservableObject {
             return
         }
 
+        suppressProbeAfterCompletion = false
         let timeFormatter = DateFormatter()
         timeFormatter.dateFormat = "HH:mm:ss"
         let startTimeStr = timeFormatter.string(from: Date())
@@ -338,9 +357,29 @@ public final class MainViewModel: ObservableObject {
             }
             #endif
 
+            var snapshot = self.wifiMonitor.inspectInterfaces()
+            if settings.baseUrl.contains("192.168.1.") && !snapshot.isOnOntSubnet {
+                snapshot = await self.wifiMonitor.awaitWifiIpv4Ready(maxWaitMs: 1200)
+            }
+            self.applyWifiSnapshot(snapshot)
+
+            if settings.baseUrl.contains("192.168.1.") && !snapshot.isOnOntSubnet {
+                let vpnHint = snapshot.hasActiveVpnInterface
+                    ? " Phát hiện đang bật VPN (1.1.1.1 / WireGuard) — vui lòng tắt VPN."
+                    : ""
+                let noSubnetMsg =
+                    "iPhone chưa có địa chỉ IP 192.168.1.x trên card Wi-Fi (en0). Vui lòng kết nối Wi-Fi ONT trong Cài đặt iOS trước khi bấm RUN.\(vpnHint)"
+                self.isRunningSetup = false
+                self.executionError = noSubnetMsg
+                self.statusMessage = noSubnetMsg
+                self.notifyCompletionFeedback(success: false)
+                return
+            }
+
             let latestAdminPassBox = LockedBox<String>(record.lastKnownAdminPass)
             let bgBox = self.backgroundFlagBox
             let dbRef = self.database
+            let localIpv4 = snapshot.en0IpAddress
 
             let driver = OntMobileDriver(
                 baseUrl: settings.baseUrl,
@@ -363,7 +402,13 @@ public final class MainViewModel: ObservableObject {
                 let result = try await driver.executeMobileSetup(
                     record: record,
                     settings: settings,
-                    connectedBand: activeBand
+                    connectedBand: activeBand,
+                    localWifiIpv4: localIpv4,
+                    onBandResolved: { [weak self] resolvedBand in
+                        Task { @MainActor [weak self] in
+                            self?.connectedBand = resolvedBand
+                        }
+                    }
                 ) { [weak self] stepUpdate in
                     Task { @MainActor [weak self] in
                         guard let self = self else { return }
@@ -387,6 +432,7 @@ public final class MainViewModel: ObservableObject {
                 let all = database.getAll()
                 updateRecordsList(all, message: result.message)
 
+                suppressProbeAfterCompletion = true
                 isRunningSetup = false
                 setupResult = result
                 selectedRecord = completed

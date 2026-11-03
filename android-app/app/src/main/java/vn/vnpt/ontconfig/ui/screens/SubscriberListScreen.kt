@@ -378,7 +378,11 @@ private fun OntWifiStatusBanner(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Column(modifier = Modifier.padding(end = 8.dp)) {
-                    val ssidDisplay = connectedWifiSsid.ifBlank { "Chưa bắt Wi-Fi ONT" }
+                    val ssidDisplay = when {
+                        connectedWifiSsid.isNotBlank() -> connectedWifiSsid
+                        isOntGatewayOnline -> "Wi-Fi ONT Đang Kết Nối"
+                        else -> "Chưa bắt Wi-Fi ONT"
+                    }
                     Text(
                         text = "$ssidDisplay (${connectedBand.label})",
                         style = MaterialTheme.typography.bodyMedium,

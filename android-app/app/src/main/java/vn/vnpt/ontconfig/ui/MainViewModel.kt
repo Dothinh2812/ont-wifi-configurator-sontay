@@ -39,12 +39,14 @@ import vn.vnpt.ontconfig.data.local.SubscriberEntity
 import vn.vnpt.ontconfig.data.model.GlobalSettings
 import vn.vnpt.ontconfig.data.model.SubscriberRecord
 import vn.vnpt.ontconfig.data.model.SubscriberStatus
+import vn.vnpt.ontconfig.data.model.WifiSecurityMode
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import javax.net.SocketFactory
 
 data class MainUiState(
     val allRecords: List<SubscriberRecord> = emptyList(),
@@ -79,7 +81,7 @@ data class MainUiState(
             StepProgress(4, 7, "Bước 4/7: Cài đặt GPON Password (SLID / Mã MEN)", StepStatus.PENDING),
             StepProgress(5, 7, "Bước 5/7: Kiểm tra & Lưu cấu hình LAN IPv4", StepStatus.PENDING),
             StepProgress(6, 7, "Bước 6/7: Cấu hình Wi-Fi băng tần phụ", StepStatus.PENDING),
-            StepProgress(7, 7, "Bước 7/7: Kết nối Wi-Fi phụ & Đổi tên Wi-Fi còn lại (Bước cuối)", StepStatus.PENDING)
+            StepProgress(7, 7, "Bước 7/7: Đổi tên & mật khẩu Wi-Fi kết nối chính (Bước cuối)", StepStatus.PENDING)
         )
 
         fun defaultEightStepsWithFirmware(): List<StepProgress> = listOf(
@@ -117,16 +119,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile
     private var consecutiveMisses = 0
 
-    // [Red Team RT-01] Suppress passive Wi-Fi auto-bind & probe immediately after firmware upload
-    // so the phone keeps 4G/5G cellular and never probes/binds the flashing ONT.
+    // [Red Team RT-01 & RT-07] Suppress passive Wi-Fi auto-bind & probe after setup completion
+    // (both 7-step and 8-step firmware) EVEN after ExecutionProgressSheet is dismissed, preserving
+    // 4G/5G cellular for Zalo report sharing and isolating the ONT during ~2-minute flash writes.
     @Volatile
-    private var suppressAutoBindAfterFirmware = false
+    private var suppressAutoBindAfterCompletion = false
 
     init {
         loadPersistedRecords()
         loadCachedFirmwareOnInit()
         wifiConnector.startMonitoringSystemWifi(
-            shouldAutoBind = { !suppressAutoBindAfterFirmware && !_uiState.value.isRunningSetup }
+            shouldAutoBind = { !suppressAutoBindAfterCompletion && !_uiState.value.isRunningSetup }
         ) {
             viewModelScope.launch(Dispatchers.IO) {
                 performGatewayProbeOnce()
@@ -179,17 +182,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * is detected immediately, and transitions to ONLINE on the first verified ONT HTML signature.
      */
     private suspend fun performGatewayProbeOnce(): Boolean {
-        if (_uiState.value.isRunningSetup || suppressAutoBindAfterFirmware || !probePauseMutex.tryLock()) {
+        if (_uiState.value.isRunningSetup || suppressAutoBindAfterCompletion || !probePauseMutex.tryLock()) {
             return _uiState.value.isOntGatewayOnline
         }
         try {
             wifiConnector.bindCurrentWifiNetworkIfConnected()
             val (ssid, bssid) = wifiConnector.getConnectedSsidAndBssid()
-            val socketFactory = wifiConnector.boundWifiNetwork?.socketFactory
+            val boundNet = wifiConnector.boundWifiNetwork
+            if (boundNet == null) {
+                consecutiveMisses = 2
+                _uiState.update { state ->
+                    state.copy(
+                        connectedWifiSsid = "",
+                        connectedWifiBssid = "",
+                        isOntGatewayOnline = false,
+                        consecutiveProbeSuccess = 0
+                    )
+                }
+                return false
+            }
 
-            probeDriver.updateSocketFactory(socketFactory)
+            probeDriver.updateSocketFactory(boundNet.socketFactory)
             val reachable = probeDriver.probeGateway()
-
             val isOnline = if (reachable) {
                 consecutiveMisses = 0
                 true
@@ -332,7 +346,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectSubscriber(record: SubscriberRecord?) {
         if (record != null) {
-            suppressAutoBindAfterFirmware = false
+            suppressAutoBindAfterCompletion = false
         }
         _uiState.update { state ->
             val latest = if (record != null) {
@@ -577,7 +591,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openWifiScanner() {
-        suppressAutoBindAfterFirmware = false
+        suppressAutoBindAfterCompletion = false
         val candidates = wifiConnector.scanOntNetworks(triggerStartScan = true)
         _uiState.update {
             it.copy(
@@ -610,7 +624,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connectToOntCandidate(candidate: WifiScanCandidate, passphrase: String?) {
-        suppressAutoBindAfterFirmware = false
+        suppressAutoBindAfterCompletion = false
         viewModelScope.launch {
             _uiState.update { it.copy(isConnectingWifi = true) }
             try {
@@ -618,7 +632,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     ssid = candidate.ssid,
                     bssid = candidate.bssid,
                     passphrase = passphrase,
-                    timeoutMs = 10000L
+                    timeoutMs = 10000L,
+                    securityMode = if (candidate.isOpen && passphrase.isNullOrBlank()) {
+                        WifiSecurityMode.OPEN.formValue
+                    } else {
+                        WifiSecurityMode.WPA2_WPA3_PSK.formValue
+                    },
+                    frequencyMhz = candidate.frequencyMhz
                 )
                 _uiState.update {
                     it.copy(
@@ -652,7 +672,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun bindExistingWifiConnection() {
-        suppressAutoBindAfterFirmware = false
+        suppressAutoBindAfterCompletion = false
         viewModelScope.launch {
             val net = withContext(Dispatchers.IO) {
                 wifiConnector.bindCurrentWifiNetworkIfConnected()
@@ -692,6 +712,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private suspend fun rebindOntWifiSocketFactory(
+        ssid: String,
+        bssid: String,
+        passiveWaitAttempts: Int = 6
+    ): SocketFactory? {
+        var rebound = wifiConnector.bindCurrentWifiNetworkIfConnected()
+        var remaining = passiveWaitAttempts
+        while (rebound == null && remaining-- > 0) {
+            delay(250L)
+            rebound = wifiConnector.bindCurrentWifiNetworkIfConnected()
+        }
+        if (rebound == null && ssid.isNotBlank()) {
+            rebound = try {
+                wifiConnector.connectToOntWifi(
+                    ssid = ssid,
+                    bssid = bssid.ifBlank { _uiState.value.connectedWifiBssid }.ifBlank { null },
+                    timeoutMs = 6000L
+                )
+            } catch (_: Exception) {
+                wifiConnector.bindCurrentWifiNetworkIfConnected()
+            }
+        }
+        return rebound?.socketFactory
+    }
+
     /**
      * Execute the 7-step wireless ONT configuration sequence for the selected subscriber.
      */
@@ -707,7 +752,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
 
-        suppressAutoBindAfterFirmware = false
+        suppressAutoBindAfterCompletion = false
         val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
         val startTimeStr = timeFormat.format(Date())
         val initialSteps = if (settings.enableFirmwareUpdate) {
@@ -732,7 +777,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             wifiConnector.bindCurrentWifiNetworkIfConnected()
-            val socketFactory = wifiConnector.boundWifiNetwork?.socketFactory
+            val boundNet = wifiConnector.boundWifiNetwork
+            if (boundNet == null) {
+                val noWifiErr = "Chưa kết nối Wi-Fi của ONT. Vui lòng bấm 'Bắt Wi-Fi ONT' hoặc kết nối Wi-Fi ONT trong Cài đặt máy trước khi bấm RUN."
+                _uiState.update { state ->
+                    state.copy(
+                        isRunningSetup = false,
+                        executionError = noWifiErr,
+                        statusMessage = noWifiErr
+                    )
+                }
+                notifyCompletionFeedback(success = false)
+                return@launch
+            }
+            val socketFactory = boundNet.socketFactory
             val (detectedSsid, detectedBssid) = wifiConnector.getConnectedSsidAndBssid()
             val effectiveSsid = detectedSsid.ifBlank { _uiState.value.connectedWifiSsid }
             val effectiveBssid = detectedBssid.ifBlank { _uiState.value.connectedWifiBssid }
@@ -741,6 +799,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 configured24Ssid = record.effectiveWifi24Ssid,
                 configured5Ssid = record.effectiveWifi5Ssid
             )
+            val localWifiIpv4 = wifiConnector.getBoundWifiIpv4Address()
             val cleanEffSsid = effectiveSsid.trim()
             val alreadyConfiguredOppositeBand = cleanEffSsid.isNotEmpty() &&
                 !OntWifiConnector.isDefaultOntSsid(cleanEffSsid, effectiveBssid) &&
@@ -748,15 +807,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     cleanEffSsid.equals(record.effectiveWifi5Ssid.trim(), ignoreCase = true))
             val step7StartMicros = SystemClock.elapsedRealtimeNanos() / 1000L
             var latestAdminPass = record.lastKnownAdminPass
-            var activeTargetSsid = effectiveSsid
-            var activeTargetPass = ""
-            var activeTargetBand = connectedBand
-            var hasSwitchedToSecondaryBand = false
             val driver = OntMobileDriver(
                 baseUrl = settings.baseUrl,
                 timeoutMs = settings.requestTimeoutMs,
                 socketFactory = socketFactory,
-                settlingDelayMs = 1500L,
+                settlingDelayMs = 400L,
                 probePauseMutex = probePauseMutex,
                 onUnbindNetwork = {
                     wifiConnector.unbindOntWifi(clearSelectedMetadata = false)
@@ -777,87 +832,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     dao.update(SubscriberEntity.fromRecord(updatedWithPass))
                 },
                 onRebindWifiNetwork = {
-                    if (hasSwitchedToSecondaryBand) {
-                        // After Step 6 handover: never fall back to the old factory SSID!
-                        val currentBound = wifiConnector.boundWifiNetwork
-                        if (
-                            currentBound != null &&
-                            wifiConnector.isSystemConnectedToTargetWifi(
-                                targetSsid = activeTargetSsid,
-                                targetBand = activeTargetBand,
-                                previousSsid = effectiveSsid
-                            )
-                        ) {
-                            currentBound.socketFactory
-                        } else {
-                            val reSwitched = try {
-                                wifiConnector.switchToConfiguredOntWifi(
-                                    ssid = activeTargetSsid,
-                                    passphrase = activeTargetPass,
-                                    targetBand = activeTargetBand,
-                                    previousSsid = effectiveSsid,
-                                    timeoutMs = 10000L,
-                                    securityMode = settings.wifiSecurityMode
-                                )
-                            } catch (_: Exception) {
-                                if (
-                                    wifiConnector.isSystemConnectedToTargetWifi(
-                                        targetSsid = activeTargetSsid,
-                                        targetBand = activeTargetBand,
-                                        previousSsid = effectiveSsid
-                                    )
-                                ) {
-                                    wifiConnector.bindCurrentWifiNetworkIfConnected()
-                                } else {
-                                    null
-                                }
-                            }
-                            reSwitched?.socketFactory
-                        }
-                    } else {
-                        var rebound = wifiConnector.bindCurrentWifiNetworkIfConnected()
-                        if (rebound == null) {
-                            for (waitAttempt in 1..6) {
-                                delay(250L)
-                                rebound = wifiConnector.bindCurrentWifiNetworkIfConnected()
-                                if (rebound != null) break
-                            }
-                        }
-                        if (rebound == null && effectiveSsid.isNotBlank()) {
-                            rebound = try {
-                                wifiConnector.connectToOntWifi(
-                                    ssid = effectiveSsid,
-                                    bssid = effectiveBssid.ifBlank { null },
-                                    timeoutMs = 6000L
-                                )
-                            } catch (_: Exception) {
-                                wifiConnector.bindCurrentWifiNetworkIfConnected()
-                            }
-                        }
-                        rebound?.socketFactory
-                    }
-                },
-                onSwitchToConfiguredWifi = { targetSsid, targetPass, targetBand ->
-                    hasSwitchedToSecondaryBand = true
-                    activeTargetSsid = targetSsid
-                    activeTargetPass = targetPass
-                    activeTargetBand = targetBand
-                    val switchedNet = wifiConnector.switchToConfiguredOntWifi(
-                        ssid = targetSsid,
-                        passphrase = targetPass,
-                        targetBand = targetBand,
-                        previousSsid = effectiveSsid,
-                        timeoutMs = 25000L,
-                        securityMode = settings.wifiSecurityMode
+                    rebindOntWifiSocketFactory(
+                        ssid = effectiveSsid,
+                        bssid = effectiveBssid,
+                        passiveWaitAttempts = 6
                     )
-                    _uiState.update {
-                        it.copy(
-                            connectedWifiSsid = targetSsid,
-                            connectedBand = targetBand,
-                            statusMessage = "Đã kết nối Wi-Fi phụ '$targetSsid' (${targetBand.label}). Đang đổi băng tần còn lại..."
-                        )
-                    }
-                    switchedNet.socketFactory
                 }
             )
 
@@ -867,7 +846,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     settings = settings,
                     connectedBand = connectedBand,
                     bssid = effectiveBssid,
-                    alreadyConfiguredOppositeBand = alreadyConfiguredOppositeBand
+                    alreadyConfiguredOppositeBand = alreadyConfiguredOppositeBand,
+                    localWifiIpv4 = localWifiIpv4,
+                    onBandResolved = { resolvedBand, ontBaseMac ->
+                        _uiState.update { state ->
+                            state.copy(
+                                connectedBand = resolvedBand,
+                                connectedWifiBssid = state.connectedWifiBssid.ifBlank { ontBaseMac.orEmpty() }
+                            )
+                        }
+                    }
                 ) { stepUpdate ->
                     _uiState.update { state ->
                         val exists = state.stepProgressList.any { it.stepNumber == stepUpdate.stepNumber }
@@ -882,10 +870,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
-                if (result.firmwareUpdated) {
-                    suppressAutoBindAfterFirmware = true
-                    wifiConnector.unbindOntWifi(clearSelectedMetadata = false)
-                }
+                suppressAutoBindAfterCompletion = true
+                wifiConnector.unbindOntWifi(clearSelectedMetadata = false)
 
                 val endTimeStr = timeFormat.format(Date())
                 val pendingWifiNote = if (result.manualWifiStepPending) {
@@ -963,10 +949,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun joinNewlyConfiguredWifi(ssid: String, pass: String) {
-        suppressAutoBindAfterFirmware = false
-        val secMode = _uiState.value.setupResult?.wifiSecurityMode
+        suppressAutoBindAfterCompletion = false
+        val res = _uiState.value.setupResult
+        val secMode = res?.wifiSecurityMode
             ?: _uiState.value.globalSettings.wifiSecurityMode
-        wifiConnector.promptJoinCustomerWifi(ssid, pass, secMode)
+        val (secondarySsid, secondaryPass) = if (res != null && !res.manualWifiStepPending) {
+            if (ssid.equals(res.newSsid24g, ignoreCase = true)) {
+                res.newSsid5g to res.newPass5g
+            } else {
+                res.newSsid24g to res.newPass24g
+            }
+        } else {
+            "" to ""
+        }
+        wifiConnector.promptJoinCustomerWifi(
+            ssid = ssid,
+            passphrase = pass,
+            securityMode = secMode,
+            secondarySsid = secondarySsid,
+            secondaryPassphrase = secondaryPass
+        )
     }
 
     /**
@@ -978,7 +980,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val currentResult = _uiState.value.setupResult ?: return
         if (_uiState.value.isRunningSetup || !currentResult.manualWifiStepPending) return
 
-        suppressAutoBindAfterFirmware = false
+        suppressAutoBindAfterCompletion = false
         val settings = _uiState.value.globalSettings
         val step8Title = "Bước 8/8: Đổi Wi-Fi ${currentResult.manualWifiBandLabel} kết nối chính (Sau khi ONT reboot)"
 
@@ -1003,18 +1005,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             wifiConnector.bindCurrentWifiNetworkIfConnected()
-            val socketFactory = wifiConnector.boundWifiNetwork?.socketFactory
-            val (_, detectedBssid) = wifiConnector.getConnectedSsidAndBssid()
+            val boundNet = wifiConnector.boundWifiNetwork
+            if (boundNet == null) {
+                val noWifiErr = "Chưa kết nối Wi-Fi của ONT. Hãy bấm '1. Bắt lại Wi-Fi ONT' trước khi đổi nốt Wi-Fi chính."
+                _uiState.update { state ->
+                    val updatedSteps = state.stepProgressList.map { st ->
+                        if (st.stepNumber == 8) {
+                            st.copy(title = step8Title, status = StepStatus.PENDING, detail = noWifiErr)
+                        } else {
+                            st
+                        }
+                    }
+                    state.copy(
+                        isRunningSetup = false,
+                        stepProgressList = updatedSteps,
+                        manualWifiError = noWifiErr
+                    )
+                }
+                notifyCompletionFeedback(success = false)
+                return@launch
+            }
+            val socketFactory = boundNet.socketFactory
+            val (detectedSsid, detectedBssid) = wifiConnector.getConnectedSsidAndBssid()
+            val effectiveSsid = detectedSsid.ifBlank { _uiState.value.connectedWifiSsid }
             val effectiveBssid = detectedBssid.ifBlank { _uiState.value.connectedWifiBssid }
 
             val driver = OntMobileDriver(
                 baseUrl = settings.baseUrl,
                 timeoutMs = settings.requestTimeoutMs,
                 socketFactory = socketFactory,
-                settlingDelayMs = 1500L,
+                settlingDelayMs = 400L,
                 probePauseMutex = probePauseMutex,
                 onUnbindNetwork = {
                     wifiConnector.unbindOntWifi(clearSelectedMetadata = false)
+                },
+                onRebindWifiNetwork = {
+                    rebindOntWifiSocketFactory(
+                        ssid = effectiveSsid,
+                        bssid = effectiveBssid,
+                        passiveWaitAttempts = 0
+                    )
                 }
             )
 
@@ -1029,6 +1059,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     targetSecMode = currentResult.wifiSecurityMode,
                     bssid = effectiveBssid
                 )
+                suppressAutoBindAfterCompletion = true
+                wifiConnector.unbindOntWifi(clearSelectedMetadata = false)
                 val endTimeStr = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
                 val updatedRecord = record.copy(
                     status = SubscriberStatus.SUCCESS,

@@ -54,6 +54,7 @@ import vn.vnpt.ontconfig.core.driver.MobileSetupResult
 import vn.vnpt.ontconfig.core.driver.StepProgress
 import vn.vnpt.ontconfig.core.driver.StepStatus
 import vn.vnpt.ontconfig.data.model.WifiSecurityMode
+import vn.vnpt.ontconfig.core.wifi.WifiBand
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -494,20 +495,26 @@ fun ExecutionProgressSheet(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
+                val prefer5gJoin = setupResult.resolvedConnectedBand == WifiBand.BAND_5_GHZ &&
+                    setupResult.newSsid5g.isNotBlank()
                 val joinSsid = if (setupResult.manualWifiStepPending && setupResult.configuredSecondarySsid.isNotBlank()) {
                     setupResult.configuredSecondarySsid
+                } else if (prefer5gJoin) {
+                    setupResult.newSsid5g
                 } else {
                     setupResult.newSsid24g
                 }
                 val joinPass = if (setupResult.manualWifiStepPending && setupResult.configuredSecondarySsid.isNotBlank()) {
                     setupResult.configuredSecondaryPass
+                } else if (prefer5gJoin) {
+                    setupResult.newPass5g
                 } else {
                     setupResult.newPass24g
                 }
                 val joinLabel = if (setupResult.manualWifiStepPending && setupResult.configuredSecondarySsid.isNotBlank()) {
                     "Kết nối vào Wi-Fi ${setupResult.configuredSecondaryBandLabel} ('$joinSsid') đã đổi"
                 } else {
-                    "Kết nối vào Wi-Fi mới để kiểm tra mạng"
+                    "Kết nối vào Wi-Fi mới ('$joinSsid') để kiểm tra mạng"
                 }
                 OutlinedButton(
                     onClick = {

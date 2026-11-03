@@ -81,6 +81,22 @@ final class MockLuciURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+private final class TestLockedBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: T
+    init(_ value: T) { self.storage = value }
+    func withValue(_ body: (inout T) -> Void) {
+        lock.lock()
+        body(&storage)
+        lock.unlock()
+    }
+    var value: T {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
 final class OntMobileDriverTests: XCTestCase {
 
     private let baseUrl = "https://192.168.1.1"
@@ -170,6 +186,7 @@ final class OntMobileDriverTests: XCTestCase {
         let driver = OntMobileDriver(
             baseUrl: baseUrl,
             settlingDelayMs: 10,
+            recoveryRetryDelayMs: 20,
             probePauseMutex: probeMutex,
             protocolClasses: [MockLuciURLProtocol.self]
         )
@@ -221,6 +238,7 @@ final class OntMobileDriverTests: XCTestCase {
         let driver = OntMobileDriver(
             baseUrl: baseUrl,
             settlingDelayMs: 10,
+            recoveryRetryDelayMs: 20,
             protocolClasses: [MockLuciURLProtocol.self]
         )
 
@@ -277,6 +295,7 @@ final class OntMobileDriverTests: XCTestCase {
         let driver = OntMobileDriver(
             baseUrl: baseUrl,
             settlingDelayMs: 10,
+            recoveryRetryDelayMs: 20,
             protocolClasses: [MockLuciURLProtocol.self]
         )
 
@@ -323,6 +342,7 @@ final class OntMobileDriverTests: XCTestCase {
         let driver = OntMobileDriver(
             baseUrl: baseUrl,
             settlingDelayMs: 10,
+            recoveryRetryDelayMs: 20,
             protocolClasses: [MockLuciURLProtocol.self]
         )
 
@@ -373,6 +393,7 @@ final class OntMobileDriverTests: XCTestCase {
         let driver = OntMobileDriver(
             baseUrl: baseUrl,
             settlingDelayMs: 10,
+            recoveryRetryDelayMs: 20,
             protocolClasses: [MockLuciURLProtocol.self]
         )
 
@@ -422,6 +443,7 @@ final class OntMobileDriverTests: XCTestCase {
         let driver = OntMobileDriver(
             baseUrl: baseUrl,
             settlingDelayMs: 5,
+            recoveryRetryDelayMs: 20,
             protocolClasses: [MockLuciURLProtocol.self]
         )
 
@@ -489,5 +511,271 @@ final class OntMobileDriverTests: XCTestCase {
             XCTAssertTrue(err.localizedDescription.contains("Mesh"))
         }
         XCTAssertEqual(step7Attempts, 1, "conflict_mesh must not retry 3 times in Step 7")
+    }
+
+    func testResolveConnectedBandFromOntParses2DWirelessInfoListAndOverridesMisdetectedBand() async throws {
+        let resolvedBands = TestLockedBox<[WifiBand]>([])
+
+        MockLuciURLProtocol.requestHandler = { req, _ in
+            let url = req.url ?? URL(string: "https://192.168.1.1/")!
+            let path = url.path.isEmpty ? "/" : url.path
+            switch path {
+            case "/":
+                return self.makeHTTPResponse(url: url, body: "<html>VNPT iGate GW040-NSv2</html>")
+            case "/cgi-bin/luci/login.cmd":
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK","firstlog":"0","sessionKey":"sess_ios_band","numberLogin":"0","timeoutLogin":"0"}
+                """)
+            case "/cgi-bin/luci/dhcpclient.json":
+                return self.makeHTTPResponse(url: url, body: """
+                {"dhcpInfoList":["192.168.1.2|DHCP||aa:bb:cc:dd:ee:ff|iPhone|WiFi|1|wl0"],"wlAssociatedDevice":["aa:bb:cc:dd:ee:ff|192.168.1.2|1|wl1.1|-48"]}
+                """)
+            case "/cgi-bin/luci/deviceinfo2.json":
+                return self.makeHTTPResponse(url: url, body: """
+                {"wirelessInfoList":[["wl0|1|100|10\\n|GW040-NSv2_2.4G_60BCD8\\n|c4:2c:7b:60:bc:d9\\n","GW040-NSv2_2.4G_60BCD8\\n|wl0"],["wl1|1|100|120\\n|GW040-NSv2_5G_60BCD8\\n|c4:2c:7b:60:bc:da\\n","GW040-NSv2_5G_60BCD8\\n|wl1"]],"baseMacAddress":"C4:2C:7B:60:BC:D8\\n"}
+                """)
+            case "/cgi-bin/luci/wancfg.json":
+                return self.makeHTTPResponse(url: url, body: """
+                {"wanCfg":[]}
+                """)
+            default:
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK","_wlrestart_":"0"}
+                """)
+            }
+        }
+
+        let driver = OntMobileDriver(
+            baseUrl: baseUrl,
+            settlingDelayMs: 10,
+            recoveryRetryDelayMs: 20,
+            protocolClasses: [MockLuciURLProtocol.self]
+        )
+
+        var record = sampleRecord
+        record.lastKnownAdminPass = "Passwd2@"
+        let result = try await driver.executeMobileSetup(
+            record: record,
+            settings: GlobalSettings(baseUrl: baseUrl),
+            connectedBand: .band24GHz,
+            localWifiIpv4: "192.168.1.2",
+            onBandResolved: { band in
+                resolvedBands.withValue { $0.append(band) }
+            }
+        )
+
+        XCTAssertTrue(result.success)
+        XCTAssertEqual(result.resolvedConnectedBand, .band5GHz)
+        XCTAssertEqual(resolvedBands.value, [.band5GHz])
+
+        let recorded = MockLuciURLProtocol.recordedRequests
+        let paths = recorded.map { $0.path }
+        guard let loginIdx = paths.firstIndex(of: "/cgi-bin/luci/login.cmd"),
+              let dhcpIdx = paths.firstIndex(of: "/cgi-bin/luci/dhcpclient.json"),
+              let devIdx = paths.firstIndex(of: "/cgi-bin/luci/deviceinfo2.json"),
+              let wanIdx = paths.firstIndex(of: "/cgi-bin/luci/wancfg.json") else {
+            XCTFail("Expected login.cmd -> dhcpclient.json -> deviceinfo2.json -> wancfg.json call order")
+            return
+        }
+        XCTAssertTrue(loginIdx < dhcpIdx && dhcpIdx < devIdx && devIdx < wanIdx)
+
+        let wirelessCalls = recorded.filter { $0.path == "/cgi-bin/luci/wirelesscfg.json" }
+        XCTAssertEqual(wirelessCalls.count, 2)
+        XCTAssertTrue(wirelessCalls[0].body.contains("wl_unit=0"), "Step 6 must configure 2.4GHz (wl_unit=0) first when iPhone is actually on 5GHz")
+        XCTAssertTrue(wirelessCalls[1].body.contains("wl_unit=1"), "Step 7 must configure 5GHz (wl_unit=1) LAST")
+    }
+
+    func testEnsureGatewayReadyBeforeStep7RecoversFromFailAuthenAndUserExistWithoutDoubleLogin() async throws {
+        var wlRestartCalls = 0
+        var reloginCalls = 0
+        var releasedSessions: [String] = []
+        var step7SessionKeys: [String] = []
+
+        MockLuciURLProtocol.requestHandler = { req, body in
+            let url = req.url ?? URL(string: "https://192.168.1.1/")!
+            let path = url.path.isEmpty ? "/" : url.path
+            switch path {
+            case "/":
+                return self.makeHTTPResponse(url: url, body: "<html>VNPT iGate GW040-NSv2</html>")
+            case "/cgi-bin/luci/login.cmd":
+                if wlRestartCalls == 0 {
+                    return self.makeHTTPResponse(url: url, body: """
+                    {"status":"OK","firstlog":"0","sessionKey":"sess_ios_init","numberLogin":"0","timeoutLogin":"0"}
+                    """)
+                } else {
+                    reloginCalls += 1
+                    if reloginCalls == 1 && !releasedSessions.contains("sess_ios_init") {
+                        return self.makeHTTPResponse(url: url, body: """
+                        {"status":"user exist"}
+                        """)
+                    }
+                    return self.makeHTTPResponse(url: url, body: """
+                    {"status":"OK","firstlog":"0","sessionKey":"sess_ios_new","numberLogin":"0","timeoutLogin":"0"}
+                    """)
+                }
+            case "/cgi-bin/luci/wancfg.json":
+                return self.makeHTTPResponse(url: url, body: """
+                {"wanCfg":[],"sessionKey":"0"}
+                """)
+            case "/cgi-bin/luci/wlrestart.json":
+                wlRestartCalls += 1
+                if wlRestartCalls == 2 {
+                    return self.makeHTTPResponse(url: url, body: """
+                    {"status":"fail authen"}
+                    """)
+                }
+                return self.makeHTTPResponse(url: url, body: """
+                {"_wlrestart_":"0"}
+                """)
+            case "/cgi-bin/luci/wirelesscfg.json":
+                if body.contains("wl_unit=0") {
+                    if let range = body.range(of: "sessionKey=") {
+                        let tail = body[range.upperBound...]
+                        let key = tail.split(separator: "&").first.map(String.init) ?? ""
+                        step7SessionKeys.append(key)
+                    }
+                }
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK"}
+                """)
+            case "/cgi-bin/luci/logout.cmd":
+                if let range = body.range(of: "sessionKey=") {
+                    let tail = body[range.upperBound...]
+                    let key = tail.split(separator: "&").first.map(String.init) ?? ""
+                    releasedSessions.append(key)
+                }
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK"}
+                """)
+            default:
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK"}
+                """)
+            }
+        }
+
+        let driver = OntMobileDriver(
+            baseUrl: baseUrl,
+            settlingDelayMs: 10,
+            recoveryRetryDelayMs: 20,
+            protocolClasses: [MockLuciURLProtocol.self]
+        )
+
+        var record = sampleRecord
+        record.lastKnownAdminPass = "Passwd2@"
+        let result = try await driver.executeMobileSetup(
+            record: record,
+            settings: GlobalSettings(baseUrl: baseUrl),
+            connectedBand: .band24GHz
+        )
+
+        XCTAssertTrue(result.success)
+        XCTAssertTrue(releasedSessions.contains("sess_ios_init"))
+        XCTAssertEqual(reloginCalls, 2)
+        XCTAssertEqual(step7SessionKeys, ["sess_ios_new"])
+
+        // Verify no double-login when numberLogin == 2 during ensureGatewayReadyBeforeStep7
+        var lockoutReloginCalls = 0
+        var gateTriggered = false
+        MockLuciURLProtocol.requestHandler = { req, _ in
+            let url = req.url ?? URL(string: "https://192.168.1.1/")!
+            let path = url.path.isEmpty ? "/" : url.path
+            switch path {
+            case "/":
+                return self.makeHTTPResponse(url: url, body: "<html>VNPT iGate GW040-NSv2</html>")
+            case "/cgi-bin/luci/login.cmd":
+                if !gateTriggered {
+                    return self.makeHTTPResponse(url: url, body: """
+                    {"status":"OK","firstlog":"0","sessionKey":"sess_lock","numberLogin":"0","timeoutLogin":"0"}
+                    """)
+                } else {
+                    lockoutReloginCalls += 1
+                    return self.makeHTTPResponse(url: url, body: """
+                    {"status":"FAIL","numberLogin":"2","timeoutLogin":"0"}
+                    """)
+                }
+            case "/cgi-bin/luci/wancfg.json":
+                return self.makeHTTPResponse(url: url, body: """
+                {"wanCfg":[]}
+                """)
+            case "/cgi-bin/luci/wlrestart.json":
+                if !gateTriggered {
+                    gateTriggered = true
+                    return self.makeHTTPResponse(url: url, body: """
+                    {"_wlrestart_":"0"}
+                    """)
+                } else {
+                    return self.makeHTTPResponse(url: url, body: """
+                    {"status":"fail authen"}
+                    """)
+                }
+            default:
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK"}
+                """)
+            }
+        }
+
+        do {
+            _ = try await driver.executeMobileSetup(
+                record: record,
+                settings: GlobalSettings(baseUrl: baseUrl),
+                connectedBand: .band24GHz
+            )
+            XCTFail("Expected OntAccountLockoutWarning on numberLogin == 2")
+        } catch is OntAccountLockoutWarning {
+            // Expected immediate propagation without double-login
+        }
+        XCTAssertEqual(lockoutReloginCalls, 1, "Must NEVER double-call login when numberLogin == 2")
+    }
+
+    func testStep7Attempt3ThrowsNetworkErrorInsteadOfFalseSuccessWhenOldGatewayRemainsOnline() async throws {
+        var unit0Attempts = 0
+
+        MockLuciURLProtocol.requestHandler = { req, body in
+            let url = req.url ?? URL(string: "https://192.168.1.1/")!
+            let path = url.path.isEmpty ? "/" : url.path
+            if path == "/cgi-bin/luci/wirelesscfg.json" && body.contains("wl_unit=0") {
+                unit0Attempts += 1
+                throw URLError(.networkConnectionLost)
+            }
+            switch path {
+            case "/":
+                return self.makeHTTPResponse(url: url, body: "<html>VNPT iGate GW040-NSv2</html>")
+            case "/cgi-bin/luci/login.cmd":
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK","firstlog":"0","sessionKey":"sess_ios_ok","numberLogin":"0","timeoutLogin":"0"}
+                """)
+            case "/cgi-bin/luci/wancfg.json":
+                return self.makeHTTPResponse(url: url, body: """
+                {"wanCfg":[]}
+                """)
+            default:
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK","_wlrestart_":"0"}
+                """)
+            }
+        }
+
+        let driver = OntMobileDriver(
+            baseUrl: baseUrl,
+            settlingDelayMs: 10,
+            recoveryRetryDelayMs: 20,
+            protocolClasses: [MockLuciURLProtocol.self]
+        )
+
+        var record = sampleRecord
+        record.lastKnownAdminPass = "Passwd2@"
+        do {
+            _ = try await driver.executeMobileSetup(
+                record: record,
+                settings: GlobalSettings(baseUrl: baseUrl),
+                connectedBand: .band24GHz
+            )
+            XCTFail("Expected OntNetworkError when Step 7 drops across all 3 attempts while old Wi-Fi remains online")
+        } catch is OntNetworkError {
+            // Expected
+        }
+        XCTAssertEqual(unit0Attempts, 3, "Must verify all 3 Step 7 attempts before failing")
     }
 }

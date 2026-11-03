@@ -363,8 +363,8 @@ public struct ConfigReviewView: View {
                 .pickerStyle(.segmented)
                 Text(
                     viewModel.connectedBand == .band24GHz
-                        ? "Bước 6 sẽ đổi 5GHz trước, Bước 7 cuối cùng mới đổi 2.4GHz để tránh rớt sóng giữa chừng."
-                        : "Bước 6 sẽ đổi 2.4GHz trước, Bước 7 cuối cùng mới đổi 5GHz để tránh rớt sóng giữa chừng."
+                        ? "Ứng dụng tự động đối chiếu băng tần thực tế với ONT sau Bước 2 và giữ nguyên kết nối suốt 7 bước (Bước 6 đổi 5GHz trước, Bước 7 lưu xong 2.4GHz mới ngắt kết nối)."
+                        : "Ứng dụng tự động đối chiếu băng tần thực tế với ONT sau Bước 2 và giữ nguyên kết nối suốt 7 bước (Bước 6 đổi 2.4GHz trước, Bước 7 lưu xong 5GHz mới ngắt kết nối)."
                 )
                 .font(.caption2)
                 .foregroundColor(.secondary)
