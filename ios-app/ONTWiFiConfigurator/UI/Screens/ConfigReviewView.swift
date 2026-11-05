@@ -1,13 +1,12 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 public struct ConfigReviewView: View {
     @ObservedObject var viewModel: MainViewModel
     let onShareExcelReport: () -> Void
 
     @State private var showPppoePass = false
-    @State private var showWifi24Pass = false
-    @State private var showWifi5Pass = false
-    @State private var showAdminPass = false
+    @State private var showFirmwareImporter = false
 
     public init(
         viewModel: MainViewModel,
@@ -34,6 +33,8 @@ public struct ConfigReviewView: View {
 
                     adminAndGatewaySection
 
+                    firmwareUpdateSection
+
                     validationSummarySection(preRunValidation)
 
                     connectedBandAndActionSection(preRunValidation: preRunValidation)
@@ -48,6 +49,20 @@ public struct ConfigReviewView: View {
         }
         .navigationTitle("Kiểm tra & Đổ cấu hình")
         .navigationBarTitleDisplayMode(.inline)
+        .fileImporter(
+            isPresented: $showFirmwareImporter,
+            allowedContentTypes: [.data, .item],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                if let selectedURL = urls.first {
+                    viewModel.importFirmwareFile(from: selectedURL)
+                }
+            case .failure(let error):
+                viewModel.statusMessage = "Lỗi chọn file Firmware: \(error.localizedDescription)"
+            }
+        }
     }
 
     private func subscriberInfoSection(_ record: SubscriberRecord) -> some View {
@@ -326,6 +341,69 @@ public struct ConfigReviewView: View {
         }
     }
 
+    private var firmwareUpdateSection: some View {
+        let settings = viewModel.globalSettings
+        let hasValidFirmware = !settings.firmwareFilePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            OntInputValidator.isValidFirmwareExtension(settings.firmwareFileName) &&
+            (OntInputValidator.minFirmwareSizeBytes...OntInputValidator.maxFirmwareSizeBytes).contains(settings.firmwareFileSize)
+
+        return Section("4. Cập nhật Firmware ONT (Bước cuối sau khi đổi xong cả 2 Wi-Fi)") {
+            Toggle(
+                "Tự động đổ Firmware mới ở bước cuối (Bước 9/9)",
+                isOn: Binding(
+                    get: { viewModel.globalSettings.enableFirmwareUpdate },
+                    set: { enabled in
+                        var s = viewModel.globalSettings
+                        s.enableFirmwareUpdate = enabled
+                        viewModel.updateGlobalSettings(s)
+                    }
+                )
+            )
+            .disabled(viewModel.isRunningSetup || viewModel.isImportingFirmware)
+
+            if hasValidFirmware {
+                let sizeMb = String(format: "%.2f", Double(settings.firmwareFileSize) / (1024.0 * 1024.0))
+                HStack(spacing: 8) {
+                    Image(systemName: "shippingbox.fill")
+                        .foregroundColor(.green)
+                    Text("File Firmware: \(settings.firmwareFileName) (\(sizeMb) MB)")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.green)
+                }
+            } else if settings.enableFirmwareUpdate {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    Text("Chưa chọn file Firmware (.signed / .bin / .img) hợp lệ (64 KB – 64 MB).")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+            }
+
+            Button {
+                showFirmwareImporter = true
+            } label: {
+                Label(
+                    hasValidFirmware
+                        ? "Đổi file Firmware (.signed / .bin / .img)"
+                        : "Chọn file Firmware (.signed / .bin / .img)",
+                    systemImage: "folder.badge.plus"
+                )
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+            }
+            .disabled(viewModel.isRunningSetup || viewModel.isImportingFirmware)
+
+            Text(
+                settings.enableFirmwareUpdate
+                    ? "Quy trình 2 lần kết nối (9 bước): Lần 1 đổi Wi-Fi phụ -> Chuyển sang Wi-Fi vừa đổi -> Lần 2 đổi nốt Wi-Fi còn lại rồi nạp Firmware ở Bước 9/9."
+                    : "Quy trình 2 lần kết nối (8 bước): Lần 1 đổi Wi-Fi phụ -> Chuyển sang Wi-Fi vừa đổi -> Lần 2 đổi nốt Wi-Fi còn lại."
+            )
+            .font(.caption2)
+            .foregroundColor(.secondary)
+        }
+    }
+
     @ViewBuilder
     private func validationSummarySection(_ validation: ValidationResult) -> some View {
         Section("Trạng thái kiểm tra hợp lệ trước khi RUN") {
@@ -352,7 +430,7 @@ public struct ConfigReviewView: View {
     }
 
     private func connectedBandAndActionSection(preRunValidation: ValidationResult) -> some View {
-        Section("Chọn băng tần đang bắt & Thực thi 7 bước") {
+        Section("Chọn băng tần đang bắt & Thực thi tự động") {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Băng tần Wi-Fi ONT iPhone đang kết nối:")
                     .font(.caption.weight(.semibold))
@@ -363,8 +441,8 @@ public struct ConfigReviewView: View {
                 .pickerStyle(.segmented)
                 Text(
                     viewModel.connectedBand == .band24GHz
-                        ? "Ứng dụng tự động đối chiếu băng tần thực tế với ONT sau Bước 2 và giữ nguyên kết nối suốt 7 bước (Bước 6 đổi 5GHz trước, Bước 7 lưu xong 2.4GHz mới ngắt kết nối)."
-                        : "Ứng dụng tự động đối chiếu băng tần thực tế với ONT sau Bước 2 và giữ nguyên kết nối suốt 7 bước (Bước 6 đổi 2.4GHz trước, Bước 7 lưu xong 5GHz mới ngắt kết nối)."
+                        ? "Lần 1 cấu hình Wi-Fi phụ 5GHz trước -> Bước 7 chuyển kết nối sang 5GHz mới -> Lần 2 cấu hình nốt 2.4GHz và nạp Firmware (nếu bật)."
+                        : "Lần 1 cấu hình Wi-Fi phụ 2.4GHz trước -> Bước 7 chuyển kết nối sang 2.4GHz mới -> Lần 2 cấu hình nốt 5GHz và nạp Firmware (nếu bật)."
                 )
                 .font(.caption2)
                 .foregroundColor(.secondary)
@@ -378,17 +456,20 @@ public struct ConfigReviewView: View {
                     .frame(maxWidth: .infinity)
             }
 
+            let runStepsLabel = viewModel.globalSettings.enableFirmwareUpdate
+                ? "RUN - ĐỔ CẤU HÌNH & FIRMWARE (9 BƯỚC)"
+                : "RUN - ĐỔ CẤU HÌNH 2 WI-FI (8 BƯỚC)"
             Button {
                 viewModel.runOntConfiguration()
             } label: {
-                Label("RUN - ĐỔ CẤU HÌNH ONT (7 BƯỚC)", systemImage: "bolt.horizontal.circle.fill")
+                Label(runStepsLabel, systemImage: "bolt.horizontal.circle.fill")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)
             }
             .buttonStyle(.borderedProminent)
             .tint(.green)
-            .disabled(!preRunValidation.isValid || viewModel.isRunningSetup)
+            .disabled(!preRunValidation.isValid || viewModel.isRunningSetup || viewModel.isImportingFirmware)
         }
     }
 }

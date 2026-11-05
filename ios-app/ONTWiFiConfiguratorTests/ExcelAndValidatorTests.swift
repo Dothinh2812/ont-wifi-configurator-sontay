@@ -287,4 +287,71 @@ final class ExcelAndValidatorTests: XCTestCase {
         XCTAssertFalse(openCheck.canPrependZero24g)
         XCTAssertFalse(openCheck.canPrependZero5g)
     }
+
+    func testGlobalSettingsFirmwareTimeoutCodableAndNvramCredentialMasking() throws {
+        let defaults = GlobalSettings()
+        XCTAssertFalse(defaults.enableFirmwareUpdate)
+        XCTAssertEqual(defaults.wifiHandoverTimeoutMs, 180_000)
+        XCTAssertEqual(defaults.gatewayPostHandoverTimeoutMs, 45_000)
+        XCTAssertEqual(defaults.postSecondWifiSettleTimeoutMs, 60_000)
+        XCTAssertEqual(defaults.firmwareUploadTimeoutMs, 180_000)
+
+        // Legacy JSON missing new firmware/handover fields must decode cleanly with defaults
+        let legacyJson = """
+        {"baseUrl":"https://192.168.1.1","wifiSecurityMode":"wpa2_psk"}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(GlobalSettings.self, from: legacyJson)
+        XCTAssertEqual(decoded.wifiSecurityMode, "wpa2_psk")
+        XCTAssertFalse(decoded.enableFirmwareUpdate)
+        XCTAssertEqual(decoded.wifiHandoverTimeoutMs, 180_000)
+        XCTAssertEqual(decoded.firmwareUploadTimeoutMs, 180_000)
+
+        // Firmware extension & filename sanitization
+        XCTAssertTrue(OntInputValidator.isValidFirmwareExtension("GW040-NSv2_V2.signed"))
+        XCTAssertTrue(OntInputValidator.isValidFirmwareExtension("fw.signed.bin"))
+        XCTAssertTrue(OntInputValidator.isValidFirmwareExtension("rootfs.IMG"))
+        XCTAssertFalse(OntInputValidator.isValidFirmwareExtension("customer.xlsx"))
+        XCTAssertEqual(
+            OntInputValidator.sanitizeFirmwareFilename("GW040 NSv2(2026)\".signed"),
+            "GW040_NSv2_2026_.signed"
+        )
+
+        // Pre-run firmware bounds check
+        let rec = SubscriberRecord(
+            rowIndex: 2,
+            soMay: "005501941",
+            accountPppoe: "manh9653",
+            passPppoe: "6l6s8z2a",
+            slid: "005501941",
+            ssid24g: "Manh Ngoc",
+            pass24g: "28121995",
+            ssid5g: "Manh Ngoc 5G",
+            pass5g: "28121995"
+        )
+        XCTAssertFalse(
+            OntInputValidator.validateBeforeRun(rec, settings: GlobalSettings(enableFirmwareUpdate: true)).isValid
+        )
+        XCTAssertTrue(
+            OntInputValidator.validateBeforeRun(
+                rec,
+                settings: GlobalSettings(
+                    enableFirmwareUpdate: true,
+                    firmwareFilePath: "/tmp/GW040.signed",
+                    firmwareFileName: "GW040.signed",
+                    firmwareFileSize: 20 * 1024 * 1024
+                )
+            ).isValid
+        )
+
+        // Sensitive NVRAM & JSON sessionKey masking
+        let rawWirelessJson = """
+        {"nvramWlSsid":"WIFI-5G","nvramWlWpaPsk":"Pass With Spaces 99","nvramWlRadiusKey":"rad123","nvramWlKey1":"wep1","sessionKey":"tok_xyz"}
+        """
+        let masked = OntInputValidator.maskSensitiveCredentials(rawWirelessJson)
+        XCTAssertFalse(masked.contains("Pass With Spaces 99"))
+        XCTAssertFalse(masked.contains("rad123"))
+        XCTAssertFalse(masked.contains("wep1"))
+        XCTAssertFalse(masked.contains("tok_xyz"))
+        XCTAssertTrue(masked.contains("WIFI-5G"))
+    }
 }

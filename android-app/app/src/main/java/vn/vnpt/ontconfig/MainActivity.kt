@@ -96,7 +96,7 @@ class MainActivity : ComponentActivity() {
                         viewModel.openWifiScanner()
                     }
 
-                    fun ensurePermissionsAndOpenWifiScanner() {
+                    fun missingWifiPermissions(): Array<String> {
                         val needed = mutableListOf(
                             Manifest.permission.ACCESS_FINE_LOCATION,
                             Manifest.permission.ACCESS_COARSE_LOCATION
@@ -104,13 +104,17 @@ class MainActivity : ComponentActivity() {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                             needed.add(Manifest.permission.NEARBY_WIFI_DEVICES)
                         }
-                        val missing = needed.filter {
-                            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-                        }
+                        return needed.filter {
+                            ContextCompat.checkSelfPermission(this@MainActivity, it) != PackageManager.PERMISSION_GRANTED
+                        }.toTypedArray()
+                    }
+
+                    fun ensurePermissionsAndOpenWifiScanner() {
+                        val missing = missingWifiPermissions()
                         if (missing.isEmpty()) {
                             viewModel.openWifiScanner()
                         } else {
-                            wifiPermissionLauncher.launch(missing.toTypedArray())
+                            wifiPermissionLauncher.launch(missing)
                         }
                     }
 
@@ -121,18 +125,9 @@ class MainActivity : ComponentActivity() {
                     }
 
                     LaunchedEffect(Unit) {
-                        val needed = mutableListOf(
-                            Manifest.permission.ACCESS_FINE_LOCATION,
-                            Manifest.permission.ACCESS_COARSE_LOCATION
-                        )
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            needed.add(Manifest.permission.NEARBY_WIFI_DEVICES)
-                        }
-                        val missing = needed.filter {
-                            ContextCompat.checkSelfPermission(this@MainActivity, it) != PackageManager.PERMISSION_GRANTED
-                        }
+                        val missing = missingWifiPermissions()
                         if (missing.isNotEmpty()) {
-                            startupPermissionLauncher.launch(missing.toTypedArray())
+                            startupPermissionLauncher.launch(missing)
                         }
                     }
 
@@ -152,6 +147,10 @@ class MainActivity : ComponentActivity() {
                             statusMessage = uiState.statusMessage,
                             isRunningSetup = uiState.isRunningSetup,
                             isImportingFirmware = uiState.isImportingFirmware,
+                            is5GHzSupported = uiState.is5GHzSupported,
+                            securityCapabilityWarning = viewModel.wifiConnector.validateHandoverSecurityCapability(
+                                uiState.globalSettings.wifiSecurityMode
+                            ),
                             onOpenWifiScanner = ::ensurePermissionsAndOpenWifiScanner,
                             onPickFirmwareFile = {
                                 firmwarePickerLauncher.launch(
@@ -212,16 +211,12 @@ class MainActivity : ComponentActivity() {
                             steps = uiState.stepProgressList,
                             setupResult = uiState.setupResult,
                             errorMessage = uiState.executionError,
-                            manualWifiError = uiState.manualWifiError,
                             onJoinNewWifi = viewModel::joinNewlyConfiguredWifi,
                             onExportAndShareReport = viewModel::exportAndShareExcelReport,
                             onOpenWifiScanner = {
-                                if (uiState.setupResult?.manualWifiStepPending != true) {
-                                    viewModel.dismissExecutionSheet()
-                                }
+                                viewModel.dismissExecutionSheet()
                                 ensurePermissionsAndOpenWifiScanner()
                             },
-                            onRunManualConnectedWifi = viewModel::runManualConnectedWifiStep,
                             onRetryRun = viewModel::runOntConfiguration,
                             onDismiss = viewModel::dismissExecutionSheet
                         )

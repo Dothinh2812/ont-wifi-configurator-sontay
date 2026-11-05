@@ -37,6 +37,7 @@ targets:
       - sdk: libsqlite3.tbd
       - sdk: AudioToolbox.framework
       - sdk: Network.framework
+      - sdk: NetworkExtension.framework
     scheme:
       testTargets:
         - ONTWiFiConfiguratorTests

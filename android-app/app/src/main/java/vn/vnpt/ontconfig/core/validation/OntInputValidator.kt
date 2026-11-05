@@ -35,9 +35,13 @@ object OntInputValidator {
         Regex("(newPass=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
         Regex("(oldPass=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
         Regex("(wl_wpa_psk=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
+        Regex("(nvramWlWpaPsk=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
+        Regex("(nvramWlRadiusKey=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
+        Regex("(nvramWlKey[1-4]?=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
         Regex("(password=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
         Regex("(sessionKey=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
-        Regex("""(["']?sessionKey["']?\s*[:=]\s*["']?)([^"'\s,&}\]\u007f]+)""", RegexOption.IGNORE_CASE),
+        Regex("""(["'](?:sessionKey|nvramWlWpaPsk|nvramWlRadiusKey|nvramWlKey[1-4]?)["']\s*:\s*["'])([^"'\u007f]+)""", RegexOption.IGNORE_CASE),
+        Regex("""(["']?(?:sessionKey|nvramWlWpaPsk|nvramWlRadiusKey|nvramWlKey[1-4]?)["']?\s*[:=]\s*["']?)([^"'\s,&}\]\u007f]+)""", RegexOption.IGNORE_CASE),
         Regex("(data=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE)
     )
 

@@ -157,17 +157,17 @@ Dành cho kỹ thuật viên đi lắp đặt/đổi ONT cơ động tại nhà 
      - `Account PPPoE (ma_tb)` và `Mật khẩu PPPoE` (nếu file Excel bị khuyết mật khẩu PPPoE, ô này sẽ viền đỏ để KTV nhập bổ sung).
      - `Tên Wi-Fi 2.4G` & `Pass Wi-Fi 2.4G` (tự động đồng bộ sang `Wi-Fi 5G`; nếu mật khẩu trong Excel chỉ có 7 chữ số do mất số `0` đầu ngày sinh, bấm nút 1 chạm **"Thêm số 0 ở đầu"** để đủ 8 ký tự chuẩn WPA2).
      - **Chuẩn bảo mật Wi-Fi (2.4G & 5G):** Mặc định `WPA2-PSK / WPA3-PSK (Mặc định)`; KTV có thể đổi sang `WPA2-PSK (Tương thích rộng / Mesh)`, `WPA-PSK / WPA2-PSK`, `WPA3-PSK`, `WPA-PSK` hoặc `Open (Không mật khẩu)`.
-     - **Mục 4 — Cập Nhật Firmware ONT (Tùy chọn trước bước đổi Wi-Fi chính):** Nếu cần nâng cấp Firmware cho ONT, bật công tắc **"Nâng cấp Firmware trước bước đổi Wi-Fi kết nối chính"** và bấm **"Chọn file Firmware (.signed / .bin / .img)"** để chọn file từ bộ nhớ máy (ứng dụng tự động lưu đệm cho các thuê bao tiếp theo).
-4. **Bấm `RUN - ĐỔ CẤU HÌNH ONT` (7 Bước Mặc Định hoặc 8 Bước Kèm Up Firmware):**
-   - **Khi TẮT Cập nhật Firmware (Chế độ 7/7 bước mặc định — Giữ nguyên 1 kết nối xuyên suốt):**
-     - **Bước 1/7..5/7:** Kiểm tra chữ ký ONT (`192.168.1.1`), đăng nhập & đổi mật khẩu Admin (`Passwd2@`), tự động đối chiếu băng tần Wi-Fi kết nối thực tế từ ONT (`dhcpclient.json` + `deviceinfo2.json`), lưu WAN PPPoE VLAN 11, nạp GPON Password (`SLID / Mã MEN`), lưu LAN IPv4.
-     - **Bước 6/7:** Cấu hình Wi-Fi băng tần phụ (`5GHz` hoặc `2.4GHz`) kèm `wlrestart.json` trong khi **vẫn giữ nguyên kết nối Wi-Fi hiện tại** (không ngắt mạng hay nhảy sóng giữa chừng).
-     - **Bước 7/7 (Bước cuối):** Kiểm tra đồng bộ kết nối & phiên làm việc (`ensureGatewayReadyBeforeStep7`), lưu hoàn tất tên & mật khẩu mới của **băng tần Wi-Fi đang kết nối** vào NVRAM ONT (`wirelesscfg.json` `action=Apply`), sau đó mới giải phóng phiên, ngắt kết nối Wi-Fi ONT và khôi phục ngay mạng 4G/5G.
-   - **Khi BẬT Cập nhật Firmware (Chế độ 8/8 bước — Nạp Firmware trước bước đổi Wi-Fi kết nối chính):**
-     - **Bước 1/8..6/8:** Đổ xong toàn bộ WAN PPPoE, SLID, LAN IPv4 và **Wi-Fi băng tần phụ**; giữ nguyên sóng Wi-Fi đang kết nối (không chuyển sóng ở cuối Bước 6) và kiểm tra sẵn sàng phiên làm việc.
-     - **Bước 7/8 (Trước bước cuối):** Kiểm tra phiên nâng cấp (`updatefwsessioncheck.json`), kiểm tra RAM trống (`imagesize.json`) và tải lên file Firmware (`uploadsoftware.conf`). Ngay khi ONT trả về `"status": "valid"`, ONT tự ghi flash & khởi động lại (~2 phút 15 giây), ứng dụng tự động ngắt gắn kết Wi-Fi ONT để khôi phục 4G/5G ngay lập tức.
-     - **Bước 8/8 (Bước cuối — Đổi Wi-Fi kết nối chính thủ công sau khi ONT reboot):** Bảng tiến trình hiển thị đầy đủ thông số Wi-Fi chính cần đổi và cung cấp 2 nút thao tác nhanh sau khi ONT khởi động lại xong (~2 phút): bấm **"1. Bắt lại Wi-Fi ONT"** rồi bấm **"2. Đổi nốt Wi-Fi chính"** để hoàn tất băng tần còn lại mà không chạy lại từ đầu.
-   - Ngay khi hoàn tất, máy phát âm báo + rung, tự động khôi phục mạng 4G/5G để KTV bấm **"Xuất & Chia Sẻ Báo Cáo (.xlsx) Qua Zalo"** (giữ nguyên đủ 30 cột gốc + cập nhật các trường đã sửa + 3 cột kết quả) hoặc bấm **"Kết nối vào Wi-Fi mới để kiểm tra mạng"**.
+     - **Mục 4 — Cập Nhật Firmware ONT (Bước cuối sau khi đổi xong cả 2 Wi-Fi):** Nếu cần nâng cấp Firmware cho ONT, bật công tắc **"Tự động đổ Firmware mới ở bước cuối (Bước 9/9)"** và bấm **"Chọn file Firmware (.signed / .bin / .img)"** để chọn file từ bộ nhớ máy (ứng dụng tự động lưu đệm cho các thuê bao tiếp theo).
+4. **Bấm `RUN - ĐỔ CẤU HÌNH ONT` (Quy Trình 2 Lần Kết Nối Tự Động — 8 Bước hoặc 9 Bước Kèm Firmware):**
+   - **Lần kết nối 1 (Bước 1–6 — Trên sóng Wi-Fi ban đầu):**
+     - Kiểm tra chữ ký & ghim chứng chỉ TLS của ONT (`192.168.1.1`), đăng nhập & đổi mật khẩu Admin (`Passwd2@`), tự động đối chiếu băng tần Wi-Fi kết nối thực tế từ ONT (`dhcpclient.json` + `deviceinfo2.json`), lưu WAN PPPoE VLAN 11, nạp GPON Password (`SLID / Mã MEN`), lưu LAN IPv4.
+     - **Bước 6:** Chỉ đổi tên & cấu hình **Wi-Fi băng tần phụ** (`5GHz` hoặc `2.4GHz`, chờ `wlrestart.json` tối đa `30s`) rồi tự động đăng xuất `logout.cmd` đóng phiên Lần 1 *(với máy Android chỉ có phần cứng 2.4GHz, ứng dụng tự động cấu hình cả 5GHz & 2.4GHz rồi kết nối lại vào sóng 2.4GHz mới)*.
+   - **Chuyển kết nối tự động sang Wi-Fi mới (Bước 7 — Ngân sách chờ 120 giây):**
+     - Ứng dụng đợi ONT khởi động lại sóng và phát tên Wi-Fi mới (kể cả kênh 5GHz DFS mất 15–60s), tự động gọi hộp thoại ghép nối sang Wi-Fi mới (KTV bấm **"Kết nối / Connect"** khi hộp thoại hệ thống hiện lên), đăng nhập lại vào ONT **chỉ bằng mật khẩu Admin mới** và xác thực đã đứng đúng trên băng tần phụ của ONT.
+   - **Lần kết nối 2 & Đổ Firmware ở bước cuối (Bước 8–9):**
+     - **Bước 8:** Đổi tên & lưu NVRAM hoàn tất cho **Wi-Fi băng tần còn lại** (cả 2 băng tần `2.4GHz` & `5GHz` đã hoàn tất 100%). Nếu **TẮT** Cập nhật Firmware, quy trình kết thúc trọn vẹn ở **Bước 8/8** và khôi phục ngay 4G/5G.
+     - **Bước 9/9 (Khi BẬT Cập nhật Firmware — Bước cuối cùng):** Đồng bộ kết nối (`ensureGatewayReadyOnSecondaryBand`), kiểm tra phiên nâng cấp (`updatefwsessioncheck.json`), kiểm tra RAM trống (`imagesize.json`) và tải lên file Firmware (`uploadsoftware.conf`, timeout `180s`). Ngay khi ONT trả về `"status": "valid"`, ứng dụng xóa phiên, tự động ngắt kết nối Wi-Fi ONT để khôi phục 4G/5G ngay lập tức và hiển thị đồng hồ đếm ngược tham khảo `150s` trong lúc ONT tự ghi flash & khởi động lại (~2 phút 20 giây) — **hoàn toàn không cần đổi lại Wi-Fi sau khi ONT reboot!**
+   - Ngay khi hoàn tất, máy phát âm báo + rung để KTV bấm **"Xuất & Chia Sẻ Báo Cáo (.xlsx) Qua Zalo"** (giữ nguyên đủ 30 cột gốc + cập nhật các trường đã sửa + 3 cột kết quả) hoặc **"Kết nối vào Wi-Fi mới để kiểm tra mạng"**.
 
 
 ---
@@ -194,10 +194,11 @@ Dành cho kỹ thuật viên sử dụng iPhone (iOS 16.0 trở lên):
    - Quay lại ứng dụng: thanh trạng thái sẽ nhận diện IP `192.168.1.x` trên card Wi-Fi `en0` và báo **`ONLINE - Sẵn sàng đổ cấu hình (192.168.1.1)`** (không cần tắt 4G/5G; nếu đang bật VPN 1.1.1.1/WireGuard, ứng dụng sẽ nhắc tắt VPN).
 3. **Kiểm Tra Tham Số & Băng Tần Đang Bắt (`2.4GHz` / `5GHz`):**
    - Kiểm tra `SLID / Mã MEN` ($\le 10$ ký tự, hợp nhất từ `Mã MEN` / `SO_MAY`), nhập bổ sung `Mật khẩu PPPoE` nếu file Excel bị khuyết, hoặc bấm nút 1 chạm **"Thêm số 0 ở đầu"** nếu mật khẩu Wi-Fi chỉ có 7 số.
-   - Bộ chọn **`Đang bắt 2.4GHz` / `Đang bắt 5GHz`** phía trên nút **RUN** sẽ được ứng dụng **tự động đối chiếu và đồng bộ chính xác với ONT ngay sau Bước 2** (`dhcpclient.json` + `deviceinfo2.json` qua địa chỉ IP `en0`), đảm bảo không bao giờ đổi nhầm băng tần đang kết nối ở Bước 6 ngay cả khi quên gạt nút chọn tay.
-4. **Bấm `RUN - ĐỔ CẤU HÌNH ONT (7 BƯỚC)` & Chia Sẻ Báo Cáo Qua Zalo:**
-   - Ứng dụng giữ sáng màn hình, xin quyền chạy nền ngắn hạn (`beginBackgroundTask`), giữ nguyên kết nối Wi-Fi hiện tại xuyên suốt từ Bước 1 đến Bước 7, lưu băng tần phụ ở Bước 6 và **đảm bảo lưu xong tên/mật khẩu băng tần đang kết nối vào NVRAM ở Bước 7 cuối cùng trước khi ngắt kết nối**.
-   - Sau khi hoàn tất 7/7 bước (có âm báo + rung Haptic), bấm **"Sao chép mật khẩu Wi-Fi mới"** (tự động xóa khỏi bộ nhớ tạm sau 120s bảo mật) hoặc bấm **"Xuất & Chia Sẻ Báo Cáo Excel (.xlsx)"** để gửi kết quả qua Zalo.
+   - Bộ chọn **`Đang bắt 2.4GHz` / `Đang bắt 5GHz`** sẽ được ứng dụng **tự động đối chiếu với ONT ngay sau Bước 2** (`dhcpclient.json` + `deviceinfo2.json` qua địa chỉ IP `en0`). Nếu cần nâng cấp Firmware, bật **"Tự động đổ Firmware mới ở bước cuối (Bước 9/9)"** và chọn file `.signed` / `.bin` / `.img` từ ứng dụng **Tệp (Files)**.
+4. **Bấm `RUN` — Thực Thi Quy Trình 2 Lần Kết Nối Tự Động (quy trình 2 lần kết nối — 8 Bước hoặc 9 Bước Kèm Firmware):**
+   - **Bước 1–6 (Lần kết nối 1):** Ứng dụng đổi mật khẩu Admin ONT, nạp WAN PPPoE, GPON SLID, LAN IPv4, **đổi tên & mật khẩu Wi-Fi phụ** và đóng phiên Lần 1.
+   - **Bước 7 (Chuyển sang Wi-Fi phụ mới — Tối đa 180s):** Ứng dụng tự động chép sẵn mật khẩu Wi-Fi mới vào bộ nhớ tạm bảo mật (`.localOnly`, tự xóa sau `120s`) và hiện nút **"Mở Cài Đặt Wi-Fi iOS"**. KTV bấm sang Cài đặt Wi-Fi chọn tên Wi-Fi phụ mới vừa đổi rồi quay lại ứng dụng — ứng dụng tự động nhận diện, đăng nhập lại bằng mật khẩu Admin mới và chạy tiếp!
+   - **Bước 8 & Bước 9/9 (Lần kết nối 2):** Tự động đổi nốt Wi-Fi còn lại (Bước 8) và tải lên Firmware mới ở **Bước 9/9** (nếu bật). Khi hoàn tất, bấm **"Xuất & Chia Sẻ Báo Cáo Excel (.xlsx)"** để gửi kết quả qua Zalo ngay trong lúc ONT tự ghi flash & khởi động lại (~2 phút 20 giây).
 ---
 
 ## 7. Thông Tin Đơn Vị Phát Triển & Hỗ Trợ Kỹ Thuật

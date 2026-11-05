@@ -4,6 +4,9 @@ import Network
 #if canImport(UIKit)
 import UIKit
 #endif
+#if canImport(NetworkExtension)
+import NetworkExtension
+#endif
 
 public enum WifiBand: String, Codable, CaseIterable, Sendable {
     case band24GHz = "BAND_2_4_GHZ"
@@ -141,6 +144,49 @@ public final class IosWifiMonitor: @unchecked Sendable {
             return .band5GHz
         }
         return .band24GHz
+    }
+
+    /// Best-effort programmatic Wi-Fi association via `NEHotspotConfigurationManager` when signed with
+    /// TrollStore / Developer Certificate; returns `false` cleanly (<10ms) on unsigned Sideloadly/AltStore `.ipa`.
+    public func tryJoinWifiIfEntitled(
+        ssid: String,
+        passphrase: String,
+        securityMode: String
+    ) async -> Bool {
+        let cleanSsid = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanSsid.isEmpty else { return false }
+        #if canImport(NetworkExtension)
+        let isOpen = securityMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == WifiSecurityMode.open.rawValue
+        let config: NEHotspotConfiguration
+        if isOpen {
+            config = NEHotspotConfiguration(ssid: cleanSsid)
+            config.joinOnce = true
+        } else {
+            guard passphrase.count >= 8 else { return false }
+            config = NEHotspotConfiguration(ssid: cleanSsid, passphrase: passphrase, isWEP: false)
+            config.joinOnce = false
+        }
+        let applied: Bool = await withCheckedContinuation { continuation in
+            NEHotspotConfigurationManager.shared.apply(config) { error in
+                continuation.resume(returning: error == nil)
+            }
+        }
+        guard applied else { return false }
+        let snapshot = await awaitWifiIpv4Ready(maxWaitMs: 5000)
+        return snapshot.isOnOntSubnet
+        #else
+        return false
+        #endif
+    }
+
+    /// Clean up temporary Open Wi-Fi configuration so the iPhone does not retain an open profile.
+    public func removeTemporaryOpenWifiIfNeeded(ssid: String, securityMode: String = WifiSecurityMode.open.rawValue) {
+        let cleanSsid = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isOpen = securityMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == WifiSecurityMode.open.rawValue
+        guard !cleanSsid.isEmpty, isOpen else { return }
+        #if canImport(NetworkExtension)
+        NEHotspotConfigurationManager.shared.removeConfiguration(forSSID: cleanSsid)
+        #endif
     }
 
     @MainActor

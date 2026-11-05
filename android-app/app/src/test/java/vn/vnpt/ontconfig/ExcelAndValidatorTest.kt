@@ -366,24 +366,23 @@ class ExcelAndValidatorTest {
     }
 
     @Test
-    fun `exportResults writes manual Wi-Fi pending note instead of OK when firmware update leaves connected Wi-Fi for manual step`() {
+    fun `exportResults preserves custom note in Ghi chu chi tiet when non-blank on SUCCESS record`() {
         val bytes = loadSampleExcelBytes()
         val records = ExcelManager.parseExcel(ByteArrayInputStream(bytes)).toMutableList()
-        val pendingNote = "Đã nạp FW (GW040.signed), chờ đổi Wi-Fi 2.4GHz ('Manh Ngoc') thủ công sau khi ONT khởi động lại"
-
+        val customNote = "Hoàn tất 9/9 bước: Đã đổi cả 2 Wi-Fi & nạp FW (GW040.signed)"
         records[0] = records[0].copy(
             passPppoe = "6l6s8z2a",
             status = SubscriberStatus.SUCCESS,
             startTime = "11:00:00",
             endTime = "11:01:30",
-            errorMessage = pendingNote
+            errorMessage = customNote
         )
 
         val outStream = ByteArrayOutputStream()
         ExcelManager.exportResults(ByteArrayInputStream(bytes), outStream, records)
         val reParsed = ExcelManager.parseExcel(ByteArrayInputStream(outStream.toByteArray()))
         assertEquals("SUCCESS", reParsed[0].rawRowData["Trạng thái cấu hình"])
-        assertEquals(pendingNote, reParsed[0].rawRowData["Ghi chú chi tiết"])
+        assertEquals(customNote, reParsed[0].rawRowData["Ghi chú chi tiết"])
     }
 
     @Test
@@ -421,5 +420,114 @@ class ExcelAndValidatorTest {
         // Rejects control character 0x7F in validateOnImport and sanitizeInputMetacharacters
         val delCharRecord = shortPassRecord.copy(ssid24g = "VNPT\u007fInject", pass24g = "12345678", pass5g = "12345678")
         assertFalse(OntInputValidator.validateOnImport(delCharRecord).isValid)
+    }
+
+    @Test
+    fun `GlobalSettings exposes long handover timeouts and maskSensitiveCredentials masks wirelesscfg NVRAM keys`() {
+        val defaults = GlobalSettings()
+        assertEquals(120_000L, defaults.wifiHandoverTimeoutMs)
+        assertEquals(45_000L, defaults.gatewayPostHandoverTimeoutMs)
+        assertEquals(60_000L, defaults.postSecondWifiSettleTimeoutMs)
+        assertEquals(180_000L, defaults.firmwareUploadTimeoutMs)
+
+        val rawWirelessCfgJson = """{"nvramWlSsid":"WIFI-5G","nvramWlWpaPsk":"MySecretWifiPass 2026","nvramWlRadiusKey":"radSecret99","nvramWlKey1":"wepKeyOne","nvramWlKey":"mainWepKey","sessionKey":"tok_abc123"}"""
+        val maskedJson = OntInputValidator.maskSensitiveCredentials(rawWirelessCfgJson)
+        assertFalse("nvramWlWpaPsk must be masked: $maskedJson", maskedJson.contains("MySecretWifiPass"))
+        assertFalse("nvramWlRadiusKey must be masked: $maskedJson", maskedJson.contains("radSecret99"))
+        assertFalse("nvramWlKey1 must be masked: $maskedJson", maskedJson.contains("wepKeyOne"))
+        assertFalse("nvramWlKey must be masked: $maskedJson", maskedJson.contains("mainWepKey"))
+        assertFalse("sessionKey must be masked: $maskedJson", maskedJson.contains("tok_abc123"))
+        assertTrue("Non-sensitive SSID must remain readable: $maskedJson", maskedJson.contains("WIFI-5G"))
+
+        val rawForm = "nvramWlWpaPsk=FormPass88&nvramWlRadiusKey=FormRad77&nvramWlKey2=FormWep22"
+        val maskedForm = OntInputValidator.maskSensitiveCredentials(rawForm)
+        assertFalse(maskedForm.contains("FormPass88"))
+        assertFalse(maskedForm.contains("FormRad77"))
+        assertFalse(maskedForm.contains("FormWep22"))
+    }
+
+    @Test
+    fun `OntWifiConnector validates OS security capability before Step 1 and enforces 4 scans per 120s sliding quota`() {
+        // API 29+ rejects pure WPA-PSK (TKIP) for WifiNetworkSpecifier handover
+        val wpaOnQ = vn.vnpt.ontconfig.core.wifi.OntWifiConnector.validateHandoverSecurityCapability(
+            secMode = "wpa_psk",
+            sdkInt = 29,
+            isWpa3SaeSupported = true
+        )
+        assertNotNull("Pure WPA-PSK must be rejected on Android 10+ before Step 1", wpaOnQ)
+
+        // API 28 allows pure WPA-PSK via legacy WifiConfiguration
+        val wpaOnP = vn.vnpt.ontconfig.core.wifi.OntWifiConnector.validateHandoverSecurityCapability(
+            secMode = "wpa_psk",
+            sdkInt = 28,
+            isWpa3SaeSupported = false
+        )
+        org.junit.Assert.assertNull("Pure WPA-PSK is supported on API 26-28", wpaOnP)
+
+        // WPA3-PSK rejected when SAE unsupported or API < 29
+        assertNotNull(
+            vn.vnpt.ontconfig.core.wifi.OntWifiConnector.validateHandoverSecurityCapability(
+                secMode = "wpa3_psk",
+                sdkInt = 31,
+                isWpa3SaeSupported = false
+            )
+        )
+        assertNotNull(
+            vn.vnpt.ontconfig.core.wifi.OntWifiConnector.validateHandoverSecurityCapability(
+                secMode = "wpa3_psk",
+                sdkInt = 28,
+                isWpa3SaeSupported = true
+            )
+        )
+        org.junit.Assert.assertNull(
+            vn.vnpt.ontconfig.core.wifi.OntWifiConnector.validateHandoverSecurityCapability(
+                secMode = "wpa3_psk",
+                sdkInt = 31,
+                isWpa3SaeSupported = true
+            )
+        )
+        org.junit.Assert.assertNull(
+            vn.vnpt.ontconfig.core.wifi.OntWifiConnector.validateHandoverSecurityCapability(
+                secMode = "wpa2_wpa3_psk",
+                sdkInt = 31,
+                isWpa3SaeSupported = false
+            )
+        )
+
+        // Sliding 120_000 ms window enforces max 4 startScan() calls
+        val deque = ArrayDeque<Long>()
+        assertTrue(vn.vnpt.ontconfig.core.wifi.OntWifiConnector.tryConsumeScanQuotaInWindow(deque, 1_000L))
+        assertTrue(vn.vnpt.ontconfig.core.wifi.OntWifiConnector.tryConsumeScanQuotaInWindow(deque, 5_000L))
+        assertTrue(vn.vnpt.ontconfig.core.wifi.OntWifiConnector.tryConsumeScanQuotaInWindow(deque, 10_000L))
+        assertTrue(vn.vnpt.ontconfig.core.wifi.OntWifiConnector.tryConsumeScanQuotaInWindow(deque, 15_000L))
+        assertFalse("5th scan within 120s must be throttled", vn.vnpt.ontconfig.core.wifi.OntWifiConnector.tryConsumeScanQuotaInWindow(deque, 50_000L))
+        assertTrue("After 120s from 1st scan, 1 slot opens", vn.vnpt.ontconfig.core.wifi.OntWifiConnector.tryConsumeScanQuotaInWindow(deque, 121_500L))
+    }
+
+    @Test
+    fun `MainUiState builds 8-step Dual-Wi-Fi and 9-step Final-Firmware lists and cleanupStaleExportFiles removes cached xlsx PII`() {
+        val eightSteps = vn.vnpt.ontconfig.ui.MainUiState.defaultEightStepsDualWifi()
+        assertEquals(8, eightSteps.size)
+        assertTrue(eightSteps.all { it.totalSteps == 8 })
+        assertTrue(eightSteps[6].title.contains("Bước 7/8"))
+        assertTrue(eightSteps[7].title.contains("Bước 8/8"))
+
+        val nineSteps = vn.vnpt.ontconfig.ui.MainUiState.defaultNineStepsWithFirmware()
+        assertEquals(9, nineSteps.size)
+        assertTrue(nineSteps.all { it.totalSteps == 9 })
+        assertTrue(nineSteps[8].title.contains("Bước 9/9"))
+        assertTrue(nineSteps[8].title.contains("Firmware"))
+
+        val tempExportsDir = java.nio.file.Files.createTempDirectory("ont_exports_test").toFile()
+        try {
+            val stale1 = File(tempExportsDir, "BaoCao_CauHinh_ONT_20261104_100000.xlsx").apply { writeText("pii1") }
+            val stale2 = File(tempExportsDir, "BaoCao_CauHinh_ONT_20261105_090000.xlsx").apply { writeText("pii2") }
+            assertTrue(stale1.exists() && stale2.exists())
+            vn.vnpt.ontconfig.ui.MainViewModel.cleanupStaleExportFiles(tempExportsDir)
+            assertFalse(stale1.exists())
+            assertFalse(stale2.exists())
+        } finally {
+            tempExportsDir.deleteRecursively()
+        }
     }
 }

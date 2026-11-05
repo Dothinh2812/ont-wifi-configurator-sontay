@@ -117,7 +117,7 @@ public struct WifiGuideSheet: View {
                 Text("Đang bắt 5GHz").tag(WifiBand.band5GHz)
             }
             .pickerStyle(.segmented)
-            Text("Ứng dụng sẽ cấu hình băng tần phụ ở Bước 6 và đổi tên/mật khẩu băng tần đang bắt ở Bước 7 cuối cùng.")
+            Text("Quy trình 2 lần kết nối tự động: Lần 1 cấu hình Wi-Fi phụ trước -> Bước 7 chuyển kết nối sang Wi-Fi phụ vừa đổi -> Lần 2 đổi nốt Wi-Fi còn lại và nạp Firmware mới ở bước cuối.")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
@@ -133,7 +133,7 @@ public struct WifiGuideSheet: View {
                 .font(.caption)
             Text("2. Chọn sóng mặc định: GW040-NSv2_2.4G_XXXXXX (hoặc 5G) và nhập mật khẩu in ở mặt sau ONT.")
                 .font(.caption)
-            Text("3. Quay lại ứng dụng — trạng thái sẽ tự động chuyển sang ONLINE màu xanh lá.")
+            Text("3. Quay lại ứng dụng bấm RUN — ở Bước 7 khi có thông báo, chọn sang tên Wi-Fi phụ mới để ứng dụng tự hoàn tất nốt Wi-Fi còn lại & Firmware.")
                 .font(.caption)
         }
         .padding()

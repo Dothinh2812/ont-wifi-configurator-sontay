@@ -91,6 +91,9 @@ data class GlobalSettings(
     val firmwareFilePath: String = "",
     val firmwareFileName: String = "",
     val firmwareFileSize: Long = 0L,
-    val firmwareUploadTimeoutMs: Long = 120_000L,
-    val wifiSecurityMode: String = WifiSecurityMode.WPA2_WPA3_PSK.formValue
+    val firmwareUploadTimeoutMs: Long = 180_000L,
+    val wifiSecurityMode: String = WifiSecurityMode.WPA2_WPA3_PSK.formValue,
+    val wifiHandoverTimeoutMs: Long = 120_000L,
+    val gatewayPostHandoverTimeoutMs: Long = 45_000L,
+    val postSecondWifiSettleTimeoutMs: Long = 60_000L
 )

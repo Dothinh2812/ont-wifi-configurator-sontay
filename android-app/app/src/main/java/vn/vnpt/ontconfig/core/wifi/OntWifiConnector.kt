@@ -1,14 +1,18 @@
 package vn.vnpt.ontconfig.core.wifi
 
 import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.location.LocationManager
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.wifi.ScanResult
+import android.net.wifi.WifiConfiguration
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.net.wifi.WifiNetworkSpecifier
@@ -16,6 +20,9 @@ import android.net.wifi.WifiNetworkSuggestion
 import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
@@ -72,6 +79,9 @@ class OntWifiConnector(private val context: Context) {
 
     @Volatile
     private var lastSelectedSecurityMode: String = WifiSecurityMode.WPA2_WPA3_PSK.formValue
+    @Volatile
+    private var legacyAddedNetworkId: Int = -1
+
     /**
      * Register a passive system Wi-Fi listener so the moment Android associates with an ONT Wi-Fi
      * or finishes DHCP (192.168.1.x), the process binds to it and triggers an immediate gateway probe.
@@ -131,11 +141,7 @@ class OntWifiConnector(private val context: Context) {
     @SuppressLint("MissingPermission")
     fun scanOntNetworks(triggerStartScan: Boolean = false): List<WifiScanCandidate> {
         if (triggerStartScan) {
-            try {
-                @Suppress("DEPRECATION")
-                wifiManager.startScan()
-            } catch (_: Exception) {
-            }
+            tryRequestStartScan()
         }
         val rawResults: List<ScanResult> = try {
             wifiManager.scanResults ?: emptyList()
@@ -164,13 +170,51 @@ class OntWifiConnector(private val context: Context) {
         return filterAndRankOntNetworks(candidates)
     }
 
+    private fun tryRequestStartScan(): Boolean {
+        if (!tryConsumeProcessScanQuota()) return false
+        return try {
+            @Suppress("DEPRECATION")
+            wifiManager.startScan()
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun is5GHzBandSupported(): Boolean = try {
+        wifiManager.is5GHzBandSupported
+    } catch (_: Exception) {
+        true
+    }
+
+    fun isWpa3SaeSupported(): Boolean = isWpa3SaeSupportedSafe()
+
+    fun isLocationServiceEnabled(): Boolean = try {
+        val lm = context.applicationContext.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        if (lm == null) {
+            false
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            lm.isLocationEnabled
+        } else {
+            lm.isProviderEnabled(LocationManager.GPS_PROVIDER) ||
+                lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        }
+    } catch (_: Exception) {
+        false
+    }
+
+    fun validateHandoverSecurityCapability(secMode: String): String? =
+        validateHandoverSecurityCapability(
+            secMode = secMode,
+            sdkInt = Build.VERSION.SDK_INT,
+            isWpa3SaeSupported = isWpa3SaeSupported()
+        )
+
     @SuppressLint("NewApi")
     private fun isWpa3SaeSupportedSafe(): Boolean = try {
         wifiManager.isWpa3SaeSupported
     } catch (_: Exception) {
         true
     }
-
     @SuppressLint("NewApi")
     private fun applySecurityToSpecifier(
         specBuilder: WifiNetworkSpecifier.Builder,
@@ -223,7 +267,9 @@ class OntWifiConnector(private val context: Context) {
         passphrase: String? = null,
         timeoutMs: Long = 15000L,
         securityMode: String = WifiSecurityMode.WPA2_WPA3_PSK.formValue,
-        frequencyMhz: Int = -1
+        frequencyMhz: Int = -1,
+        allowSubnetFallbackWhenSsidUnknown: Boolean = true,
+        excludedNetwork: Network? = null
     ): Network = withTimeout(timeoutMs) {
         val sameSsidAsPrevious = lastSelectedSsid.isNotBlank() && lastSelectedSsid.equals(ssid, ignoreCase = true)
         val isExplicitOpen = securityMode.trim().equals(WifiSecurityMode.OPEN.formValue, ignoreCase = true)
@@ -250,24 +296,38 @@ class OntWifiConnector(private val context: Context) {
         lastSelectedPassphrase = effectivePassphrase
         lastSelectedSecurityMode = effectiveSecurityMode
 
-        // Fast path: if phone is already connected to this ONT in Android System Wi-Fi settings
-        // (matched by SSID, BSSID, or active 192.168.1.x subnet when Android hides SSID as <unknown ssid>),
-        // bind directly in <10ms without triggering a slow WifiNetworkSpecifier renegotiation!
         val (currentSysSsid, currentSysBssid) = getSystemConnectedSsidAndBssid()
-        val alreadyOnTargetWifi =
+        val alreadyOnTargetWifi = if (allowSubnetFallbackWhenSsidUnknown) {
             (currentSysSsid.isNotBlank() && currentSysSsid.equals(ssid, ignoreCase = true)) ||
                 (!bssid.isNullOrBlank() && currentSysBssid.isNotBlank() && isSameOntBssid(currentSysBssid, bssid)) ||
                 (currentSysSsid.isBlank() && hasActiveOntSubnetWifi())
+        } else {
+            currentSysSsid.isNotBlank() && currentSysSsid.equals(ssid, ignoreCase = true)
+        }
 
         if (alreadyOnTargetWifi) {
             val existingNet = bindCurrentWifiNetworkIfConnected()
-            if (existingNet != null) {
+            if (existingNet != null && existingNet != excludedNetwork) {
                 awaitWifiIpv4Ready(existingNet, maxWaitMs = 600L)
                 return@withTimeout existingNet
             }
         }
 
         unbindOntWifi(clearSelectedMetadata = false)
+
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && ssid.isNotBlank()) {
+            val legacyNet = connectLegacyApi26To28Once(
+                targetSsid = ssid,
+                passphrase = effectivePassphrase.orEmpty(),
+                securityMode = effectiveSecurityMode,
+                excludedNetwork = excludedNetwork,
+                attemptTimeoutMs = timeoutMs
+            )
+            if (legacyNet != null) {
+                awaitWifiIpv4Ready(legacyNet, maxWaitMs = 1200L)
+                return@withTimeout legacyNet
+            }
+        }
 
         val connectedNet = suspendCancellableCoroutine<Network> { cont ->
             val requestBuilder = NetworkRequest.Builder()
@@ -277,14 +337,13 @@ class OntWifiConnector(private val context: Context) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && ssid.isNotBlank()) {
                 val specBuilder = WifiNetworkSpecifier.Builder()
                     .setSsid(ssid)
-                // Note: Do NOT call specBuilder.setBssid(...) because locking BSSID causes
-                // Android 10-14 to fail connection on many OEM ROMs or drop permanently on radio restart.
                 applySecurityToSpecifier(specBuilder, effectivePassphrase, effectiveSecurityMode)
                 requestBuilder.setNetworkSpecifier(specBuilder.build())
             }
 
             val callback = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
+                    if (excludedNetwork != null && network == excludedNetwork) return
                     specifierWifiNetwork = network
                     boundWifiNetwork = network
                     bindProcessNetworkSafe(network)
@@ -294,11 +353,12 @@ class OntWifiConnector(private val context: Context) {
                 }
 
                 override fun onUnavailable() {
-                    // Fallback: if system Wi-Fi is already connected to a Wi-Fi network, bind it!
-                    val fallbackNet = bindCurrentWifiNetworkIfConnected()
-                    if (fallbackNet != null && cont.isActive) {
-                        cont.resume(fallbackNet)
-                        return
+                    if (allowSubnetFallbackWhenSsidUnknown) {
+                        val fallbackNet = bindCurrentWifiNetworkIfConnected()
+                        if (fallbackNet != null && fallbackNet != excludedNetwork && cont.isActive) {
+                            cont.resume(fallbackNet)
+                            return
+                        }
                     }
                     specifierWifiNetwork = null
                     boundWifiNetwork = null
@@ -318,8 +378,8 @@ class OntWifiConnector(private val context: Context) {
                     }
                     if (boundWifiNetwork == network) {
                         boundWifiNetwork = null
+                        bindProcessNetworkSafe(null)
                     }
-                    bindProcessNetworkSafe(null)
                 }
             }
 
@@ -332,6 +392,398 @@ class OntWifiConnector(private val context: Context) {
         }
         awaitWifiIpv4Ready(connectedNet, maxWaitMs = 1200L)
         connectedNet
+    }
+
+    /**
+     * [Red Team RT-03, RT-06, RT-08, RT-09] Automated Step 7 Wi-Fi Handover Engine:
+     * Waits for ONT wlmngr/DFS CAC radio startup after Connection 1, excludes the old Connection 1
+     * Network so GPS-off <unknown ssid> never hijacks back to Band A, respects Android 9+'s
+     * process-wide 4 scans / 120s quota, uses WifiNetworkSpecifier ONLY on API 29+ (no parallel
+     * WifiNetworkSuggestion), and supports WifiConfiguration on API 26-28.
+     */
+    @SuppressLint("MissingPermission")
+    suspend fun switchToConfiguredSecondaryWifi(
+        targetSsid: String,
+        passphrase: String,
+        targetBand: WifiBand,
+        securityMode: String,
+        targetBssidHint: String? = null,
+        excludedNetwork: Network? = boundWifiNetwork,
+        timeoutMs: Long = 120_000L,
+        initialSettleMs: Long = 4_000L,
+        onStatusUpdate: ((String) -> Unit)? = null
+    ): Network {
+        val capabilityErr = validateHandoverSecurityCapability(securityMode)
+        if (capabilityErr != null) {
+            throw IllegalStateException(capabilityErr)
+        }
+
+        val prevNetwork = excludedNetwork ?: boundWifiNetwork
+        val isExplicitOpen = securityMode.trim().equals(WifiSecurityMode.OPEN.formValue, ignoreCase = true)
+        unbindOntWifi(clearSelectedMetadata = false)
+        lastSelectedSsid = targetSsid
+        lastSelectedBssid = ""
+        lastSelectedBand = targetBand
+        lastSelectedPassphrase = if (isExplicitOpen) null else passphrase
+        lastSelectedSecurityMode = securityMode
+
+        val startRealtimeMs = SystemClock.elapsedRealtime()
+        val deadlineMs = startRealtimeMs + timeoutMs.coerceAtLeast(5_000L)
+        val handoverStartMicros = SystemClock.elapsedRealtimeNanos() / 1_000L
+
+        // Phase A: Wait for ONT wlmngr / acsd / DFS CAC to bring up targetSsid
+        onStatusUpdate?.invoke("Đang đợi ONT khởi động lại sóng & phát Wi-Fi '$targetSsid' (${targetBand.label})...")
+        val settleStep1 = minOf(initialSettleMs.coerceAtLeast(0L), (deadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+        if (settleStep1 > 0L) {
+            delay(settleStep1)
+        }
+
+        findAlreadyConnectedTargetNetwork(targetSsid, prevNetwork)?.let { existing ->
+            if (awaitOntSubnetIpv4Ready(existing, maxWaitMs = 5_000L)) {
+                boundWifiNetwork = existing
+                bindProcessNetworkSafe(existing)
+                return existing
+            }
+        }
+
+        if (isLocationServiceEnabled()) {
+            val scanUpdated = java.util.concurrent.atomic.AtomicBoolean(false)
+            val receiver = object : BroadcastReceiver() {
+                override fun onReceive(ctx: Context?, intent: Intent?) {
+                    scanUpdated.set(true)
+                }
+            }
+            var receiverRegistered = false
+            try {
+                ContextCompat.registerReceiver(
+                    context.applicationContext,
+                    receiver,
+                    IntentFilter(WifiManager.SCAN_RESULTS_AVAILABLE_ACTION),
+                    ContextCompat.RECEIVER_NOT_EXPORTED
+                )
+                receiverRegistered = true
+            } catch (_: Exception) {
+            }
+
+            try {
+                val phaseABudgetMs = minOf(
+                    35_000L,
+                    ((deadlineMs - SystemClock.elapsedRealtime()) / 3L).coerceAtLeast(0L)
+                )
+                val phaseADeadlineMs = SystemClock.elapsedRealtime() + phaseABudgetMs
+                var activeScansIssued = 0
+                var lastScanTriggerMs = 0L
+
+                while (SystemClock.elapsedRealtime() < phaseADeadlineMs) {
+                    if (isTargetSsidVisibleInScanResults(targetSsid, targetBssidHint, handoverStartMicros)) {
+                        onStatusUpdate?.invoke("Đã phát hiện sóng '$targetSsid' (${targetBand.label}), bắt đầu ghép nối...")
+                        break
+                    }
+                    val now = SystemClock.elapsedRealtime()
+                    if (activeScansIssued < 2 && (activeScansIssued == 0 || now - lastScanTriggerMs >= 12_000L)) {
+                        if (tryRequestStartScan()) {
+                            activeScansIssued++
+                            lastScanTriggerMs = now
+                        }
+                    }
+                    scanUpdated.set(false)
+                    var slept = 0L
+                    while (slept < 1_500L && !scanUpdated.get() && SystemClock.elapsedRealtime() < phaseADeadlineMs) {
+                        delay(150L)
+                        slept += 150L
+                    }
+                }
+            } finally {
+                if (receiverRegistered) {
+                    try {
+                        context.applicationContext.unregisterReceiver(receiver)
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+        } else {
+            val gpsOffExtraSettle = minOf(4_000L, (deadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+            if (gpsOffExtraSettle > 0L) {
+                delay(gpsOffExtraSettle)
+            }
+        }
+
+        // Phase B: Persistent association loop across remaining handover budget (up to 120s)
+        var attempt = 0
+        while (SystemClock.elapsedRealtime() < deadlineMs) {
+            attempt++
+            findAlreadyConnectedTargetNetwork(targetSsid, prevNetwork)?.let { existing ->
+                if (awaitOntSubnetIpv4Ready(existing, maxWaitMs = 5_000L)) {
+                    boundWifiNetwork = existing
+                    bindProcessNetworkSafe(existing)
+                    return existing
+                }
+            }
+
+            val remainingMs = deadlineMs - SystemClock.elapsedRealtime()
+            if (remainingMs <= 0L) break
+
+            onStatusUpdate?.invoke(
+                "Đang ghép nối sang Wi-Fi '$targetSsid' (${targetBand.label}, lượt $attempt — bấm 'Kết nối' nếu hộp thoại hiện lên)..."
+            )
+
+            val candidateNet: Network? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val perAttemptMs = minOf(45_000L, remainingMs)
+                requestSpecifierNetworkOnce(
+                    targetSsid = targetSsid,
+                    passphrase = if (isExplicitOpen) null else passphrase,
+                    securityMode = securityMode,
+                    excludedNetwork = prevNetwork,
+                    attemptTimeoutMs = perAttemptMs
+                )
+            } else {
+                val perAttemptMs = minOf(25_000L, remainingMs)
+                connectLegacyApi26To28Once(
+                    targetSsid = targetSsid,
+                    passphrase = passphrase,
+                    securityMode = securityMode,
+                    excludedNetwork = prevNetwork,
+                    attemptTimeoutMs = perAttemptMs
+                )
+            }
+
+            if (candidateNet != null && candidateNet != prevNetwork) {
+                val dhcpWaitMs = minOf(5_000L, (deadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(800L))
+                if (awaitOntSubnetIpv4Ready(candidateNet, maxWaitMs = dhcpWaitMs)) {
+                    boundWifiNetwork = candidateNet
+                    bindProcessNetworkSafe(candidateNet)
+                    return candidateNet
+                }
+            }
+
+            unbindOntWifi(clearSelectedMetadata = false)
+            val backoffMs = minOf(2_500L, (deadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+            if (backoffMs > 0L) {
+                delay(backoffMs)
+            }
+        }
+
+        throw IllegalStateException(
+            "Hết thời gian chờ (${timeoutMs / 1000}s) chuyển kết nối sang Wi-Fi mới '$targetSsid' (${targetBand.label}). " +
+                "Hãy đứng gần ONT, kiểm tra hộp thoại ghép nối Wi-Fi và thử lại."
+        )
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun isTargetSsidVisibleInScanResults(
+        targetSsid: String,
+        targetBssidHint: String?,
+        minTimestampMicros: Long
+    ): Boolean {
+        val results = try {
+            wifiManager.scanResults ?: emptyList()
+        } catch (_: SecurityException) {
+            emptyList()
+        }
+        return results.any { sr ->
+            @Suppress("DEPRECATION")
+            val ssid = (sr.SSID ?: "").removeSurrounding("\"")
+            val isFresh = sr.timestamp <= 0L || sr.timestamp >= minTimestampMicros - 5_000_000L
+            if (!isFresh || ssid != targetSsid) return@any false
+            if (!targetBssidHint.isNullOrBlank() && !sr.BSSID.isNullOrBlank()) {
+                isSameOntBssid(sr.BSSID, targetBssidHint)
+            } else {
+                true
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun findAlreadyConnectedTargetNetwork(
+        targetSsid: String,
+        excludedNetwork: Network?
+    ): Network? {
+        if (targetSsid.isBlank()) return null
+        val (sysSsid, _) = getSystemConnectedSsidAndBssid()
+        for (net in getAllNetworksSafe()) {
+            if (!isWifiTransport(net) || net == excludedNetwork) continue
+            val netSsid = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val wifiInfo = try {
+                    connectivityManager.getNetworkCapabilities(net)?.transportInfo as? WifiInfo
+                } catch (_: Exception) {
+                    null
+                }
+                val raw = wifiInfo?.ssid?.removeSurrounding("\"").orEmpty()
+                if (raw.isNotBlank() && raw != "<unknown ssid>") raw else sysSsid
+            } else {
+                sysSsid
+            }
+            if (netSsid.isNotBlank() && netSsid.equals(targetSsid, ignoreCase = true)) {
+                if (boundWifiNetwork != net) {
+                    boundWifiNetwork = net
+                    bindProcessNetworkSafe(net)
+                }
+                return net
+            }
+        }
+        val activeNet = specifierWifiNetwork ?: boundWifiNetwork
+        if (
+            activeNet != null &&
+            activeNet != excludedNetwork &&
+            lastSelectedSsid.isNotBlank() &&
+            lastSelectedSsid.equals(targetSsid, ignoreCase = true) &&
+            getAllNetworksSafe().contains(activeNet) &&
+            isWifiTransport(activeNet) &&
+            getWifiNetworkScore(activeNet) >= 3
+        ) {
+            if (boundWifiNetwork != activeNet) {
+                boundWifiNetwork = activeNet
+                bindProcessNetworkSafe(activeNet)
+            }
+            return activeNet
+        }
+        return null
+    }
+
+    @SuppressLint("NewApi")
+    private suspend fun requestSpecifierNetworkOnce(
+        targetSsid: String,
+        passphrase: String?,
+        securityMode: String,
+        excludedNetwork: Network?,
+        attemptTimeoutMs: Long
+    ): Network? {
+        return try {
+            withTimeout(attemptTimeoutMs.coerceAtLeast(1_000L)) {
+                suspendCancellableCoroutine<Network?> { cont ->
+                    val specBuilder = WifiNetworkSpecifier.Builder().setSsid(targetSsid)
+                    applySecurityToSpecifier(specBuilder, passphrase, securityMode)
+                    val request = NetworkRequest.Builder()
+                        .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                        .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        .setNetworkSpecifier(specBuilder.build())
+                        .build()
+
+                    val callback = object : ConnectivityManager.NetworkCallback() {
+                        override fun onAvailable(network: Network) {
+                            if (excludedNetwork != null && network == excludedNetwork) return
+                            specifierWifiNetwork = network
+                            boundWifiNetwork = network
+                            bindProcessNetworkSafe(network)
+                            if (cont.isActive) {
+                                cont.resume(network)
+                            }
+                        }
+
+                        override fun onUnavailable() {
+                            if (cont.isActive) {
+                                cont.resume(null)
+                            }
+                        }
+
+                        override fun onLost(network: Network) {
+                            if (specifierWifiNetwork == network) {
+                                specifierWifiNetwork = null
+                            }
+                            if (boundWifiNetwork == network) {
+                                boundWifiNetwork = null
+                                bindProcessNetworkSafe(null)
+                            }
+                        }
+                    }
+
+                    activeNetworkCallback = callback
+                    connectivityManager.requestNetwork(request, callback)
+                    cont.invokeOnCancellation {
+                        if (boundWifiNetwork == null) {
+                            try {
+                                connectivityManager.unregisterNetworkCallback(callback)
+                            } catch (_: Exception) {
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (_: TimeoutCancellationException) {
+            null
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    @SuppressLint("MissingPermission")
+    private suspend fun connectLegacyApi26To28Once(
+        targetSsid: String,
+        passphrase: String,
+        securityMode: String,
+        excludedNetwork: Network?,
+        attemptTimeoutMs: Long
+    ): Network? {
+        removeLegacyAddedNetworkSafe()
+        val mode = WifiSecurityMode.fromFormValue(securityMode) ?: WifiSecurityMode.WPA2_WPA3_PSK
+        val wifiConfig = WifiConfiguration().apply {
+            SSID = "\"$targetSsid\""
+            if (mode == WifiSecurityMode.OPEN) {
+                allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE)
+            } else {
+                preSharedKey = "\"$passphrase\""
+            }
+        }
+        val netId = try {
+            wifiManager.addNetwork(wifiConfig)
+        } catch (_: Exception) {
+            -1
+        }
+        if (netId == -1) return null
+        legacyAddedNetworkId = netId
+        try {
+            wifiManager.disconnect()
+            wifiManager.enableNetwork(netId, true)
+            wifiManager.reconnect()
+        } catch (_: Exception) {
+            return null
+        }
+
+        val deadline = SystemClock.elapsedRealtime() + attemptTimeoutMs.coerceAtLeast(1_500L)
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val matchedBySsid = findAlreadyConnectedTargetNetwork(targetSsid, excludedNetwork)
+            if (matchedBySsid != null) {
+                boundWifiNetwork = matchedBySsid
+                bindProcessNetworkSafe(matchedBySsid)
+                return matchedBySsid
+            }
+            val nonExcludedSubnetNet = getAllNetworksSafe().firstOrNull { net ->
+                net != excludedNetwork && isWifiTransport(net) && getWifiNetworkScore(net) >= 3
+            }
+            if (nonExcludedSubnetNet != null) {
+                boundWifiNetwork = nonExcludedSubnetNet
+                bindProcessNetworkSafe(nonExcludedSubnetNet)
+                return nonExcludedSubnetNet
+            }
+            delay(300L)
+        }
+        return null
+    }
+
+    @Suppress("DEPRECATION")
+    @SuppressLint("MissingPermission")
+    private fun removeLegacyAddedNetworkSafe() {
+        val netId = legacyAddedNetworkId
+        legacyAddedNetworkId = -1
+        if (netId != -1 && Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            try {
+                wifiManager.disableNetwork(netId)
+                wifiManager.removeNetwork(netId)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private suspend fun awaitOntSubnetIpv4Ready(network: Network, maxWaitMs: Long = 5_000L): Boolean {
+        val start = SystemClock.elapsedRealtime()
+        while (SystemClock.elapsedRealtime() - start < maxWaitMs) {
+            if (getWifiNetworkScore(network) >= 3) return true
+            delay(100L)
+        }
+        return getWifiNetworkScore(network) >= 3
     }
 
     /**
@@ -470,6 +922,7 @@ class OntWifiConnector(private val context: Context) {
         bindProcessNetworkSafe(null)
         specifierWifiNetwork = null
         boundWifiNetwork = null
+        removeLegacyAddedNetworkSafe()
         if (clearSelectedMetadata) {
             lastSelectedSsid = ""
             lastSelectedBssid = ""
@@ -557,54 +1010,6 @@ class OntWifiConnector(private val context: Context) {
     }
 
     /**
-     * [Red Team RT-02 & RT-06] Scan-Throttle-Safe Beacon Verification after Step 7 radio reload:
-     * Waits 3.5s for Broadcom radio restart, invokes at most 1 startScan() call (respecting Android 9+
-     * limit of 4 scans / 2 minutes), and checks for a fresh ScanResult matching the new 2.4G or 5G SSID.
-     */
-    @SuppressLint("MissingPermission")
-    suspend fun verifyNewSsidBroadcast(
-        expectedSsid24g: String,
-        expectedSsid5g: String,
-        step7StartElapsedMicros: Long = SystemClock.elapsedRealtimeNanos() / 1000L,
-        initialSettleDelayMs: Long = 1200L,
-        timeoutMs: Long = 3500L
-    ): Boolean {
-        if (initialSettleDelayMs > 0) {
-            delay(initialSettleDelayMs)
-        }
-        var scanTriggered = false
-        val startMs = SystemClock.elapsedRealtime()
-
-        while (SystemClock.elapsedRealtime() - startMs < timeoutMs) {
-            if (!scanTriggered) {
-                scanTriggered = true
-                try {
-                    @Suppress("DEPRECATION")
-                    wifiManager.startScan()
-                } catch (_: Exception) {
-                }
-            }
-
-            val results = try {
-                wifiManager.scanResults ?: emptyList()
-            } catch (_: SecurityException) {
-                emptyList()
-            }
-
-            val foundNewSsid = results.any { sr ->
-                @Suppress("DEPRECATION")
-                val ssid = (sr.SSID ?: "").removeSurrounding("\"")
-                val isFresh = sr.timestamp <= 0L || sr.timestamp >= step7StartElapsedMicros
-                isFresh && (ssid == expectedSsid24g || ssid == expectedSsid5g)
-            }
-            if (foundNewSsid) return true
-
-            delay(1000L)
-        }
-        return false
-    }
-
-    /**
      * Optional post-Step 7 action when KTV explicitly taps "Kết nối vào Wi-Fi mới để kiểm tra mạng".
      */
     fun promptJoinCustomerWifi(
@@ -646,6 +1051,47 @@ class OntWifiConnector(private val context: Context) {
 
     companion object {
         val DEFAULT_ONT_SSID_REGEX = Regex("^GW040-NSv2_(2\\.4G|5G)_([0-9A-Fa-f]{6})$")
+        private const val SCAN_WINDOW_MS = 120_000L
+        private const val MAX_SCANS_PER_WINDOW = 4
+        private val processScanTimestampsMs = ArrayDeque<Long>()
+
+        fun tryConsumeScanQuotaInWindow(
+            timestamps: ArrayDeque<Long>,
+            nowMs: Long,
+            windowMs: Long = SCAN_WINDOW_MS,
+            maxScans: Int = MAX_SCANS_PER_WINDOW
+        ): Boolean {
+            while (timestamps.isNotEmpty() && nowMs - timestamps.first() > windowMs) {
+                timestamps.removeFirst()
+            }
+            if (timestamps.size >= maxScans) return false
+            timestamps.addLast(nowMs)
+            return true
+        }
+
+        fun tryConsumeProcessScanQuota(nowMs: Long = SystemClock.elapsedRealtime()): Boolean =
+            synchronized(processScanTimestampsMs) {
+                tryConsumeScanQuotaInWindow(processScanTimestampsMs, nowMs)
+            }
+
+        fun validateHandoverSecurityCapability(
+            secMode: String,
+            sdkInt: Int = Build.VERSION.SDK_INT,
+            isWpa3SaeSupported: Boolean = true
+        ): String? {
+            val mode = WifiSecurityMode.fromFormValue(secMode)
+                ?: return "Chế độ bảo mật Wi-Fi '$secMode' không hợp lệ."
+            if (mode == WifiSecurityMode.WPA3_PSK && (sdkInt < Build.VERSION_CODES.Q || !isWpa3SaeSupported)) {
+                return "Điện thoại này không hỗ trợ tự động chuyển sang Wi-Fi WPA3-PSK thuần ở Bước 7 " +
+                    "(yêu cầu Android 10+ và phần cứng WPA3-SAE). Vui lòng chọn 'WPA2-PSK / WPA3-PSK' hoặc 'WPA2-PSK'."
+            }
+            if (mode == WifiSecurityMode.WPA_PSK && sdkInt >= Build.VERSION_CODES.Q) {
+                return "Android 10+ không hỗ trợ tự động ghép nối chuẩn cũ WPA-PSK (TKIP) thuần ở Bước 7. " +
+                    "Vui lòng chọn 'WPA-PSK / WPA2-PSK' hoặc 'WPA2-PSK'."
+            }
+            return null
+        }
+
 
         fun detectBandFromFrequency(
             frequencyMhz: Int,

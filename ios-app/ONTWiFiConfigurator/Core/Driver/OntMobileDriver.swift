@@ -17,7 +17,7 @@ public struct StepProgress: Identifiable, Equatable, Sendable {
 
     public init(
         stepNumber: Int,
-        totalSteps: Int = 7,
+        totalSteps: Int = 8,
         title: String,
         status: StepStatus,
         detail: String = ""
@@ -42,6 +42,11 @@ public struct MobileSetupResult: Equatable, Sendable {
     public let updatedAdminPass: String
     public let message: String
     public let beaconVerified: Bool
+    public let firmwareUpdated: Bool
+    public let firmwareFileName: String
+    public let configuredSecondaryBandLabel: String
+    public let configuredSecondarySsid: String
+    public let configuredSecondaryPass: String
     public let wifiSecurityMode: String
     public let resolvedConnectedBand: WifiBand
 
@@ -57,6 +62,11 @@ public struct MobileSetupResult: Equatable, Sendable {
         updatedAdminPass: String,
         message: String,
         beaconVerified: Bool = false,
+        firmwareUpdated: Bool = false,
+        firmwareFileName: String = "",
+        configuredSecondaryBandLabel: String = "",
+        configuredSecondarySsid: String = "",
+        configuredSecondaryPass: String = "",
         wifiSecurityMode: String = WifiSecurityMode.wpa2Wpa3Psk.rawValue,
         resolvedConnectedBand: WifiBand = .band24GHz
     ) {
@@ -71,6 +81,11 @@ public struct MobileSetupResult: Equatable, Sendable {
         self.updatedAdminPass = updatedAdminPass
         self.message = message
         self.beaconVerified = beaconVerified
+        self.firmwareUpdated = firmwareUpdated
+        self.firmwareFileName = firmwareFileName
+        self.configuredSecondaryBandLabel = configuredSecondaryBandLabel
+        self.configuredSecondarySsid = configuredSecondarySsid
+        self.configuredSecondaryPass = configuredSecondaryPass
         self.wifiSecurityMode = wifiSecurityMode
         self.resolvedConnectedBand = resolvedConnectedBand
     }
@@ -101,9 +116,21 @@ public final class OntMobileDriver: @unchecked Sendable {
     private let timeoutMs: Int
     private let settlingDelayMs: Int
     private let recoveryRetryDelayMs: Int
+    private let wlRestartPollIntervalMs: Int
+    private let maxWlRestartPolls: Int
+    private let userExistPollIntervalMs: Int
     private let probePauseMutex: AsyncMutex?
     private let onAdminPasswordChanged: (@Sendable (String) async -> Void)?
     private let isAppInBackground: @Sendable () -> Bool
+    private let onSwitchToSecondaryWifi: (@Sendable (
+        _ ssid: String,
+        _ pass: String,
+        _ band: WifiBand,
+        _ secMode: String,
+        _ expectedOntBaseMac: String?,
+        _ timeoutMs: Int,
+        _ onDetail: @Sendable (String) -> Void
+    ) async throws -> String?)?
 
     private let session: UnsafeSslSession
     private let logoutSession: UnsafeSslSession
@@ -112,26 +139,41 @@ public final class OntMobileDriver: @unchecked Sendable {
     private var sessionKey: String = ""
     private var lastActiveSessionKeyStorage: String = ""
     private var currentUser: String = "admin"
-    private var currentPass: String = ""
 
     public init(
         baseUrl: String = "https://192.168.1.1",
         timeoutMs: Int = 5000,
         settlingDelayMs: Int = 200,
         recoveryRetryDelayMs: Int = 1200,
+        wlRestartPollIntervalMs: Int = 1000,
+        maxWlRestartPolls: Int = 30,
+        userExistPollIntervalMs: Int = 3000,
         probePauseMutex: AsyncMutex? = nil,
         protocolClasses: [AnyClass] = [],
         onAdminPasswordChanged: (@Sendable (String) async -> Void)? = nil,
-        isAppInBackground: @escaping @Sendable () -> Bool = { false }
+        isAppInBackground: @escaping @Sendable () -> Bool = { false },
+        onSwitchToSecondaryWifi: (@Sendable (
+            _ ssid: String,
+            _ pass: String,
+            _ band: WifiBand,
+            _ secMode: String,
+            _ expectedOntBaseMac: String?,
+            _ timeoutMs: Int,
+            _ onDetail: @Sendable (String) -> Void
+        ) async throws -> String?)? = nil
     ) {
         let trimmed = baseUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         self.cleanBaseUrl = trimmed
         self.timeoutMs = timeoutMs
         self.settlingDelayMs = settlingDelayMs
         self.recoveryRetryDelayMs = recoveryRetryDelayMs
+        self.wlRestartPollIntervalMs = wlRestartPollIntervalMs
+        self.maxWlRestartPolls = maxWlRestartPolls
+        self.userExistPollIntervalMs = userExistPollIntervalMs
         self.probePauseMutex = probePauseMutex
         self.onAdminPasswordChanged = onAdminPasswordChanged
         self.isAppInBackground = isAppInBackground
+        self.onSwitchToSecondaryWifi = onSwitchToSecondaryWifi
 
         let hostOverride = URL(string: trimmed)?.host
         self.session = UnsafeSslSession(
@@ -186,8 +228,29 @@ public final class OntMobileDriver: @unchecked Sendable {
         stateLock.unlock()
     }
 
+    public func setPinnedCertSha256ForTest(_ sha256Hex: String?) {
+        let clean = sha256Hex?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        session.pinnedCertSha256 = clean
+        logoutSession.pinnedCertSha256 = clean
+    }
+
+    private func isTlsPinMismatch(_ error: Error) -> Bool {
+        let nsErr = error as NSError
+        if nsErr.domain == UnsafeSslSession.tlsPinErrorDomain {
+            return true
+        }
+        if let underlying = nsErr.userInfo[NSUnderlyingErrorKey] as? Error {
+            return isTlsPinMismatch(underlying)
+        }
+        return false
+    }
+
     /// Step 1: Probe root URL and verify both HTTP 200 AND ONT HTML signature ("iGate", "GW040", "VNPT", or "login.js").
     public func probeGateway() async -> Bool {
+        return (try? await probeGatewayCheckingCertPin(failOnCertMismatch: false)) ?? false
+    }
+
+    private func probeGatewayCheckingCertPin(failOnCertMismatch: Bool) async throws -> Bool {
         guard let url = URL(string: "\(cleanBaseUrl)/") else { return false }
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
@@ -201,6 +264,12 @@ public final class OntMobileDriver: @unchecked Sendable {
                 resp.body.range(of: sig, options: .caseInsensitive) != nil
             }
         } catch {
+            if (failOnCertMismatch || session.pinnedCertSha256 != nil) && isTlsPinMismatch(error) {
+                throw OntDriverException(
+                    "Chứng chỉ bảo mật TLS của ONT ở Lần kết nối 2 không khớp với ONT ban đầu — nghi ngờ bắt nhầm Wi-Fi khác.",
+                    underlyingError: error
+                )
+            }
             return false
         }
     }
@@ -208,7 +277,8 @@ public final class OntMobileDriver: @unchecked Sendable {
     private func postForm(
         path: String,
         rawPayload: String,
-        useShortLogoutTimeout: Bool = false
+        useShortLogoutTimeout: Bool = false,
+        referer: String? = nil
     ) async throws -> HttpResponsePayload {
         guard let url = URL(string: "\(cleanBaseUrl)\(path)") else {
             throw OntNetworkError("URL không hợp lệ: \(cleanBaseUrl)\(path)")
@@ -218,7 +288,7 @@ public final class OntMobileDriver: @unchecked Sendable {
         req.httpMethod = "POST"
         req.httpBody = bodyData
         req.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
-        req.setValue("\(cleanBaseUrl)/", forHTTPHeaderField: "Referer")
+        req.setValue(referer ?? "\(cleanBaseUrl)/", forHTTPHeaderField: "Referer")
         req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         req.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
         req.setValue("close", forHTTPHeaderField: "Connection")
@@ -226,7 +296,6 @@ public final class OntMobileDriver: @unchecked Sendable {
         let targetSession = useShortLogoutTimeout ? logoutSession : session
         return try await targetSession.execute(req, expectedBodyBytes: bodyData.count)
     }
-
     private func parseJsonOrThrow(
         stepContext: String,
         statusCode: Int,
@@ -308,7 +377,6 @@ public final class OntMobileDriver: @unchecked Sendable {
         }
         stateLock.lock()
         currentUser = user
-        currentPass = password
         stateLock.unlock()
         return data
     }
@@ -662,9 +730,11 @@ public final class OntMobileDriver: @unchecked Sendable {
                     body: resResp.body
                 )
 
-                if !isConnectedBandFinalStep && stringValue(resJson, "_wlrestart_", default: "0") != "0" {
-                    for _ in 1...10 {
-                        try await Task.sleep(nanoseconds: 1_000_000_000)
+                if !isConnectedBandFinalStep && maxWlRestartPolls > 0 && stringValue(resJson, "_wlrestart_", default: "0") != "0" {
+                    for _ in 1...maxWlRestartPolls {
+                        if wlRestartPollIntervalMs > 0 {
+                            try await Task.sleep(nanoseconds: UInt64(wlRestartPollIntervalMs) * 1_000_000)
+                        }
                         let pollResp = try await postForm(
                             path: "/cgi-bin/luci/wlrestart.json",
                             rawPayload: "undefined&sessionKey=\(currentSessionKey)"
@@ -683,7 +753,7 @@ public final class OntMobileDriver: @unchecked Sendable {
                 if error is CancellationError {
                     throw error
                 }
-                if (isConnectedBandFinalStep || cfgSavedToNvram) && !isAppInBackground() {
+                if isConnectedBandFinalStep || cfgSavedToNvram {
                     droppedDuringRadioReload = true
                 } else {
                     throw OntNetworkError("Lỗi mạng khi gọi wlrestart.json cho unit=\(unit): \(error.localizedDescription)", cause: error)
@@ -732,23 +802,25 @@ public final class OntMobileDriver: @unchecked Sendable {
         return json
     }
 
-    /// [Red Team RT-02] Server-side connected band ground-truth resolution immediately after Step 2:
-    /// Queries `dhcpclient.json` (`wlAssociatedDevice` prioritized over `dhcpInfoList`) and
-    /// `deviceinfo2.json` (2D `wirelessInfoList` `[[String, String]]` with `\r\n` trimming) over `session`.
+    private struct StillOnPrimaryBandError: Error {
+        let message: String
+    }
+
+    /// [Red Team RT-02] Server-side connected band & ONT identity ground-truth resolution immediately after Step 2:
+    /// Queries `dhcpclient.json` when `localIpv4` is valid (`wlAssociatedDevice` prioritized over `dhcpInfoList`)
+    /// and UNCONDITIONALLY queries `deviceinfo2.json` to capture trimmed `baseMacAddress`.
     public func resolveConnectedBandFromOnt(
         localIpv4: String?,
         fallbackBand: WifiBand
-    ) async -> WifiBand {
-        let cleanIp = (localIpv4 ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanIp.isEmpty, cleanIp.hasPrefix("192.168.1."), cleanIp != "192.168.1.1" else {
-            return fallbackBand
-        }
+    ) async -> (band: WifiBand, ontBaseMac: String?) {
         guard isValidSessionToken(currentSessionKey) else {
-            return fallbackBand
+            return (fallbackBand, nil)
         }
+        let cleanIp = (localIpv4 ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasValidSubnetIp = !cleanIp.isEmpty && cleanIp.hasPrefix("192.168.1.") && cleanIp != "192.168.1.1"
 
         var matchedWlIfc = ""
-        if let dhcpJson = await postOptionalSessionJson(path: "/cgi-bin/luci/dhcpclient.json") {
+        if hasValidSubnetIp, let dhcpJson = await postOptionalSessionJson(path: "/cgi-bin/luci/dhcpclient.json") {
             var clientMac = ""
             var leaseIfc = ""
             if let dhcpArr = dhcpJson["dhcpInfoList"] as? [Any] {
@@ -791,106 +863,143 @@ public final class OntMobileDriver: @unchecked Sendable {
             matchedWlIfc = liveAssocIfc.isEmpty ? leaseIfc : liveAssocIfc
         }
 
-        guard !matchedWlIfc.isEmpty else {
-            return fallbackBand
-        }
-
-        if let devJson = await postOptionalSessionJson(path: "/cgi-bin/luci/deviceinfo2.json"),
-           let wlList = devJson["wirelessInfoList"] as? [Any] {
-            for rowItem in wlList {
-                let entryStr = pipeRowString(rowItem)
-                guard !entryStr.isEmpty else { continue }
-                let subData = entryStr
-                    .components(separatedBy: "|")
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                guard let firstCol = subData.first else { continue }
-                let entryIfc = normalizeWlInterface(firstCol)
-                if entryIfc == matchedWlIfc {
-                    let chanField = subData.count > 3 ? subData[3] : ""
-                    let chan = Int(String(chanField.prefix(while: { $0.isNumber }))) ?? 0
-                    if (1...14).contains(chan) {
-                        return .band24GHz
-                    } else if chan >= 36 {
-                        return .band5GHz
-                    } else {
-                        return (entryIfc == "wl1") ? .band5GHz : .band24GHz
+        var ontBaseMac: String?
+        var resolvedFromDeviceInfo: WifiBand?
+        if let devJson = await postOptionalSessionJson(path: "/cgi-bin/luci/deviceinfo2.json") {
+            let rawMac = stringValue(devJson, "baseMacAddress").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !rawMac.isEmpty {
+                ontBaseMac = rawMac
+            }
+            if !matchedWlIfc.isEmpty, let wlList = devJson["wirelessInfoList"] as? [Any] {
+                for rowItem in wlList {
+                    let entryStr = pipeRowString(rowItem)
+                    guard !entryStr.isEmpty else { continue }
+                    let subData = entryStr
+                        .components(separatedBy: "|")
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    guard let firstCol = subData.first else { continue }
+                    let entryIfc = normalizeWlInterface(firstCol)
+                    if entryIfc == matchedWlIfc {
+                        let chanField = subData.count > 3 ? subData[3] : ""
+                        let chan = Int(String(chanField.prefix(while: { $0.isNumber }))) ?? 0
+                        if (1...14).contains(chan) {
+                            resolvedFromDeviceInfo = .band24GHz
+                        } else if chan >= 36 {
+                            resolvedFromDeviceInfo = .band5GHz
+                        } else {
+                            resolvedFromDeviceInfo = (entryIfc == "wl1") ? .band5GHz : .band24GHz
+                        }
+                        break
                     }
                 }
             }
         }
 
-        return (matchedWlIfc == "wl1") ? .band5GHz : .band24GHz
+        let finalBand: WifiBand
+        if let resolved = resolvedFromDeviceInfo {
+            finalBand = resolved
+        } else if matchedWlIfc == "wl1" {
+            finalBand = .band5GHz
+        } else if matchedWlIfc == "wl0" {
+            finalBand = .band24GHz
+        } else {
+            finalBand = fallbackBand
+        }
+        return (finalBand, ontBaseMac)
     }
 
-    private func reloginAfterRadioBounce(
-        settings: GlobalSettings,
-        recordKey: String,
-        previousSessionKey: String
-    ) async throws -> Bool {
-        stateLock.lock()
-        let savedPass = currentPass
-        stateLock.unlock()
-        let activeAdminPass = savedPass.isEmpty ? settings.adminNewPass : savedPass
-
-        func attemptLogin() async throws -> Bool {
-            _ = try await loginAndChangePassword(
-                defaultPass: settings.adminDefaultPass,
-                newPass: settings.adminNewPass,
-                recordKey: recordKey,
-                lastKnownAdminPass: activeAdminPass
-            )
-            return true
-        }
-
-        func handleNonUserExistFailure(_ error: Error) throws -> Bool {
-            if error is CancellationError ||
-                error is OntAccountLockoutError ||
-                error is OntAccountLockoutWarning ||
-                error is OntAuthenticationError {
-                throw error
+    /// [Red Team RT-01] Authenticate Connection 2 strictly with `newAdminPass` ONLY — NEVER falling back to `adminDefaultPass`.
+    private func authenticateSecondConnection(
+        newAdminPass: String,
+        previousSessionKey: String,
+        userExistWaitBudgetMs: Int = 65_000
+    ) async throws -> String {
+        func attemptNewPassLoginOnce() async throws -> String {
+            let loginData = try await login(user: "admin", password: newAdminPass)
+            let status = stringValue(loginData, "status").trimmingCharacters(in: .whitespacesAndNewlines)
+            let firstLog = stringValue(loginData, "firstlog").trimmingCharacters(in: .whitespacesAndNewlines)
+            if firstLog == "1" || status.caseInsensitiveCompare("FAIL") == .orderedSame || !isValidSessionToken(currentSessionKey) {
+                throw OntAuthenticationError(
+                    "Đăng nhập Lần kết nối 2 bằng mật khẩu Admin mới thất bại (status=\(status), firstlog=\(firstLog)). " +
+                    "Dừng ngay để tránh khóa ONT — hãy kiểm tra xem iPhone có đang bắt nhầm Wi-Fi khác không."
+                )
             }
-            let fallbackKey = lastActiveSessionKey
-            if currentSessionKey.isEmpty && !fallbackKey.isEmpty {
-                currentSessionKey = fallbackKey
-            }
-            return false
+            return currentSessionKey
         }
 
         do {
-            return try await attemptLogin()
+            return try await attemptNewPassLoginOnce()
+        } catch let e as OntAccountLockoutError {
+            throw e
+        } catch let e as OntAccountLockoutWarning {
+            throw e
+        } catch let e as OntAuthenticationError {
+            throw e
         } catch is OntUserExistError {
             let keyToRelease = previousSessionKey.isEmpty ? lastActiveSessionKey : previousSessionKey
-            guard isValidSessionToken(keyToRelease) else {
-                return false
-            }
-            do {
+            if isValidSessionToken(keyToRelease) {
                 currentSessionKey = keyToRelease
                 await logout()
-                return try await attemptLogin()
-            } catch {
-                return try handleNonUserExistFailure(error)
+                do {
+                    return try await attemptNewPassLoginOnce()
+                } catch let e2 as OntAccountLockoutError {
+                    throw e2
+                } catch let e2 as OntAccountLockoutWarning {
+                    throw e2
+                } catch let e2 as OntAuthenticationError {
+                    throw e2
+                } catch is OntUserExistError {
+                    // Fall through to TTL polling loop below
+                } catch let ne as OntNetworkError {
+                    if isTlsPinMismatch(ne) {
+                        throw OntDriverException("Chứng chỉ TLS của ONT ở Lần kết nối 2 không khớp với Lần 1.", underlyingError: ne)
+                    }
+                    // Transient socket drop right after logout -> fall through to polling loop
+                }
             }
+
+            let budgetSec = Double(max(userExistWaitBudgetMs, userExistPollIntervalMs)) / 1000.0
+            let deadline = Date().addingTimeInterval(budgetSec)
+            while Date() < deadline {
+                try Task.checkCancellation()
+                let remMs = max(10, Int(deadline.timeIntervalSinceNow * 1000.0))
+                let sleepMs = min(max(userExistPollIntervalMs, 10), remMs)
+                try await Task.sleep(nanoseconds: UInt64(sleepMs) * 1_000_000)
+                do {
+                    return try await attemptNewPassLoginOnce()
+                } catch is OntUserExistError {
+                    continue
+                } catch let ne as OntNetworkError {
+                    if isTlsPinMismatch(ne) {
+                        throw OntDriverException("Chứng chỉ TLS của ONT ở Lần kết nối 2 không khớp với Lần 1.", underlyingError: ne)
+                    }
+                    continue
+                }
+            }
+            throw OntUserExistError(
+                "Tài khoản admin ONT vẫn bận phiên cũ (user exist) sau khi chờ \(userExistWaitBudgetMs / 1000)s ở Lần kết nối 2."
+            )
         } catch {
-            return try handleNonUserExistFailure(error)
+            if isTlsPinMismatch(error) {
+                throw OntDriverException("Chứng chỉ TLS của ONT ở Lần kết nối 2 không khớp với Lần 1.", underlyingError: error)
+            }
+            throw error
         }
     }
 
-    /// [Red Team RT-01 & RT-05] Narrow HTTP-only do/catch around `wlrestart.json`, explicit detection
-    /// of LuCI's `{"status": "fail authen"}` expiry and missing `_wlrestart_`, dynamic `lastActiveSessionKey`
-    /// recovery, zero double-login on `numberLogin >= 2`, and strict `CancellationError` propagation.
-    private func ensureGatewayReadyBeforeStep7(
+    /// [Red Team RT-01] Readiness & session synchronization gate on Secondary Wi-Fi (`Band B`),
+    /// re-authenticating exclusively with `settings.adminNewPass` (zero `adminDefaultPass` fallback).
+    private func ensureGatewayReadyOnSecondaryBand(
         settings: GlobalSettings,
-        recordKey: String,
-        previousSessionKey: String? = nil,
-        maxAttempts: Int = 8,
-        retryDelayMs: Int? = nil
+        timeoutBudgetMs: Int
     ) async throws -> Bool {
-        let effectiveRetryDelayMs = retryDelayMs ?? recoveryRetryDelayMs
-        let initialPrevKey = previousSessionKey ?? lastActiveSessionKey
+        let budgetSec = Double(max(timeoutBudgetMs, timeoutMs)) / 1000.0
+        let deadline = Date().addingTimeInterval(budgetSec)
+        let stepDelayMs = max(recoveryRetryDelayMs, 20)
 
-        for attempt in 1...maxAttempts {
+        while Date() < deadline {
             try Task.checkCancellation()
-            if await probeGateway() {
+            if try await probeGatewayCheckingCertPin(failOnCertMismatch: true) {
                 let activeKey = currentSessionKey
                 var httpResp: HttpResponsePayload?
                 if isValidSessionToken(activeKey) {
@@ -901,8 +1010,9 @@ public final class OntMobileDriver: @unchecked Sendable {
                             rawPayload: "undefined&sessionKey=\(encKey)"
                         )
                     } catch {
-                        if error is CancellationError {
-                            throw error
+                        if error is CancellationError { throw error }
+                        if isTlsPinMismatch(error) {
+                            throw OntDriverException("Chứng chỉ TLS ONT không khớp khi đồng bộ Lần 2.", underlyingError: error)
                         }
                     }
                 }
@@ -916,22 +1026,44 @@ public final class OntMobileDriver: @unchecked Sendable {
                     return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
                 }
                 let statusStr = wlJson.map { stringValue($0, "status").trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
-                let sessionInvalid = wlJson == nil ||
-                    statusStr.lowercased() == "fail authen" ||
-                    wlJson?["_wlrestart_"] == nil
 
-                if sessionInvalid {
-                    let keyForRelogin = lastActiveSessionKey.isEmpty ? initialPrevKey : lastActiveSessionKey
-                    if try await reloginAfterRadioBounce(
-                        settings: settings,
-                        recordKey: recordKey,
-                        previousSessionKey: keyForRelogin
-                    ) {
+                if wlJson == nil || statusStr.lowercased() == "fail authen" {
+                    let remMs = max(userExistPollIntervalMs, Int(deadline.timeIntervalSinceNow * 1000.0))
+                    do {
+                        _ = try await authenticateSecondConnection(
+                            newAdminPass: settings.adminNewPass,
+                            previousSessionKey: lastActiveSessionKey,
+                            userExistWaitBudgetMs: remMs
+                        )
+                        let encFresh = OntInputValidator.urlEncodeFormValue(currentSessionKey)
+                        if let checkResp = try? await postForm(
+                            path: "/cgi-bin/luci/wlrestart.json",
+                            rawPayload: "undefined&sessionKey=\(encFresh)"
+                        ), checkResp.statusCode == 200,
+                           let d = checkResp.body.trimmingCharacters(in: .whitespacesAndNewlines).data(using: .utf8),
+                           let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                           stringValue(j, "_wlrestart_", default: "0").trimmingCharacters(in: .whitespacesAndNewlines) != "0" {
+                            let pollWait = min(max(wlRestartPollIntervalMs, 10), max(10, Int(deadline.timeIntervalSinceNow * 1000.0)))
+                            try await Task.sleep(nanoseconds: UInt64(pollWait) * 1_000_000)
+                            continue
+                        }
                         return true
+                    } catch let e as OntAccountLockoutError {
+                        throw e
+                    } catch let e as OntAccountLockoutWarning {
+                        throw e
+                    } catch let e as OntAuthenticationError {
+                        throw e
+                    } catch let e as CancellationError {
+                        throw e
+                    } catch let de as OntDriverException {
+                        if !(de is OntNetworkError) && !(de is OntUserExistError) {
+                            throw de
+                        }
                     }
                 } else if let validJson = wlJson,
                           stringValue(validJson, "_wlrestart_", default: "0").trimmingCharacters(in: .whitespacesAndNewlines) != "0" {
-                    let pollWaitMs = min(800, max(20, effectiveRetryDelayMs))
+                    let pollWaitMs = min(max(wlRestartPollIntervalMs, 10), max(10, Int(deadline.timeIntervalSinceNow * 1000.0)))
                     try await Task.sleep(nanoseconds: UInt64(pollWaitMs) * 1_000_000)
                     continue
                 } else {
@@ -939,13 +1071,310 @@ public final class OntMobileDriver: @unchecked Sendable {
                 }
             }
 
-            if attempt < maxAttempts && effectiveRetryDelayMs > 0 {
-                try await Task.sleep(nanoseconds: UInt64(effectiveRetryDelayMs) * 1_000_000)
+            let remainingMs = Int(deadline.timeIntervalSinceNow * 1000.0)
+            if remainingMs > 0 {
+                try await Task.sleep(nanoseconds: UInt64(min(stepDelayMs, remainingMs)) * 1_000_000)
             }
         }
         return false
     }
 
+    /// [Red Team RT-02] Verify `baseMacAddress` match and live `wlAssociatedDevice == expectedBand` on Connection 2.
+    private func verifySecondConnectionBandAndMac(
+        localIpv4: String?,
+        expectedBand: WifiBand,
+        expectedOntBaseMac: String?
+    ) async throws {
+        var ifcBandMap: [String: WifiBand] = [:]
+        let devJson = await postOptionalSessionJson(path: "/cgi-bin/luci/deviceinfo2.json")
+        let actualBaseMac = devJson.map { stringValue($0, "baseMacAddress").trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
+        if let expectedMac = expectedOntBaseMac?.trimmingCharacters(in: .whitespacesAndNewlines), !expectedMac.isEmpty {
+            if actualBaseMac.isEmpty || actualBaseMac.caseInsensitiveCompare(expectedMac) != .orderedSame {
+                throw OntDriverException(
+                    "Địa chỉ MAC của ONT ở Lần kết nối 2 (\(actualBaseMac.isEmpty ? "không xác định" : actualBaseMac)) không khớp với ONT ban đầu (\(expectedMac)) — nghi ngờ bắt nhầm ONT khác."
+                )
+            }
+        }
+        if let wlList = devJson?["wirelessInfoList"] as? [Any] {
+            for rowItem in wlList {
+                let entryStr = pipeRowString(rowItem)
+                guard !entryStr.isEmpty else { continue }
+                let subData = entryStr
+                    .components(separatedBy: "|")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                guard let firstCol = subData.first else { continue }
+                let entryIfc = normalizeWlInterface(firstCol)
+                guard !entryIfc.isEmpty else { continue }
+                let chanField = subData.count > 3 ? subData[3] : ""
+                let chan = Int(String(chanField.prefix(while: { $0.isNumber }))) ?? 0
+                if (1...14).contains(chan) {
+                    ifcBandMap[entryIfc] = .band24GHz
+                } else if chan >= 36 {
+                    ifcBandMap[entryIfc] = .band5GHz
+                } else {
+                    ifcBandMap[entryIfc] = (entryIfc == "wl1") ? .band5GHz : .band24GHz
+                }
+            }
+        }
+
+        guard let dhcpJson = await postOptionalSessionJson(path: "/cgi-bin/luci/dhcpclient.json") else {
+            throw OntNetworkError("Không đọc được bảng kết nối Wi-Fi (dhcpclient.json) ở Lần kết nối 2.")
+        }
+        guard let assocArr = dhcpJson["wlAssociatedDevice"] as? [Any] else {
+            throw StillOnPrimaryBandError(
+                message: "Không xác thực được giao diện wlAssociatedDevice ở Lần kết nối 2 cho băng tần \(expectedBand.label)."
+            )
+        }
+
+        let cleanIp = (localIpv4 ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        var clientMac = ""
+        if !cleanIp.isEmpty, let dhcpArr = dhcpJson["dhcpInfoList"] as? [Any] {
+            for item in dhcpArr {
+                let parts = pipeRowString(item).components(separatedBy: "|")
+                if parts.first?.trimmingCharacters(in: .whitespacesAndNewlines) == cleanIp, parts.count > 3 {
+                    clientMac = parts[3].trimmingCharacters(in: .whitespacesAndNewlines)
+                    break
+                }
+            }
+        }
+
+        var matchedAssocIfc = ""
+        for item in assocArr {
+            let assocParts = pipeRowString(item).components(separatedBy: "|")
+            let assocMac = assocParts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let assocIp = assocParts.count > 1 ? assocParts[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
+            let ifcAt3 = assocParts.count > 3 ? normalizeWlInterface(assocParts[3]) : ""
+            let rowIfc = !ifcAt3.isEmpty
+                ? ifcAt3
+                : (assocParts.map { normalizeWlInterface($0) }.first { !$0.isEmpty } ?? "")
+            guard !rowIfc.isEmpty else { continue }
+            let ipMatches = !cleanIp.isEmpty && assocIp == cleanIp
+            let macMatches = !clientMac.isEmpty && assocMac.caseInsensitiveCompare(clientMac) == .orderedSame
+            if ipMatches || macMatches || (cleanIp.isEmpty && assocArr.count == 1) {
+                matchedAssocIfc = rowIfc
+                break
+            }
+            if matchedAssocIfc.isEmpty && assocIp.isEmpty && assocArr.count == 1 {
+                matchedAssocIfc = rowIfc
+            }
+        }
+
+        guard !matchedAssocIfc.isEmpty else {
+            throw StillOnPrimaryBandError(
+                message: "Chưa thấy iPhone trong bảng wlAssociatedDevice của băng tần \(expectedBand.label)."
+            )
+        }
+
+        let liveBand = ifcBandMap[matchedAssocIfc] ?? ((matchedAssocIfc == "wl1") ? .band5GHz : .band24GHz)
+        if liveBand != expectedBand {
+            throw StillOnPrimaryBandError(
+                message: "Thiết bị vẫn đang kết nối trên băng tần \(liveBand.label) (\(matchedAssocIfc)) thay vì băng tần phụ \(expectedBand.label)."
+            )
+        }
+    }
+
+    /// [Red Team RT-02] Read-only NVRAM SSID check (`page=ssid.asp&wl_unit=\(unit)&wl_bssid=0` without `action=Apply`).
+    private func readConfiguredBandSsidFromNvram(unit: Int) async -> String? {
+        let activeKey = currentSessionKey
+        guard isValidSessionToken(activeKey) else { return nil }
+        let encKey = OntInputValidator.urlEncodeFormValue(activeKey)
+        let payload = "page=ssid.asp&wl_unit=\(unit)&wl_bssid=0&sessionKey=\(encKey)"
+        guard let resp = try? await postForm(
+            path: "/cgi-bin/luci/wirelesscfg.json",
+            rawPayload: payload,
+            useShortLogoutTimeout: false,
+            referer: "\(cleanBaseUrl)/wireless.html"
+        ) else {
+            return nil
+        }
+        let trimmed = resp.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard resp.statusCode == 200,
+              !trimmed.isEmpty,
+              !trimmed.hasPrefix("<"),
+              let data = trimmed.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let rotated = stringValue(json, "sessionKey").trimmingCharacters(in: .whitespacesAndNewlines)
+        if isValidSessionToken(rotated) {
+            updateSessionKey(rotated)
+        }
+        guard json["nvramWlSsid"] != nil else { return nil }
+        return stringValue(json, "nvramWlSsid")
+    }
+
+    private func commitRadioReloadBestEffort() async {
+        do {
+            let resResp = try await postForm(
+                path: "/cgi-bin/luci/wlrestart.json",
+                rawPayload: "undefined&sessionKey=\(currentSessionKey)"
+            )
+            let resJson = try parseJsonOrThrow(
+                stepContext: "Khởi động lại driver Wi-Fi (wlrestart.json)",
+                statusCode: resResp.statusCode,
+                body: resResp.body
+            )
+            if maxWlRestartPolls > 0 && stringValue(resJson, "_wlrestart_", default: "0") != "0" {
+                for _ in 1...maxWlRestartPolls {
+                    if wlRestartPollIntervalMs > 0 {
+                        try await Task.sleep(nanoseconds: UInt64(wlRestartPollIntervalMs) * 1_000_000)
+                    }
+                    let pollResp = try await postForm(
+                        path: "/cgi-bin/luci/wlrestart.json",
+                        rawPayload: "undefined&sessionKey=\(currentSessionKey)"
+                    )
+                    let pollJson = try parseJsonOrThrow(
+                        stepContext: "Kiểm tra wlrestart.json",
+                        statusCode: pollResp.statusCode,
+                        body: pollResp.body
+                    )
+                    if stringValue(pollJson, "_wlrestart_", default: "0") == "0" {
+                        break
+                    }
+                }
+            }
+        } catch {
+            // NVRAM already confirmed saved via readConfiguredBandSsidFromNvram
+        }
+    }
+
+    /// Step 9: Upload and apply ONT firmware via 3-step LuCI CGI sequence (`updatefwsessioncheck.json` -> `imagesize.json` -> `uploadsoftware.conf`).
+    @discardableResult
+    public func updateFirmware(
+        firmwareURL: URL,
+        uploadTimeoutMs: Int = 180_000,
+        onProgressPercent: (@Sendable (Int) -> Void)? = nil
+    ) async throws -> [String: Any] {
+        let fileManager = FileManager.default
+        var isDir: ObjCBool = false
+        guard fileManager.fileExists(atPath: firmwareURL.path, isDirectory: &isDir), !isDir.boolValue else {
+            throw OntValidationError("File firmware không tồn tại: '\(firmwareURL.path)'")
+        }
+        let rawName = firmwareURL.lastPathComponent
+        guard OntInputValidator.isValidFirmwareExtension(rawName) else {
+            throw OntValidationError("Định dạng file firmware không hợp lệ (chỉ hỗ trợ .signed, .bin, .img): '\(rawName)'")
+        }
+        let attrs = try? fileManager.attributesOfItem(atPath: firmwareURL.path)
+        let fileSize = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+        guard (OntInputValidator.minFirmwareSizeBytes...OntInputValidator.maxFirmwareSizeBytes).contains(fileSize) else {
+            throw OntValidationError("Dung lượng file firmware không hợp lệ (\(fileSize) bytes): '\(rawName)'")
+        }
+
+        let safeFilename = OntInputValidator.sanitizeFirmwareFilename(rawName)
+        let refererUrl = "\(cleanBaseUrl)/update_software.html"
+
+        // 1. Check firmware update session
+        let encKey1 = OntInputValidator.urlEncodeFormValue(currentSessionKey)
+        let chkResp: HttpResponsePayload
+        do {
+            chkResp = try await postForm(
+                path: "/cgi-bin/luci/updatefwsessioncheck.json",
+                rawPayload: "sessionKey=\(encKey1)",
+                referer: refererUrl
+            )
+        } catch {
+            throw OntNetworkError("Lỗi mạng khi kiểm tra phiên nâng cấp firmware: \(error.localizedDescription)", cause: error)
+        }
+        let chkData = try parseJsonOrThrow(
+            stepContext: "Kiểm tra phiên nâng cấp firmware (updatefwsessioncheck.json)",
+            statusCode: chkResp.statusCode,
+            body: chkResp.body
+        )
+        let chkRotated = stringValue(chkData, "sessionKey").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !chkRotated.isEmpty && chkRotated != "0" {
+            updateSessionKey(chkRotated)
+        }
+        let chkStatus = stringValue(chkData, "status")
+        guard chkStatus == "OK" else {
+            throw OntDriverException("Phiên nâng cấp firmware không hợp lệ (status=\(chkStatus)).")
+        }
+
+        // 2. Query available RAM size (KB)
+        let encKey2 = OntInputValidator.urlEncodeFormValue(currentSessionKey)
+        let imgResp: HttpResponsePayload
+        do {
+            imgResp = try await postForm(
+                path: "/cgi-bin/luci/imagesize.json",
+                rawPayload: "sessionKey=\(encKey2)",
+                referer: refererUrl
+            )
+        } catch {
+            throw OntNetworkError("Lỗi mạng khi kiểm tra dung lượng RAM trống của ONT: \(error.localizedDescription)", cause: error)
+        }
+        let imgData = try parseJsonOrThrow(
+            stepContext: "Kiểm tra dung lượng RAM trống (imagesize.json)",
+            statusCode: imgResp.statusCode,
+            body: imgResp.body
+        )
+        let imgRotated = stringValue(imgData, "sessionKey").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !imgRotated.isEmpty && imgRotated != "0" {
+            updateSessionKey(imgRotated)
+        }
+        let ramFreeStr = stringValue(imgData, "ramFree").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let ramFreeKb = Int64(ramFreeStr) else {
+            throw OntDriverException("Không đọc được thông số ramFree hợp lệ từ ONT (ramFree='\(ramFreeStr)').")
+        }
+        let fileSizeKb = Double(fileSize) / 1024.0
+        if ramFreeKb <= 0 || fileSizeKb > Double(ramFreeKb) {
+            throw OntDriverException(
+                "Không đủ bộ nhớ RAM trống trên ONT (\(ramFreeKb) KB) để tải file firmware (\(Int64(fileSizeKb)) KB)."
+            )
+        }
+
+        // 3. Stream multipart firmware upload
+        guard let uploadURL = URL(string: "\(cleanBaseUrl)/cgi-bin/luci/uploadsoftware.conf") else {
+            throw OntValidationError("URL tải lên firmware không hợp lệ.")
+        }
+        let upResp: HttpResponsePayload
+        do {
+            upResp = try await session.uploadMultipartFile(
+                url: uploadURL,
+                headers: [
+                    "User-Agent": Self.userAgent,
+                    "Referer": refererUrl,
+                    "Accept": "application/json, text/javascript, */*; q=0.01"
+                ],
+                fileFieldName: "file",
+                fileURL: firmwareURL,
+                safeFileName: safeFilename,
+                formFields: [("sessionKey", currentSessionKey)],
+                timeoutOverrideMs: uploadTimeoutMs,
+                onProgressPercent: onProgressPercent
+            )
+        } catch {
+            if error is CancellationError {
+                throw error
+            }
+            if isTlsPinMismatch(error) {
+                throw OntDriverException(error.localizedDescription, underlyingError: error)
+            }
+            // [Red Team RT-05, RT-07] Clear session keys whenever 100% of multipart bytes flushed, REGARDLESS of isAppInBackground()!
+            let nsErr = error as NSError
+            let didFlushFullRequestBody = (nsErr.userInfo["didFlushFullRequestBody"] as? Bool) ?? false
+            if didFlushFullRequestBody && !isPreSendConnectFailure(error) {
+                clearAllSessionKeys()
+            }
+            throw OntNetworkError("Lỗi kết nối trong khi tải lên file firmware: \(error.localizedDescription)", cause: error)
+        }
+
+        let upData = try parseJsonOrThrow(
+            stepContext: "Tải lên file firmware (uploadsoftware.conf)",
+            statusCode: upResp.statusCode,
+            body: upResp.body
+        )
+        let upRotated = stringValue(upData, "sessionKey").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !upRotated.isEmpty && upRotated != "0" {
+            updateSessionKey(upRotated)
+        }
+        let upStatus = stringValue(upData, "status", default: "unknown")
+        guard upStatus == "valid" else {
+            throw OntDriverException("File firmware không hợp lệ hoặc sai chữ ký (status=\(upStatus)).")
+        }
+
+        // Clear session keys immediately so logout.cmd is NEVER sent while ONT writes flash & reboots
+        clearAllSessionKeys()
+        return upData
+    }
     private func isPreSendConnectFailure(_ error: Error) -> Bool {
         let nsErr = error as NSError
         if nsErr.domain == NSURLErrorDomain {
@@ -1019,107 +1448,13 @@ public final class OntMobileDriver: @unchecked Sendable {
         stateLock.unlock()
     }
 
-    private func applyFinalConnectedBandWithRetries(
-        unit: Int,
-        ssid: String,
-        password: String,
-        secMode: String,
-        settings: GlobalSettings,
-        recordKey: String,
-        bandLabel: String,
-        onRetryAttempt: (Int) -> Void
-    ) async throws -> WifiApplyOutcome {
-        var lastError: Error?
-
-        for attempt in 1...3 {
-            let attemptSessionKey = lastActiveSessionKey
-            let outcome: WifiApplyOutcome
-            do {
-                outcome = try await configureWifiBand(
-                    unit: unit,
-                    ssid: ssid,
-                    password: password,
-                    secMode: secMode,
-                    isConnectedBandFinalStep: true
-                )
-            } catch {
-                if error is CancellationError {
-                    throw error
-                }
-                if error is OntValidationError || (error is OntDriverException && !(error is OntNetworkError)) {
-                    throw error
-                }
-                lastError = error
-                let prevKey = lastActiveSessionKey.isEmpty ? attemptSessionKey : lastActiveSessionKey
-                if attempt < 3 {
-                    onRetryAttempt(attempt + 1)
-                    if recoveryRetryDelayMs > 0 {
-                        try await Task.sleep(nanoseconds: UInt64(recoveryRetryDelayMs) * 1_000_000)
-                    }
-                    let gatewayReady = try await ensureGatewayReadyBeforeStep7(
-                        settings: settings,
-                        recordKey: recordKey,
-                        previousSessionKey: prevKey,
-                        maxAttempts: 6,
-                        retryDelayMs: recoveryRetryDelayMs
-                    )
-                    if !gatewayReady && isPostFlushRadioDrop(error) {
-                        return WifiApplyOutcome(cfgSavedToNvram: false, droppedDuringRadioReload: true)
-                    }
-                    continue
-                }
-                if isPostFlushRadioDrop(error) {
-                    let stillOnOldWifi = try await ensureGatewayReadyBeforeStep7(
-                        settings: settings,
-                        recordKey: recordKey,
-                        previousSessionKey: prevKey,
-                        maxAttempts: 3,
-                        retryDelayMs: recoveryRetryDelayMs
-                    )
-                    if !stillOnOldWifi {
-                        return WifiApplyOutcome(cfgSavedToNvram: false, droppedDuringRadioReload: true)
-                    }
-                }
-                throw error
-            }
-
-            if outcome.cfgSavedToNvram {
-                return outcome
-            }
-            if outcome.droppedDuringRadioReload {
-                let prevKey = lastActiveSessionKey.isEmpty ? attemptSessionKey : lastActiveSessionKey
-                let stillOnOldWifi = try await ensureGatewayReadyBeforeStep7(
-                    settings: settings,
-                    recordKey: recordKey,
-                    previousSessionKey: prevKey,
-                    maxAttempts: 3,
-                    retryDelayMs: recoveryRetryDelayMs
-                )
-                if !stillOnOldWifi {
-                    return outcome
-                }
-                if attempt < 3 {
-                    onRetryAttempt(attempt + 1)
-                    continue
-                }
-                throw OntNetworkError(
-                    "Cả 3 lần thử Bước 7 đều ngắt kết nối trước khi ONT lưu '\(ssid)' vào NVRAM (sóng cũ vẫn còn phản hồi). Vui lòng đứng gần ONT và bấm Chạy Lại."
-                )
-            }
-        }
-
-        throw lastError ?? OntNetworkError(
-            "Không thể gửi cấu hình Bước 7 cho băng tần \(bandLabel) ('\(ssid)')."
-        )
-    }
-
-    /// Execute the 7-step wireless ONT configuration sequence.
+    /// Execute the automated Two-Connection Dual-Wi-Fi + Final Firmware Update workflow (8 or 9 steps).
     public func executeMobileSetup(
         record: SubscriberRecord,
         settings: GlobalSettings = GlobalSettings(),
         connectedBand: WifiBand = .band24GHz,
         localWifiIpv4: String? = nil,
-        onBandResolved: (@Sendable (WifiBand) -> Void)? = nil,
+        onBandResolved: (@Sendable (WifiBand, String?) -> Void)? = nil,
         onProgress: (@Sendable (StepProgress) -> Void)? = nil
     ) async throws -> MobileSetupResult {
         let preRunCheck = OntInputValidator.validateBeforeRun(record, settings: settings)
@@ -1127,35 +1462,75 @@ public final class OntMobileDriver: @unchecked Sendable {
             throw OntValidationError(preRunCheck.errors.joined(separator: "; "))
         }
 
+        let doFwUpdate = settings.enableFirmwareUpdate
+        let fwURL: URL?
+        if doFwUpdate {
+            let fwPath = settings.firmwareFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            let candidateURL = URL(fileURLWithPath: fwPath)
+            var isDir: ObjCBool = false
+            guard !fwPath.isEmpty,
+                  FileManager.default.fileExists(atPath: candidateURL.path, isDirectory: &isDir),
+                  !isDir.boolValue else {
+                throw OntValidationError("File firmware không tồn tại tại đường dẫn: '\(fwPath)'")
+            }
+            guard OntInputValidator.isValidFirmwareExtension(candidateURL.lastPathComponent) else {
+                throw OntValidationError("Định dạng file firmware không hợp lệ: '\(candidateURL.lastPathComponent)'")
+            }
+            let attrs = try? FileManager.default.attributesOfItem(atPath: candidateURL.path)
+            let fLen = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+            guard (OntInputValidator.minFirmwareSizeBytes...OntInputValidator.maxFirmwareSizeBytes).contains(fLen) else {
+                throw OntValidationError("Dung lượng file firmware không hợp lệ (\(fLen) bytes): '\(candidateURL.lastPathComponent)'")
+            }
+            fwURL = candidateURL
+        } else {
+            fwURL = nil
+        }
+
         let cleanSec = settings.wifiSecurityMode.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let secMode = WifiSecurityMode(rawValue: cleanSec) else {
             throw OntValidationError("Chế độ bảo mật Wi-Fi '\(settings.wifiSecurityMode)' không hợp lệ.")
         }
+        let totalSteps = doFwUpdate ? 9 : 8
         let wifi24Ssid = record.effectiveWifi24Ssid
         let wifi24Pass = record.effectiveWifi24Pass(secMode: secMode.rawValue)
         let wifi5Ssid = record.effectiveWifi5Ssid
         let wifi5Pass = record.effectiveWifi5Pass(secMode: secMode.rawValue)
         let recordKey = Self.recordCacheKey(rowIndex: record.rowIndex, soMay: record.slid)
 
-        func emit(_ step: Int, _ title: String, _ status: StepStatus, _ detail: String) {
-            onProgress?(StepProgress(stepNumber: step, totalSteps: 7, title: title, status: status, detail: detail))
+        @Sendable func emit(_ step: Int, _ title: String, _ status: StepStatus, _ detail: String) {
+            onProgress?(StepProgress(stepNumber: step, totalSteps: totalSteps, title: title, status: status, detail: detail))
         }
 
+        let initialInjectedPin = session.pinnedCertSha256
         await probePauseMutex?.lock()
+        defer { probePauseMutex?.unlock() }
+        defer {
+            session.resetPeerCertificateTracking()
+            logoutSession.resetPeerCertificateTracking()
+        }
         clearAllSessionKeys()
+        if let testPin = initialInjectedPin, !testPin.isEmpty {
+            session.pinnedCertSha256 = testPin
+            logoutSession.pinnedCertSha256 = testPin
+        }
 
         do {
-            let step1Title = "Bước 1/7: Kiểm tra kết nối & nhận diện ONT Gateway"
+            // Step 1: Probe Gateway & Pin Leaf X.509 SHA-256 Certificate
+            let step1Title = "Bước 1/\(totalSteps): Kiểm tra kết nối & nhận diện ONT Gateway"
             emit(1, step1Title, .running, "Đang kiểm tra \(cleanBaseUrl)...")
-            guard await probeGateway() else {
+            guard try await probeGatewayCheckingCertPin(failOnCertMismatch: false) else {
                 throw OntNetworkError(
                     "Không thể kết nối tới ONT GW040-NSv2 tại \(cleanBaseUrl) (không nhận diện được chữ ký iGate/GW040/VNPT)."
                 )
             }
+            if session.pinnedCertSha256 == nil, let observedSha = session.lastPeerCertSha256 {
+                session.pinnedCertSha256 = observedSha
+                logoutSession.pinnedCertSha256 = observedSha
+            }
             emit(1, step1Title, .success, "Đã xác nhận kết nối tới ONT GW040-NSv2")
 
             // Step 2: Smart Login & Change Admin Password
-            let step2Title = "Bước 2/7: Đăng nhập & Đổi mật khẩu Admin"
+            let step2Title = "Bước 2/\(totalSteps): Đăng nhập & Đổi mật khẩu Admin"
             emit(2, step2Title, .running, "Đang xác thực tài khoản admin...")
             _ = try await loginAndChangePassword(
                 defaultPass: settings.adminDefaultPass,
@@ -1166,21 +1541,18 @@ public final class OntMobileDriver: @unchecked Sendable {
             await onAdminPasswordChanged?(settings.adminNewPass)
             emit(2, step2Title, .success, "Đã xác thực và bảo mật tài khoản Admin")
 
-            // [Red Team RT-02] Resolve ground-truth connected Wi-Fi band immediately after Step 2
-            // (before Step 5 savelanv4cfg.cmd touches br-lan / dnsmasq)
-            let effectiveConnectedBand: WifiBand
+            // Step 2c: Unconditional ONT band & baseMacAddress ground-truth resolution
             let trimmedLocalIp = (localWifiIpv4 ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmedLocalIp.isEmpty {
-                let resolved = await resolveConnectedBandFromOnt(
-                    localIpv4: trimmedLocalIp,
-                    fallbackBand: connectedBand
-                )
-                onBandResolved?(resolved)
-                effectiveConnectedBand = resolved
-            } else {
-                effectiveConnectedBand = connectedBand
+            let (effectiveConnectedBand, resolvedOntBaseMac) = await resolveConnectedBandFromOnt(
+                localIpv4: trimmedLocalIp,
+                fallbackBand: connectedBand
+            )
+            if !trimmedLocalIp.isEmpty || resolvedOntBaseMac != nil {
+                onBandResolved?(effectiveConnectedBand, resolvedOntBaseMac)
             }
-            let step3Title = "Bước 3/7: Cấu hình WAN PPPoE (VLAN \(settings.vlanId))"
+
+            // Step 3: Idempotent WAN PPPoE VLAN 11
+            let step3Title = "Bước 3/\(totalSteps): Cấu hình WAN PPPoE (VLAN \(settings.vlanId))"
             emit(3, step3Title, .running, "Account: \(record.accountPppoe)")
             try await configureWanIdempotent(
                 vlanId: settings.vlanId,
@@ -1191,95 +1563,308 @@ public final class OntMobileDriver: @unchecked Sendable {
             emit(3, step3Title, .success, "Đã lưu WAN PPPoE (\(record.accountPppoe))")
 
             // Step 4: GPON SLID / Password
-            let step4Title = "Bước 4/7: Cài đặt GPON Password (SLID / Mã MEN)"
+            let step4Title = "Bước 4/\(totalSteps): Cài đặt GPON Password (SLID / Mã MEN)"
             emit(4, step4Title, .running, "SLID: \(record.slid)")
             try await setGponPassword(record.slid)
             emit(4, step4Title, .success, "Đã nạp SLID \(record.slid)")
 
             // Step 5: LAN IPv4
-            let step5Title = "Bước 5/7: Kiểm tra & Lưu cấu hình LAN IPv4"
+            let step5Title = "Bước 5/\(totalSteps): Kiểm tra & Lưu cấu hình LAN IPv4"
             emit(5, step5Title, .running, "Gateway IP: \(settings.lanIp)")
             try await configureLan(settings)
             emit(5, step5Title, .success, "Đã lưu cấu hình LAN \(settings.lanIp)")
 
-            // Dynamic Band Ordering: Non-connected band in Step 6, Connected band LAST in Step 7!
+            // Plan Connection 1 -> Connection 2 bands
             let isConnected24g = (effectiveConnectedBand == .band24GHz)
-            let step6Unit = isConnected24g ? 1 : 0
-            let step6BandLabel = isConnected24g ? "5GHz" : "2.4GHz"
-            let step6Ssid = isConnected24g ? wifi5Ssid : wifi24Ssid
-            let step6Pass = isConnected24g ? wifi5Pass : wifi24Pass
+            let secondaryBand: WifiBand = isConnected24g ? .band5GHz : .band24GHz
+            let secondaryUnit = isConnected24g ? 1 : 0
+            let secondaryBandLabel = isConnected24g ? "5GHz" : "2.4GHz"
+            let secondarySsid = isConnected24g ? wifi5Ssid : wifi24Ssid
+            let secondaryPass = isConnected24g ? wifi5Pass : wifi24Pass
 
-            let step7Unit = isConnected24g ? 0 : 1
-            let step7BandLabel = isConnected24g ? "2.4GHz" : "5GHz"
-            let step7Ssid = isConnected24g ? wifi24Ssid : wifi5Ssid
-            let step7Pass = isConnected24g ? wifi24Pass : wifi5Pass
+            let primaryUnit = isConnected24g ? 0 : 1
+            let primaryBandLabel = isConnected24g ? "2.4GHz" : "5GHz"
+            let primarySsid = isConnected24g ? wifi24Ssid : wifi5Ssid
+            let primaryPass = isConnected24g ? wifi24Pass : wifi5Pass
 
-            // Step 6: Non-connected Wi-Fi band + wlrestart.json + settlingDelayMs (200ms)
-            let step6Title = "Bước 6/7: Cấu hình Wi-Fi \(step6BandLabel) (Băng tần phụ)"
-            emit(6, step6Title, .running, "SSID: \(step6Ssid)")
+            // Step 6: Configure Secondary Wi-Fi Band & Cleanly Logout Connection 1
+            let step6Title = "Bước 6/\(totalSteps): Đổi tên & cấu hình Wi-Fi phụ \(secondaryBandLabel)"
+            emit(6, step6Title, .running, "SSID phụ: \(secondarySsid)")
             _ = try await configureWifiBand(
-                unit: step6Unit,
-                ssid: step6Ssid,
-                password: step6Pass,
+                unit: secondaryUnit,
+                ssid: secondarySsid,
+                password: secondaryPass,
                 secMode: secMode.rawValue,
                 isConnectedBandFinalStep: false
             )
             if settlingDelayMs > 0 {
                 try await Task.sleep(nanoseconds: UInt64(settlingDelayMs) * 1_000_000)
             }
-            emit(6, step6Title, .success, "Đã lưu & khởi động Wi-Fi \(step6BandLabel) (\(step6Ssid))")
+            let conn1SessionKey = lastActiveSessionKey.isEmpty ? currentSessionKey : lastActiveSessionKey
+            await logout()
+            if !conn1SessionKey.isEmpty {
+                stateLock.lock()
+                lastActiveSessionKeyStorage = conn1SessionKey
+                stateLock.unlock()
+            }
+            emit(6, step6Title, .success, "Đã lưu Wi-Fi phụ \(secondaryBandLabel) ('\(secondarySsid)') & đóng phiên Lần 1")
 
-            // Mandatory readiness & session sync gate before Step 7 Attempt 1 ([Red Team RT-01, RT-03, RT-05])
-            let gatewayReadyBeforeStep7 = try await ensureGatewayReadyBeforeStep7(
-                settings: settings,
-                recordKey: recordKey,
-                previousSessionKey: lastActiveSessionKey,
-                maxAttempts: 8,
-                retryDelayMs: recoveryRetryDelayMs
-            )
-            guard gatewayReadyBeforeStep7 else {
-                throw OntNetworkError(
-                    "Đã lưu cấu hình Bước 1-6 (kể cả Wi-Fi \(step6BandLabel) '\(step6Ssid)'), nhưng mất kết nối tới ONT trước khi thực hiện Bước 7 ('\(step7Ssid)'). Hãy kiểm tra lại kết nối Wi-Fi ONT rồi bấm Chạy Lại."
+            // Step 7: Wait for ONT Radio Startup & Switch to Secondary Wi-Fi (Connection 2)
+            let step7Title = "Bước 7/\(totalSteps): Đợi ONT phát sóng mới & Chuyển sang Wi-Fi \(secondaryBandLabel)"
+            guard let switchHandler = onSwitchToSecondaryWifi else {
+                throw OntDriverException(
+                    "Chưa cấu hình hàm chuyển sóng (onSwitchToSecondaryWifi) cho quy trình 2 lần kết nối trên iOS."
                 )
             }
-
-            // Step 7: Connected Wi-Fi band LAST + Ensure NVRAM save before disconnect
-            let step7Title = "Bước 7/7: Đổi tên & mật khẩu Wi-Fi \(step7BandLabel) (Bước cuối)"
-            emit(7, step7Title, .running, "SSID mới: \(step7Ssid) (Lưu NVRAM trước khi ngắt kết nối)")
-            let step7Outcome = try await applyFinalConnectedBandWithRetries(
-                unit: step7Unit,
-                ssid: step7Ssid,
-                password: step7Pass,
-                secMode: secMode.rawValue,
-                settings: settings,
-                recordKey: recordKey,
-                bandLabel: step7BandLabel,
-                onRetryAttempt: { nextAttempt in
-                    emit(
-                        7,
-                        step7Title,
-                        .running,
-                        "Đang đồng bộ lại kết nối ONT để áp dụng Bước 7 (lần \(nextAttempt)/3)..."
-                    )
-                }
+            emit(
+                7,
+                step7Title,
+                .running,
+                "Đang chờ ONT khởi động lại sóng '\(secondarySsid)' (\(secondaryBandLabel)) và kết nối sang sóng mới..."
             )
 
-            if !step7Outcome.droppedDuringRadioReload {
-                await Task.detached {
-                    await self.logout()
-                }.value
-            } else {
-                clearAllSessionKeys()
+            let handoverBudgetSec = Double(max(settings.wifiHandoverTimeoutMs, 50)) / 1000.0
+            let handoverDeadline = Date().addingTimeInterval(handoverBudgetSec)
+            var handoverVerified = false
+
+            while !handoverVerified {
+                try Task.checkCancellation()
+                let remainingHandoverMs = max(50, Int(handoverDeadline.timeIntervalSinceNow * 1000.0))
+                let candidateEn0Ip: String?
+                do {
+                    candidateEn0Ip = try await switchHandler(
+                        secondarySsid,
+                        secondaryPass,
+                        secondaryBand,
+                        secMode.rawValue,
+                        resolvedOntBaseMac,
+                        remainingHandoverMs
+                    ) { statusDetail in
+                        emit(7, step7Title, .running, statusDetail)
+                    }
+                } catch let ce as CancellationError {
+                    throw ce
+                } catch let de as OntDriverException {
+                    throw de
+                } catch {
+                    throw OntNetworkError(
+                        "Không thể chuyển kết nối sang Wi-Fi mới '\(secondarySsid)' (\(secondaryBandLabel)): \(error.localizedDescription)",
+                        cause: error
+                    )
+                }
+
+                do {
+                    let probeBudgetMs = max(settings.gatewayPostHandoverTimeoutMs, 50)
+                    let probeDeadline = Date().addingTimeInterval(Double(probeBudgetMs) / 1000.0)
+                    var reachableOnConn2 = false
+                    while Date() < probeDeadline {
+                        try Task.checkCancellation()
+                        if try await probeGatewayCheckingCertPin(failOnCertMismatch: true) {
+                            reachableOnConn2 = true
+                            break
+                        }
+                        let remProbeMs = max(10, Int(probeDeadline.timeIntervalSinceNow * 1000.0))
+                        let sleepProbeMs = min(max(recoveryRetryDelayMs, 15), remProbeMs)
+                        try await Task.sleep(nanoseconds: UInt64(sleepProbeMs) * 1_000_000)
+                    }
+                    if !reachableOnConn2 && !(try await probeGatewayCheckingCertPin(failOnCertMismatch: true)) {
+                        throw OntNetworkError(
+                            "Đã chuyển sang Wi-Fi '\(secondarySsid)' nhưng không truy cập được ONT Gateway tại \(cleanBaseUrl)."
+                        )
+                    }
+
+                    let userExistBudgetMs = settings.gatewayPostHandoverTimeoutMs >= 45_000
+                        ? 65_000
+                        : max(settings.gatewayPostHandoverTimeoutMs, userExistPollIntervalMs * 2)
+                    _ = try await authenticateSecondConnection(
+                        newAdminPass: settings.adminNewPass,
+                        previousSessionKey: conn1SessionKey,
+                        userExistWaitBudgetMs: userExistBudgetMs
+                    )
+
+                    try await verifySecondConnectionBandAndMac(
+                        localIpv4: candidateEn0Ip,
+                        expectedBand: secondaryBand,
+                        expectedOntBaseMac: resolvedOntBaseMac
+                    )
+                    handoverVerified = true
+                } catch let stillPrimary as StillOnPrimaryBandError {
+                    // Release session immediately so Band A never holds a "user exist" lock while KTV switches in iOS Settings
+                    await logout()
+                    if Date() < handoverDeadline {
+                        emit(
+                            7,
+                            step7Title,
+                            .running,
+                            "iPhone vẫn đang ở Wi-Fi cũ — hãy chọn '\(secondarySsid)' trong Cài đặt Wi-Fi iOS rồi quay lại ứng dụng..."
+                        )
+                        let retrySleepMs = min(max(recoveryRetryDelayMs, 25), max(15, Int(handoverDeadline.timeIntervalSinceNow * 1000.0)))
+                        try await Task.sleep(nanoseconds: UInt64(retrySleepMs) * 1_000_000)
+                        continue
+                    } else {
+                        throw OntDriverException(stillPrimary.message)
+                    }
+                } catch let netErr as OntNetworkError {
+                    if isTlsPinMismatch(netErr) {
+                        throw OntDriverException("Chứng chỉ TLS của ONT ở Lần kết nối 2 không khớp với Lần 1.", underlyingError: netErr)
+                    }
+                    await logout()
+                    if Date() < handoverDeadline {
+                        emit(
+                            7,
+                            step7Title,
+                            .running,
+                            "Đang chuyển mạng sang '\(secondarySsid)' (\(secondaryBandLabel)), tự động thử kết nối lại..."
+                        )
+                        let retrySleepMs = min(max(recoveryRetryDelayMs, 25), max(15, Int(handoverDeadline.timeIntervalSinceNow * 1000.0)))
+                        try await Task.sleep(nanoseconds: UInt64(retrySleepMs) * 1_000_000)
+                        continue
+                    } else {
+                        throw netErr
+                    }
+                }
             }
 
             emit(
                 7,
                 step7Title,
                 .success,
-                "Đã đổi Wi-Fi sang '\(wifi24Ssid)' / '\(wifi5Ssid)' thành công!"
+                "Đã đứng trên Wi-Fi '\(secondarySsid)' (\(secondaryBandLabel)) & xác thực ONT thành công"
             )
 
-            probePauseMutex?.unlock()
+            // Step 8: Configure Remaining Primary Wi-Fi Band (`Band A`) with Read-Only NVRAM Verification on Drop
+            let step8Title = "Bước 8/\(totalSteps): Đổi tên & cấu hình Wi-Fi còn lại \(primaryBandLabel)"
+            emit(
+                8,
+                step8Title,
+                .running,
+                "SSID mới: \(primarySsid) (cấu hình từ kết nối phụ \(secondaryBandLabel))"
+            )
+            do {
+                _ = try await configureWifiBand(
+                    unit: primaryUnit,
+                    ssid: primarySsid,
+                    password: primaryPass,
+                    secMode: secMode.rawValue,
+                    isConnectedBandFinalStep: false
+                )
+            } catch let netErr as OntNetworkError {
+                emit(
+                    8,
+                    step8Title,
+                    .running,
+                    "Đang đồng bộ lại kết nối '\(secondarySsid)' để kiểm tra NVRAM cho '\(primarySsid)'..."
+                )
+                let readyAfterDrop = try await ensureGatewayReadyOnSecondaryBand(
+                    settings: settings,
+                    timeoutBudgetMs: settings.postSecondWifiSettleTimeoutMs
+                )
+                guard readyAfterDrop else {
+                    throw OntNetworkError(
+                        "Mất kết nối tới ONT trên Wi-Fi '\(secondarySsid)' khi xác nhận cấu hình Wi-Fi \(primaryBandLabel) ('\(primarySsid)').",
+                        cause: netErr
+                    )
+                }
+                let savedNvramSsid = await readConfiguredBandSsidFromNvram(unit: primaryUnit)
+                if savedNvramSsid == primarySsid {
+                    await commitRadioReloadBestEffort()
+                } else {
+                    _ = try await configureWifiBand(
+                        unit: primaryUnit,
+                        ssid: primarySsid,
+                        password: primaryPass,
+                        secMode: secMode.rawValue,
+                        isConnectedBandFinalStep: false
+                    )
+                }
+            }
+            if settlingDelayMs > 0 {
+                try await Task.sleep(nanoseconds: UInt64(settlingDelayMs) * 1_000_000)
+            }
+            emit(
+                8,
+                step8Title,
+                .success,
+                "Đã hoàn tất cấu hình cả 2 băng tần Wi-Fi ('\(wifi24Ssid)' / '\(wifi5Ssid)')"
+            )
+
+            // Step 9 (if Firmware Update enabled) OR Clean Logout & Finish (8/8)
+            if doFwUpdate, let firmwareURL = fwURL {
+                let step9Title = "Bước 9/9: Tải lên & Cập nhật Firmware ONT (Bước cuối)"
+                let fwDisplayName = settings.firmwareFileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? firmwareURL.lastPathComponent
+                    : settings.firmwareFileName
+                emit(
+                    9,
+                    step9Title,
+                    .running,
+                    "Đang đồng bộ kết nối '\(secondarySsid)' trước khi tải lên Firmware..."
+                )
+                let readyForFirmware = try await ensureGatewayReadyOnSecondaryBand(
+                    settings: settings,
+                    timeoutBudgetMs: settings.postSecondWifiSettleTimeoutMs
+                )
+                guard readyForFirmware else {
+                    throw OntNetworkError(
+                        "Đã cấu hình xong cả 2 Wi-Fi ('\(wifi24Ssid)' / '\(wifi5Ssid)'), nhưng mất kết nối tới ONT trước khi nạp Firmware (Bước 9). Hãy kiểm tra kết nối Wi-Fi '\(secondarySsid)' rồi thử lại."
+                    )
+                }
+
+                let attrs = try? FileManager.default.attributesOfItem(atPath: firmwareURL.path)
+                let fileKb = ((attrs?[.size] as? NSNumber)?.int64Value ?? 0) / 1024
+                emit(9, step9Title, .running, "Đang tải lên \(fwDisplayName) (\(fileKb) KB)...")
+
+                do {
+                    _ = try await updateFirmware(
+                        firmwareURL: firmwareURL,
+                        uploadTimeoutMs: settings.firmwareUploadTimeoutMs,
+                        onProgressPercent: { pct in
+                            emit(9, step9Title, .running, "Đang tải lên \(fwDisplayName) (\(pct)% — \(fileKb) KB)...")
+                        }
+                    )
+                } catch let err as OntDriverException {
+                    let prefix = "Đã cấu hình xong cả 2 Wi-Fi ('\(wifi24Ssid)' / '\(wifi5Ssid)' — Bước 1-8), nhưng lỗi Cập nhật Firmware (Bước 9): \(err.localizedDescription)"
+                    if err is OntNetworkError {
+                        throw OntNetworkError(prefix, cause: err)
+                    } else if err is OntValidationError {
+                        throw OntValidationError(prefix)
+                    } else {
+                        throw OntDriverException(prefix, underlyingError: err)
+                    }
+                }
+
+                emit(
+                    9,
+                    step9Title,
+                    .success,
+                    "Đã nạp Firmware (\(fwDisplayName)) thành công! ONT đang tự ghi flash & khởi động lại (~2 phút 20 giây)."
+                )
+                return MobileSetupResult(
+                    success: true,
+                    soMay: record.slid,
+                    slid: record.slid,
+                    accountPppoe: record.accountPppoe,
+                    newSsid24g: wifi24Ssid,
+                    newPass24g: wifi24Pass,
+                    newSsid5g: wifi5Ssid,
+                    newPass5g: wifi5Pass,
+                    updatedAdminPass: settings.adminNewPass,
+                    message: "Hoàn tất 9/9 bước! Đã đổi cả 2 Wi-Fi (\(wifi24Ssid) / \(wifi5Ssid)) & nạp Firmware (\(fwDisplayName)). ONT đang tự khởi động lại (~2 phút 20 giây).",
+                    beaconVerified: true,
+                    firmwareUpdated: true,
+                    firmwareFileName: fwDisplayName,
+                    configuredSecondaryBandLabel: secondaryBandLabel,
+                    configuredSecondarySsid: secondarySsid,
+                    configuredSecondaryPass: secondaryPass,
+                    wifiSecurityMode: secMode.rawValue,
+                    resolvedConnectedBand: effectiveConnectedBand
+                )
+            }
+
+            await Task.detached {
+                await self.logout()
+            }.value
+
             return MobileSetupResult(
                 success: true,
                 soMay: record.slid,
@@ -1290,8 +1875,12 @@ public final class OntMobileDriver: @unchecked Sendable {
                 newSsid5g: wifi5Ssid,
                 newPass5g: wifi5Pass,
                 updatedAdminPass: settings.adminNewPass,
-                message: "Cấu hình hoàn tất 7/7 bước! Wi-Fi mới: \(wifi24Ssid) / \(wifi5Ssid)",
-                beaconVerified: step7Outcome.cfgSavedToNvram || step7Outcome.droppedDuringRadioReload,
+                message: "Cấu hình hoàn tất 8/8 bước! Đã đổi thành công cả 2 Wi-Fi: \(wifi24Ssid) / \(wifi5Ssid)",
+                beaconVerified: true,
+                firmwareUpdated: false,
+                configuredSecondaryBandLabel: secondaryBandLabel,
+                configuredSecondarySsid: secondarySsid,
+                configuredSecondaryPass: secondaryPass,
                 wifiSecurityMode: secMode.rawValue,
                 resolvedConnectedBand: effectiveConnectedBand
             )
@@ -1299,7 +1888,6 @@ public final class OntMobileDriver: @unchecked Sendable {
             await Task.detached {
                 await self.logout()
             }.value
-            probePauseMutex?.unlock()
             throw error
         }
     }

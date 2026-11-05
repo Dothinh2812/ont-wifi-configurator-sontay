@@ -22,7 +22,7 @@ public final class AppDatabase: @unchecked Sendable {
             try? fileManager.createDirectory(
                 at: dirURL,
                 withIntermediateDirectories: true,
-                attributes: [.protectionKey: FileProtectionType.complete]
+                attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
             )
             var dirValues = URLResourceValues()
             dirValues.isExcludedFromBackup = true
@@ -50,8 +50,13 @@ public final class AppDatabase: @unchecked Sendable {
             fileValues.isExcludedFromBackup = true
             var mutableURL = databaseURL
             try? mutableURL.setResourceValues(fileValues)
+            let parentDirPath = databaseURL.deletingLastPathComponent().path
             try? FileManager.default.setAttributes(
-                [.protectionKey: FileProtectionType.complete],
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: parentDirPath
+            )
+            try? FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
                 ofItemAtPath: databaseURL.path
             )
 

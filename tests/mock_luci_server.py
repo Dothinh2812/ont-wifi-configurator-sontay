@@ -211,21 +211,30 @@ class MockLuCIHandler(BaseHTTPRequestHandler):
         # 8. WiFi Config
         if "/cgi-bin/luci/wirelesscfg.json" in self.path:
             unit = post_data.get("wl_unit", "0")
-            ssid = post_data.get("wl_ssid", "")
-            sec_mode = post_data.get("sec_mode", "wpa2_wpa3_psk")
-            if server.simulate_conflict_mesh:
-                self._send_json({"status": "conflict_mesh"})
-                server.request_history.append(("wirelesscfg.json", post_data))
-                return
-            server.wifi_configs[unit] = {
-                "ssid": ssid,
-                "pass": post_data.get("wl_wpa_psk", ""),
-                "sec_mode": sec_mode,
-                "wl_akm_psk": post_data.get("wl_akm_psk", ""),
-                "wl_akm_psk2": post_data.get("wl_akm_psk2", ""),
-                "wl_crypto": post_data.get("wl_crypto", ""),
-            }
-            self._send_json({"status": "OK"})
+            if post_data.get("action") == "Apply":
+                ssid = post_data.get("wl_ssid", "")
+                sec_mode = post_data.get("sec_mode", "wpa2_wpa3_psk")
+                if server.simulate_conflict_mesh:
+                    self._send_json({"status": "conflict_mesh"})
+                    server.request_history.append(("wirelesscfg.json", post_data))
+                    return
+                server.wifi_configs[unit] = {
+                    "ssid": ssid,
+                    "pass": post_data.get("wl_wpa_psk", ""),
+                    "sec_mode": sec_mode,
+                    "wl_akm_psk": post_data.get("wl_akm_psk", ""),
+                    "wl_akm_psk2": post_data.get("wl_akm_psk2", ""),
+                    "wl_crypto": post_data.get("wl_crypto", ""),
+                }
+                self._send_json({"status": "OK"})
+            else:
+                saved = server.wifi_configs.get(unit, {})
+                self._send_json({
+                    "status": "OK",
+                    "nvramWlSsid": saved.get("ssid", ""),
+                    "nvramWlWpaPsk": saved.get("pass", ""),
+                    "sessionKey": server.active_session,
+                })
             server.request_history.append(("wirelesscfg.json", post_data))
             return
 

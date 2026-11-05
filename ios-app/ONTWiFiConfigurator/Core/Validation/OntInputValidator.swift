@@ -27,6 +27,44 @@ public enum OntInputValidator {
         "&", "|", ";", "$", ">", "<", "`", "\\", "!", "'", "\""
     ]
 
+    public static let minFirmwareSizeBytes: Int64 = 64 * 1024
+    public static let maxFirmwareSizeBytes: Int64 = 64 * 1024 * 1024
+
+    private static let safeFirmwareFilenameChars = CharacterSet(
+        charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-"
+    )
+
+    public static func isValidFirmwareExtension(_ fileName: String) -> Bool {
+        let clean = fileName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !clean.isEmpty else { return false }
+        return clean.hasSuffix(".signed") ||
+            clean.contains(".signed.") ||
+            clean.hasSuffix(".bin") ||
+            clean.hasSuffix(".img")
+    }
+
+    public static func sanitizeFirmwareFilename(_ rawName: String) -> String {
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let afterSlash = trimmed.components(separatedBy: "/").last ?? trimmed
+        let baseComponent = afterSlash.components(separatedBy: "\\").last ?? afterSlash
+        var sanitized = ""
+        var lastWasUnderscore = false
+        for scalar in baseComponent.unicodeScalars {
+            if safeFirmwareFilenameChars.contains(scalar) {
+                sanitized.append(Character(scalar))
+                lastWasUnderscore = (scalar == "_")
+            } else if !lastWasUnderscore {
+                sanitized.append("_")
+                lastWasUnderscore = true
+            }
+        }
+        let cleaned = sanitized.trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+        if cleaned.isEmpty || cleaned.allSatisfy({ $0 == "." || $0 == "_" }) {
+            return "firmware.signed"
+        }
+        return cleaned
+    }
+
     private static let slidAllowedChars = CharacterSet(
         charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-."
     )
@@ -317,6 +355,22 @@ public enum OntInputValidator {
         }
         errors.append(contentsOf: validateAdminPassword(settings.adminNewPass))
 
+        if settings.enableFirmwareUpdate {
+            let fwPath = settings.firmwareFilePath.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawFwName = settings.firmwareFileName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let fwName = rawFwName.isEmpty
+                ? (fwPath.components(separatedBy: "/").last ?? "")
+                : rawFwName
+            let fwSize = settings.firmwareFileSize
+            if fwPath.isEmpty || fwName.isEmpty {
+                errors.append("Chưa chọn file Firmware (.signed / .bin / .img) để cập nhật")
+            } else if !isValidFirmwareExtension(fwName) {
+                errors.append("Định dạng file Firmware '\(fwName)' không hợp lệ (chỉ hỗ trợ .signed, .bin, .img)")
+            } else if !(minFirmwareSizeBytes...maxFirmwareSizeBytes).contains(fwSize) {
+                errors.append("Dung lượng file Firmware '\(fwName)' không hợp lệ (\(fwSize / 1024) KB — yêu cầu từ 64 KB đến 64 MB)")
+            }
+        }
+
         return ValidationResult(
             isValid: errors.isEmpty,
             errors: errors,
@@ -325,12 +379,14 @@ public enum OntInputValidator {
         )
     }
 
-    /// Mask sensitive passwords, SLID data, and session tokens before logging or exporting.
+    /// Mask sensitive passwords, SLID data, NVRAM Wi-Fi PSKs, and session tokens before logging or exporting.
     public static func maskSensitiveCredentials(_ text: String) -> String {
         var masked = text
         let queryKeys = [
             "pppPassword", "pass", "newPass", "oldPass",
-            "wl_wpa_psk", "password", "sessionKey", "data"
+            "wl_wpa_psk", "nvramWlWpaPsk", "nvramWlRadiusKey",
+            "nvramWlKey1", "nvramWlKey2", "nvramWlKey3", "nvramWlKey4", "nvramWlKey",
+            "password", "sessionKey", "data"
         ]
         for key in queryKeys {
             if let regex = try? NSRegularExpression(
@@ -345,16 +401,28 @@ public enum OntInputValidator {
                     withTemplate: "$1***"
                 )
             }
-            if let jsonRegex = try? NSRegularExpression(
-                pattern: "(\"\(key)\"\\s*:\\s*\")([^\"]*)(\")",
+            if let jsonQuotedRegex = try? NSRegularExpression(
+                pattern: "([\"']\(key)[\"']\\s*:\\s*[\"'])([^\"'\\u007f]+)",
                 options: [.caseInsensitive]
             ) {
                 let range = NSRange(masked.startIndex..<masked.endIndex, in: masked)
-                masked = jsonRegex.stringByReplacingMatches(
+                masked = jsonQuotedRegex.stringByReplacingMatches(
                     in: masked,
                     options: [],
                     range: range,
-                    withTemplate: "$1***$3"
+                    withTemplate: "$1***"
+                )
+            }
+            if let jsonUnquotedRegex = try? NSRegularExpression(
+                pattern: "([\"']?\(key)[\"']?\\s*[:=]\\s*[\"']?)([^\"'\\s,&}\\]\\u007f]+)",
+                options: [.caseInsensitive]
+            ) {
+                let range = NSRange(masked.startIndex..<masked.endIndex, in: masked)
+                masked = jsonUnquotedRegex.stringByReplacingMatches(
+                    in: masked,
+                    options: [],
+                    range: range,
+                    withTemplate: "$1***"
                 )
             }
         }

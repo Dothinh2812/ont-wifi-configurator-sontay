@@ -103,7 +103,7 @@ def test_phase2_ont_mobile_driver_7step_protocol_contracts():
     assert "/cgi-bin/luci/wirelesscfg.json" in driver_swift
     assert "/cgi-bin/luci/wlrestart.json" in driver_swift
     assert "/cgi-bin/luci/logout.cmd" in driver_swift
-    assert "ensureGatewayReadyBeforeStep7" in driver_swift
+    assert "ensureGatewayReadyOnSecondaryBand" in driver_swift
     assert "Task.detached" in driver_swift
     assert "recordPasswordCache" in driver_swift
     assert "recordCacheKey(rowIndex: record.rowIndex, soMay: record.slid)" in driver_swift
@@ -247,8 +247,8 @@ def test_phase5_wifi_security_mode_cross_platform_parity():
     assert "Chuẩn bảo mật Wi-Fi" in huong_dan
 
 
-def test_phase6_mobile_wifi_keepalive_band_ground_truth_and_save_before_disconnect_parity():
-    """Verify single-connection keep-alive, server-side 2D wirelessInfoList band resolution, and Step 7 save-before-disconnect across Android & iOS."""
+def test_phase6_two_connection_dual_wifi_handover_and_final_firmware_cross_platform_parity():
+    """Verify 2-connection Dual-Wi-Fi handover + final-step Firmware Update parity across Android, iOS, mock server, XCTests, and docs."""
     android_driver = (
         ROOT_DIR
         / "android-app"
@@ -262,6 +262,20 @@ def test_phase6_mobile_wifi_keepalive_band_ground_truth_and_save_before_disconne
         / "core"
         / "driver"
         / "OntMobileDriver.kt"
+    ).read_text(encoding="utf-8")
+    android_ssl = (
+        ROOT_DIR
+        / "android-app"
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "vn"
+        / "vnpt"
+        / "ontconfig"
+        / "core"
+        / "driver"
+        / "UnsafeSslClient.kt"
     ).read_text(encoding="utf-8")
     android_wifi = (
         ROOT_DIR
@@ -291,31 +305,57 @@ def test_phase6_mobile_wifi_keepalive_band_ground_truth_and_save_before_disconne
         / "MainViewModel.kt"
     ).read_text(encoding="utf-8")
     ios_driver = (IOS_APP_DIR / "Core" / "Driver" / "OntMobileDriver.swift").read_text(encoding="utf-8")
+    ios_ssl = (IOS_APP_DIR / "Core" / "Driver" / "UnsafeSslSession.swift").read_text(encoding="utf-8")
+    ios_wifi = (IOS_APP_DIR / "Core" / "Wifi" / "IosWifiMonitor.swift").read_text(encoding="utf-8")
     ios_vm = (IOS_APP_DIR / "UI" / "MainViewModel.swift").read_text(encoding="utf-8")
     ios_tests = (IOS_TESTS_DIR / "OntMobileDriverTests.swift").read_text(encoding="utf-8")
+    ios_val_tests = (IOS_TESTS_DIR / "ExcelAndValidatorTests.swift").read_text(encoding="utf-8")
 
-    # Clean cutover: Band-Hopping symbols completely removed from Android
+    # 1. Clean cutover: zero legacy manual Wi-Fi / single-connection bounce symbols on BOTH platforms
     for removed_symbol in [
+        "manualWifiStepPending",
+        "executeManualConnectedWifiOnly",
+        "verifyNewSsidBroadcast",
+        "onVerifyNewSsid",
+        "alreadyConfiguredOppositeBand",
+        "ensureGatewayReadyBeforeStep7",
+        "reloginAfterRadioBounce",
+        "applyFinalConnectedBandWithRetries",
+        "runManualConnectedWifiStep",
+        "manualWifiError",
         "onSwitchToConfiguredWifi",
         "switchToSecondaryWifiAndAuthenticate",
         "switchToConfiguredOntWifi",
         "isSystemConnectedToTargetWifi",
         "hasSwitchedToSecondaryBand",
     ]:
-        assert removed_symbol not in android_driver, f"Dead band-hopping symbol {removed_symbol} still in OntMobileDriver.kt"
-        assert removed_symbol not in android_wifi, f"Dead band-hopping symbol {removed_symbol} still in OntWifiConnector.kt"
-        assert removed_symbol not in android_vm, f"Dead band-hopping symbol {removed_symbol} still in MainViewModel.kt"
+        assert removed_symbol not in android_driver, f"Obsolete symbol {removed_symbol} still in OntMobileDriver.kt"
+        assert removed_symbol not in android_wifi, f"Obsolete symbol {removed_symbol} still in OntWifiConnector.kt"
+        assert removed_symbol not in android_vm, f"Obsolete symbol {removed_symbol} still in MainViewModel.kt"
+        assert removed_symbol not in ios_driver, f"Obsolete symbol {removed_symbol} still in OntMobileDriver.swift"
+        assert removed_symbol not in ios_vm, f"Obsolete symbol {removed_symbol} still in MainViewModel.swift"
 
-    # Shared keep-alive, server-side band resolution, and session recovery contracts on BOTH platforms
+    # 2. Shared 2-connection + final firmware + RT-01..RT-05 contracts on BOTH platforms
     for shared_token in [
         "resolveConnectedBandFromOnt",
-        "reloginAfterRadioBounce",
+        "authenticateSecondConnection",
+        "ensureGatewayReadyOnSecondaryBand",
+        "verifySecondConnectionBandAndMac",
+        "readConfiguredBandSsidFromNvram",
+        "onSwitchToSecondaryWifi",
+        "wlRestartPollIntervalMs",
+        "maxWlRestartPolls",
+        "userExistPollIntervalMs",
         "recoveryRetryDelayMs",
         "lastActiveSessionKey",
         "/cgi-bin/luci/dhcpclient.json",
         "/cgi-bin/luci/deviceinfo2.json",
+        "/cgi-bin/luci/updatefwsessioncheck.json",
+        "/cgi-bin/luci/imagesize.json",
+        "/cgi-bin/luci/uploadsoftware.conf",
         "wlAssociatedDevice",
         "wirelessInfoList",
+        "nvramWlSsid",
         "fail authen",
         "localWifiIpv4",
         "onBandResolved",
@@ -323,28 +363,84 @@ def test_phase6_mobile_wifi_keepalive_band_ground_truth_and_save_before_disconne
         assert shared_token in android_driver, f"Missing {shared_token} in OntMobileDriver.kt"
         assert shared_token in ios_driver, f"Missing {shared_token} in OntMobileDriver.swift"
 
-    # iOS specific RT-03, RT-04, RT-07, RT-08 invariants
+    assert "pinnedCertSha256" in android_ssl and "pinnedCertSha256" in ios_ssl
+    assert "switchToConfiguredSecondaryWifi" in android_wifi
+    assert "validateHandoverSecurityCapability" in android_wifi
+    assert "tryJoinWifiIfEntitled" in ios_wifi and "joinOnce" in ios_wifi
+    assert "defaultEightStepsDualWifi" in android_vm and "defaultEightStepsDualWifi" in ios_vm
+    assert "defaultNineStepsWithFirmware" in android_vm and "defaultNineStepsWithFirmware" in ios_vm
+
+    # 3. iOS specific RT-05, RT-07, RT-08, RT-10 invariants
+    assert "defer { probePauseMutex?.unlock() }" in ios_driver
+    assert "IosWifiMonitor" not in ios_driver, "OntMobileDriver.swift must never call IosWifiMonitor directly"
     assert "NSURLErrorSecureConnectionFailed" not in ios_driver
-    assert "settlingDelayMs >= 500" not in ios_driver
+    assert "settlingDelayMs >= 500" not in ios_driver and "settlingDelayMs >= 100" not in ios_driver
+    assert "settlingDelayMs >= 500" not in android_driver and "settlingDelayMs >= 100" not in android_driver
     assert "settlingDelayMs: 200" in ios_vm
     assert "isOnOntSubnet" in ios_vm
     assert "suppressProbeAfterCompletion" in ios_vm
-    assert "localWifiIpv4" in ios_vm and "onBandResolved" in ios_vm
+    assert "completeFileProtectionUntilFirstUserAuthentication" in ios_vm
+    assert ".completeFileProtection]" not in ios_vm
 
-    # XCTest @Sendable-safe capture & coverage
+    db_swift = (IOS_APP_DIR / "Data" / "Local" / "AppDatabase.swift").read_text(encoding="utf-8")
+    assert "completeUntilFirstUserAuthentication" in db_swift
+    assert "FileProtectionType.complete]" not in db_swift
+
+    yml_text = (IOS_DIR / "project.yml").read_text(encoding="utf-8")
+    pbx_text = (IOS_DIR / "ONTWiFiConfigurator.xcodeproj" / "project.pbxproj").read_text(encoding="utf-8")
+    assert "NetworkExtension.framework" in yml_text and "NetworkExtension" in pbx_text
+    assert "CODE_SIGN_ENTITLEMENTS" not in yml_text and "CODE_SIGN_ENTITLEMENTS" not in pbx_text
+    assert not list(IOS_DIR.rglob("*.entitlements")), "Paid .entitlements must never be added to unsigned Sideloadly .ipa"
+
+    # 4. Live MockLuCIServer read-only NVRAM wirelesscfg.json behavioral check + XCTest coverage
+    import json
+    import urllib.request
+    from tests.mock_luci_server import run_mock_server
+
+    srv, _thread, base_url = run_mock_server()
+    try:
+        apply_req = urllib.request.Request(
+            f"{base_url}/cgi-bin/luci/wirelesscfg.json",
+            data=b"page=ssid.asp&action=Apply&wl_unit=1&wl_ssid=VNPT_5G_Test&wl_wpa_psk=12345678&sec_mode=wpa2_wpa3_psk",
+            method="POST",
+        )
+        with urllib.request.urlopen(apply_req, timeout=3) as resp:
+            assert json.loads(resp.read().decode("utf-8"))["status"] == "OK"
+
+        read_req = urllib.request.Request(
+            f"{base_url}/cgi-bin/luci/wirelesscfg.json",
+            data=b"page=ssid.asp&wl_unit=1&wl_bssid=0&sessionKey=sess1",
+            method="POST",
+        )
+        with urllib.request.urlopen(read_req, timeout=3) as resp:
+            read_json = json.loads(resp.read().decode("utf-8"))
+            assert read_json.get("nvramWlSsid") == "VNPT_5G_Test"
+            assert srv.wifi_configs["1"]["ssid"] == "VNPT_5G_Test", "Read-only query must NOT clobber saved SSID"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
     assert "TestLockedBox" in ios_tests
+    assert "rawData: Data" in ios_tests
     for xctest_name in [
         "testResolveConnectedBandFromOntParses2DWirelessInfoListAndOverridesMisdetectedBand",
-        "testEnsureGatewayReadyBeforeStep7RecoversFromFailAuthenAndUserExistWithoutDoubleLogin",
-        "testStep7Attempt3ThrowsNetworkErrorInsteadOfFalseSuccessWhenOldGatewayRemainsOnline",
+        "testNineStepDualWifiAndStreamedBinaryFirmwareUploadFlow",
+        "testStep7RejectsPrematureSecondConnectionWhileStillOnPrimaryBandWl0AndRejectsMismatchedBaseMac",
+        "testUpdateFirmwarePostFlushDropWhileAppInBackgroundClearsSessionWithoutSendingLogoutCmd",
     ]:
         assert xctest_name in ios_tests, f"Missing {xctest_name} in OntMobileDriverTests.swift"
+    assert "testGlobalSettingsFirmwareTimeoutCodableAndNvramCredentialMasking" in ios_val_tests
 
-    # Field documentation reflects single-connection keep-alive & save-before-disconnect (no stale Band-Hopping prose)
+    # 5. Field documentation reflects 2-connection Dual-Wi-Fi + Final Firmware Update on both Android & iOS
     readme = (ROOT_DIR / "README.md").read_text(encoding="utf-8")
     huong_dan = (ROOT_DIR / "HUONG_DAN_SU_DUNG_TOOL_ONT.md").read_text(encoding="utf-8")
-    for stale_doc_phrase in ["Band-Hopping", "tên Wi-Fi phụ vừa đổi"]:
-        assert stale_doc_phrase not in readme, f"Stale phrase '{stale_doc_phrase}' still in README.md"
-        assert stale_doc_phrase not in huong_dan, f"Stale phrase '{stale_doc_phrase}' still in HUONG_DAN_SU_DUNG_TOOL_ONT.md"
-    assert "dhcpclient.json" in readme and "deviceinfo2.json" in readme
-    assert "dhcpclient.json" in huong_dan and "deviceinfo2.json" in huong_dan
+    for required_doc_phrase in ["2 lần kết nối", "Bước 9/9", "dhcpclient.json", "deviceinfo2.json"]:
+        assert required_doc_phrase in readme, f"Missing '{required_doc_phrase}' in README.md"
+        assert required_doc_phrase in huong_dan, f"Missing '{required_doc_phrase}' in HUONG_DAN_SU_DUNG_TOOL_ONT.md"
+    for stale_doc_phrase in [
+        "ensureGatewayReadyBeforeStep7",
+        "Đổi nốt Wi-Fi chính",
+        "thủ công sau khi ONT reboot",
+    ]:
+        assert stale_doc_phrase not in readme, f"Stale manual-step phrase '{stale_doc_phrase}' still in README.md"
+        assert stale_doc_phrase not in huong_dan, f"Stale manual-step phrase '{stale_doc_phrase}' still in HUONG_DAN_SU_DUNG_TOOL_ONT.md"

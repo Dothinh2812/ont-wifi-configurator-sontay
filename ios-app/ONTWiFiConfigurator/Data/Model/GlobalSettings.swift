@@ -80,6 +80,14 @@ public struct GlobalSettings: Codable, Equatable, Sendable {
     public var brName: String
     public var requestTimeoutMs: Int
     public var wifiSecurityMode: String
+    public var enableFirmwareUpdate: Bool
+    public var firmwareFilePath: String
+    public var firmwareFileName: String
+    public var firmwareFileSize: Int64
+    public var wifiHandoverTimeoutMs: Int
+    public var gatewayPostHandoverTimeoutMs: Int
+    public var postSecondWifiSettleTimeoutMs: Int
+    public var firmwareUploadTimeoutMs: Int
 
     enum CodingKeys: String, CodingKey {
         case baseUrl
@@ -97,6 +105,14 @@ public struct GlobalSettings: Codable, Equatable, Sendable {
         case brName
         case requestTimeoutMs
         case wifiSecurityMode
+        case enableFirmwareUpdate
+        case firmwareFilePath
+        case firmwareFileName
+        case firmwareFileSize
+        case wifiHandoverTimeoutMs
+        case gatewayPostHandoverTimeoutMs
+        case postSecondWifiSettleTimeoutMs
+        case firmwareUploadTimeoutMs
     }
 
     public init(
@@ -114,7 +130,15 @@ public struct GlobalSettings: Codable, Equatable, Sendable {
         dhcpLease: Int = 1440,
         brName: String = "br-lan",
         requestTimeoutMs: Int = 5000,
-        wifiSecurityMode: String = WifiSecurityMode.wpa2Wpa3Psk.rawValue
+        wifiSecurityMode: String = WifiSecurityMode.wpa2Wpa3Psk.rawValue,
+        enableFirmwareUpdate: Bool = false,
+        firmwareFilePath: String = "",
+        firmwareFileName: String = "",
+        firmwareFileSize: Int64 = 0,
+        wifiHandoverTimeoutMs: Int = 180_000,
+        gatewayPostHandoverTimeoutMs: Int = 45_000,
+        postSecondWifiSettleTimeoutMs: Int = 60_000,
+        firmwareUploadTimeoutMs: Int = 180_000
     ) {
         self.baseUrl = baseUrl
         self.adminDefaultPass = adminDefaultPass
@@ -131,6 +155,14 @@ public struct GlobalSettings: Codable, Equatable, Sendable {
         self.brName = brName
         self.requestTimeoutMs = requestTimeoutMs
         self.wifiSecurityMode = wifiSecurityMode
+        self.enableFirmwareUpdate = enableFirmwareUpdate
+        self.firmwareFilePath = firmwareFilePath
+        self.firmwareFileName = firmwareFileName
+        self.firmwareFileSize = firmwareFileSize
+        self.wifiHandoverTimeoutMs = wifiHandoverTimeoutMs
+        self.gatewayPostHandoverTimeoutMs = gatewayPostHandoverTimeoutMs
+        self.postSecondWifiSettleTimeoutMs = postSecondWifiSettleTimeoutMs
+        self.firmwareUploadTimeoutMs = firmwareUploadTimeoutMs
     }
 
     public init(from decoder: Decoder) throws {
@@ -150,5 +182,13 @@ public struct GlobalSettings: Codable, Equatable, Sendable {
         self.brName = try container.decodeIfPresent(String.self, forKey: .brName) ?? "br-lan"
         self.requestTimeoutMs = try container.decodeIfPresent(Int.self, forKey: .requestTimeoutMs) ?? 5000
         self.wifiSecurityMode = try container.decodeIfPresent(String.self, forKey: .wifiSecurityMode) ?? WifiSecurityMode.wpa2Wpa3Psk.rawValue
+        self.enableFirmwareUpdate = try container.decodeIfPresent(Bool.self, forKey: .enableFirmwareUpdate) ?? false
+        self.firmwareFilePath = try container.decodeIfPresent(String.self, forKey: .firmwareFilePath) ?? ""
+        self.firmwareFileName = try container.decodeIfPresent(String.self, forKey: .firmwareFileName) ?? ""
+        self.firmwareFileSize = try container.decodeIfPresent(Int64.self, forKey: .firmwareFileSize) ?? 0
+        self.wifiHandoverTimeoutMs = try container.decodeIfPresent(Int.self, forKey: .wifiHandoverTimeoutMs) ?? 180_000
+        self.gatewayPostHandoverTimeoutMs = try container.decodeIfPresent(Int.self, forKey: .gatewayPostHandoverTimeoutMs) ?? 45_000
+        self.postSecondWifiSettleTimeoutMs = try container.decodeIfPresent(Int.self, forKey: .postSecondWifiSettleTimeoutMs) ?? 60_000
+        self.firmwareUploadTimeoutMs = try container.decodeIfPresent(Int.self, forKey: .firmwareUploadTimeoutMs) ?? 180_000
     }
 }

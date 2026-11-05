@@ -84,6 +84,8 @@ fun ConfigReviewScreen(
     statusMessage: String? = null,
     isRunningSetup: Boolean = false,
     isImportingFirmware: Boolean = false,
+    is5GHzSupported: Boolean = true,
+    securityCapabilityWarning: String? = null,
     onOpenWifiScanner: () -> Unit,
     onPickFirmwareFile: () -> Unit = {},
     onAutoSyncWifi5gChange: (Boolean) -> Unit,
@@ -187,7 +189,7 @@ fun ConfigReviewScreen(
 
                         Button(
                             onClick = onRunConfiguration,
-                            enabled = validation.isValid && !isRunningSetup && !isImportingFirmware,
+                            enabled = validation.isValid && securityCapabilityWarning.isNullOrBlank() && !isRunningSetup && !isImportingFirmware,
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Color(0xFF1B5E20),
                                 disabledContainerColor = MaterialTheme.colorScheme.surfaceVariant
@@ -542,7 +544,7 @@ fun ConfigReviewScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "3. Tham Số Wi-Fi 2.4G & 5G (Đổi sóng ở bước cuối)",
+                        text = "3. Tham Số Wi-Fi 2.4G & 5G (Cấu hình tự động cả 2 băng tần)",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary
@@ -756,7 +758,40 @@ fun ConfigReviewScreen(
                 }
             }
 
-            // Section 4: Firmware Update Before Final Connected Wi-Fi Step
+            if (!securityCapabilityWarning.isNullOrBlank()) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.6f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "⚠️ $securityCapabilityWarning",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(10.dp)
+                    )
+                }
+            }
+
+            if (!is5GHzSupported) {
+                Surface(
+                    color = Color(0xFFE3F2FD),
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, Color(0xFF64B5F6)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = "ℹ️ Máy chỉ hỗ trợ phần cứng Wi-Fi 2.4GHz: Ứng dụng vẫn cấu hình đủ cả 2 băng tần (2.4GHz & 5GHz) và sẽ tự động kết nối lại qua sóng 2.4GHz mới ở Lần 2.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF0D47A1),
+                        modifier = Modifier.padding(10.dp)
+                    )
+                }
+            }
+
+            // Section 4: Final Firmware Update After Dual-Wi-Fi Two-Connection Handover
             Card(
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
@@ -775,7 +810,7 @@ fun ConfigReviewScreen(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "4. Cập Nhật Firmware ONT (Trước bước đổi Wi-Fi chính)",
+                            text = "4. Cập Nhật Firmware ONT (Bước cuối sau khi đổi xong cả 2 Wi-Fi)",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.primary
@@ -788,7 +823,7 @@ fun ConfigReviewScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Nâng cấp Firmware trước bước đổi Wi-Fi kết nối chính",
+                            text = "Tự động đổ Firmware mới ở bước cuối (Bước 9/9)",
                             style = MaterialTheme.typography.bodySmall,
                             fontWeight = FontWeight.Medium,
                             modifier = Modifier.weight(1f)
@@ -865,13 +900,15 @@ fun ConfigReviewScreen(
                         )
                     }
 
-                    if (settings.enableFirmwareUpdate) {
-                        Text(
-                            text = "ℹ️ Khi bật: App sẽ đổ Bước 1–6 (WAN, SLID, LAN, Wi-Fi băng tần phụ), sau đó tải lên & cập nhật Firmware ở Bước 7. Bước đổi Wi-Fi kết nối chính sẽ thực hiện thủ công sau khi ONT khởi động lại xong (~2 phút).",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    Text(
+                        text = if (settings.enableFirmwareUpdate) {
+                            "ℹ️ Quy trình 2 lần kết nối tự động (9 bước): Lần 1 đổi Wi-Fi phụ -> Tự chuyển sang Wi-Fi vừa đổi -> Lần 2 đổi nốt Wi-Fi còn lại và nạp Firmware mới ở Bước 9/9 (không cần đổi Wi-Fi thủ công sau khi ONT reboot)."
+                        } else {
+                            "ℹ️ Quy trình 2 lần kết nối tự động (8 bước): Lần 1 đổi Wi-Fi phụ -> Tự chuyển sang Wi-Fi vừa đổi -> Lần 2 đổi nốt Wi-Fi còn lại để đảm bảo cả 2 băng tần được lưu NVRAM 100%."
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
 

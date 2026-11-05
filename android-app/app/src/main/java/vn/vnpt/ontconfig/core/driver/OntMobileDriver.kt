@@ -11,8 +11,8 @@ import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
-import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import java.io.FileInputStream
 import org.json.JSONArray
 import org.json.JSONObject
 import vn.vnpt.ontconfig.core.validation.OntInputValidator
@@ -34,6 +34,8 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.net.SocketFactory
 import javax.net.ssl.SSLException
+import javax.net.ssl.SSLPeerUnverifiedException
+
 enum class StepStatus {
     PENDING,
     RUNNING,
@@ -43,7 +45,7 @@ enum class StepStatus {
 
 data class StepProgress(
     val stepNumber: Int,
-    val totalSteps: Int = 7,
+    val totalSteps: Int = 8,
     val title: String,
     val status: StepStatus,
     val detail: String = ""
@@ -63,16 +65,16 @@ data class MobileSetupResult(
     val beaconVerified: Boolean = false,
     val firmwareUpdated: Boolean = false,
     val firmwareFileName: String = "",
-    val manualWifiStepPending: Boolean = false,
-    val manualWifiUnit: Int = 0,
-    val manualWifiBandLabel: String = "",
-    val manualWifiSsid: String = "",
-    val manualWifiPass: String = "",
     val configuredSecondaryBandLabel: String = "",
     val configuredSecondarySsid: String = "",
     val configuredSecondaryPass: String = "",
     val wifiSecurityMode: String = WifiSecurityMode.WPA2_WPA3_PSK.formValue,
     val resolvedConnectedBand: WifiBand = WifiBand.BAND_2_4_GHZ
+)
+
+data class WifiHandoverContext(
+    val socketFactory: SocketFactory,
+    val localWifiIpv4: String?
 )
 
 class OntMobileDriver(
@@ -81,11 +83,23 @@ class OntMobileDriver(
     private val socketFactory: SocketFactory? = null,
     private val settlingDelayMs: Long = 400L,
     private val recoveryRetryDelayMs: Long = 1200L,
+    private val wlRestartPollIntervalMs: Long = 1000L,
+    private val maxWlRestartPolls: Int = 30,
+    private val userExistPollIntervalMs: Long = 3000L,
+    private val allowSingleBand24gFallback: Boolean = false,
     private val probePauseMutex: Mutex? = null,
     private val onUnbindNetwork: (() -> Unit)? = null,
-    private val onVerifyNewSsid: (suspend (String, String) -> Boolean)? = null,
     private val onAdminPasswordChanged: (suspend (String) -> Unit)? = null,
-    private val onRebindWifiNetwork: (suspend () -> SocketFactory?)? = null
+    private val onRebindWifiNetwork: (suspend () -> SocketFactory?)? = null,
+    private val onSwitchToSecondaryWifi: (suspend (
+        ssid: String,
+        password: String,
+        band: WifiBand,
+        secMode: String,
+        bssidHint: String?,
+        timeoutMs: Long,
+        onDetail: (String) -> Unit
+    ) -> WifiHandoverContext)? = null
 ) {
 
     internal class FlushTrackedIOException(
@@ -117,11 +131,16 @@ class OntMobileDriver(
     private var currentSocketFactory: SocketFactory? = socketFactory
 
     @Volatile
+    private var observedPeerCertSha256: String? = null
+
+    @Volatile
+    private var pinnedPeerCertSha256: String? = null
+
+    @Volatile
     private var client: OkHttpClient = buildHttpClient(socketFactory, timeoutMs)
 
     @Volatile
     private var logoutClient: OkHttpClient = buildHttpClient(socketFactory, 1500L)
-
     @Volatile
     private var sessionKey: String = ""
 
@@ -150,14 +169,35 @@ class OntMobileDriver(
             lastActiveSessionKey = clean
         }
     }
+    private fun monotonicMillis(): Long = System.nanoTime() / 1_000_000L
+    private fun hasTlsCertMismatchCause(error: Throwable?): Boolean =
+        generateSequence(error) { it.cause }.any { it is SSLPeerUnverifiedException }
+
+
     private fun buildHttpClient(sf: SocketFactory?, timeout: Long): OkHttpClient {
         return UnsafeSslClient.create(
             socketFactory = sf,
             timeoutMs = timeout,
-            allowedHostOverride = hostOverride
+            allowedHostOverride = hostOverride,
+            pinnedCertSha256 = pinnedPeerCertSha256,
+            onPeerCertSha256 = { sha ->
+                if (observedPeerCertSha256 == null) {
+                    observedPeerCertSha256 = sha
+                }
+            }
         )
     }
 
+    private fun rebuildHttpClients(newSocketFactory: SocketFactory?) {
+        currentSocketFactory = newSocketFactory
+        client = buildHttpClient(newSocketFactory, timeoutMs)
+        logoutClient = buildHttpClient(newSocketFactory, 1500L)
+    }
+
+    internal fun setPinnedCertSha256ForTest(sha256Hex: String?) {
+        pinnedPeerCertSha256 = sha256Hex?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+        rebuildHttpClients(currentSocketFactory)
+    }
     /**
      * [Red Team RT-03] Build upload client keeping short connectTimeout (5s) while extending
      * readTimeout and writeTimeout (default 120s) for streaming 20-35 MB firmware images.
@@ -173,16 +213,14 @@ class OntMobileDriver(
 
     fun updateSocketFactory(newSocketFactory: SocketFactory?) {
         if (currentSocketFactory === newSocketFactory) return
-        currentSocketFactory = newSocketFactory
-        client = buildHttpClient(newSocketFactory, timeoutMs)
-        logoutClient = buildHttpClient(newSocketFactory, 1500L)
+        rebuildHttpClients(newSocketFactory)
     }
 
     /**
-     * [Red Team RT-10] Probe root URL and verify both HTTP 200 AND ONT HTML signature
-     * ("iGate", "GW040", "VNPT", or "login.js").
+     * [Red Team RT-04 & RT-10] Probe root URL and verify both HTTP 200 AND ONT HTML signature
+     * ("iGate", "GW040", "VNPT", or "login.js"), failing closed immediately on TLS pin mismatch.
      */
-    suspend fun probeGateway(): Boolean = withContext(Dispatchers.IO) {
+    suspend fun probeGateway(failOnCertMismatch: Boolean = false): Boolean = withContext(Dispatchers.IO) {
         try {
             val req = Request.Builder()
                 .url("$cleanBaseUrl/")
@@ -195,6 +233,14 @@ class OntMobileDriver(
                 val body = resp.body?.string().orEmpty()
                 ONT_HTML_SIGNATURES.any { sig -> body.contains(sig, ignoreCase = true) }
             }
+        } catch (e: SSLPeerUnverifiedException) {
+            if (failOnCertMismatch || !pinnedPeerCertSha256.isNullOrBlank()) {
+                throw OntDriverException(
+                    "Chứng chỉ bảo mật TLS của ONT ở Lần kết nối 2 không khớp với ONT ban đầu — nghi ngờ bắt nhầm Wi-Fi khác.",
+                    e
+                )
+            }
+            false
         } catch (_: Exception) {
             false
         }
@@ -625,10 +671,12 @@ class OntMobileDriver(
                 )
                 val resJson = parseJsonOrThrow("Khởi động lại driver Wi-Fi (wlrestart.json)", resCode, resBody)
 
-                // Wait for _wlrestart_ == "0" per wireless.js get_loading_data() if ONT reports restart in progress
-                if (!isConnectedBandFinalStep && resJson.optString("_wlrestart_", "0") != "0") {
-                    for (pollAttempt in 1..10) {
-                        delay(1000L)
+                // Wait for _wlrestart_ == "0" per wireless.js get_loading_data() (30 x 1000ms in production)
+                if (!isConnectedBandFinalStep && maxWlRestartPolls > 0 && resJson.optString("_wlrestart_", "0") != "0") {
+                    for (pollAttempt in 1..maxWlRestartPolls) {
+                        if (wlRestartPollIntervalMs > 0L) {
+                            delay(wlRestartPollIntervalMs)
+                        }
                         val (pCode, pBody) = postForm(
                             "/cgi-bin/luci/wlrestart.json",
                             "undefined&sessionKey=$sessionKey"
@@ -692,89 +740,108 @@ class OntMobileDriver(
         }
     }
 
+    internal data class ConnectedBandResolution(
+        val connectedBand: WifiBand,
+        val ontBaseMac: String?,
+        val wl0Bssid: String? = null,
+        val wl1Bssid: String? = null
+    )
+
     /**
-     * [Red Team RT-02] Server-side connected band ground-truth resolution immediately after Step 2:
-     * Queries `dhcpclient.json` (preferring live `wlAssociatedDevice` over stale `dhcpInfoList`)
-     * and `deviceinfo2.json` (parsing 2D `wirelessInfoList` `[[String, String]]` with `\r\n` trimming)
-     * over the primary HTTP client (`timeoutMs`, default 5000ms).
+     * [Red Team RT-02] Server-side connected band & ONT identity resolution immediately after Step 2:
+     * Queries `dhcpclient.json` when `localIpv4` is present (preferring live `wlAssociatedDevice`)
+     * and UNCONDITIONALLY queries `deviceinfo2.json` to capture trimmed `baseMacAddress` plus
+     * per-radio `wl0`/`wl1` BSSIDs from `wirelessInfoList`.
      */
     fun resolveConnectedBandFromOnt(
         localIpv4: String?,
         fallbackBand: WifiBand,
         bssid: String? = null
     ): Pair<WifiBand, String?> {
-        val cleanIp = localIpv4?.trim().orEmpty()
-        if (cleanIp.isEmpty() || !cleanIp.startsWith("192.168.1.") || cleanIp == "192.168.1.1") {
-            return fallbackBand to null
-        }
+        val detail = resolveConnectedBandFromOntInternal(localIpv4, fallbackBand, bssid)
+        return detail.connectedBand to detail.ontBaseMac
+    }
+
+    private fun resolveConnectedBandFromOntInternal(
+        localIpv4: String?,
+        fallbackBand: WifiBand,
+        bssid: String? = null
+    ): ConnectedBandResolution {
         if (!isValidSessionToken(sessionKey)) {
-            return fallbackBand to null
+            return ConnectedBandResolution(fallbackBand, null)
         }
+        val cleanIp = localIpv4?.trim().orEmpty()
+        val hasValidSubnetIp = cleanIp.startsWith("192.168.1.") && cleanIp != "192.168.1.1"
 
         var matchedWlIfc = ""
-        postOptionalSessionJson("/cgi-bin/luci/dhcpclient.json")?.let { dhcpJson ->
-            var clientMac = ""
-            var leaseIfc = ""
-            dhcpJson.optJSONArray("dhcpInfoList")?.let { dhcpArr ->
-                for (i in 0 until dhcpArr.length()) {
-                    val parts = optPipeRow(dhcpArr, i).split("|")
-                    if (parts.getOrNull(0)?.trim() == cleanIp) {
-                        clientMac = parts.getOrNull(3)?.trim().orEmpty()
-                        leaseIfc = normalizeWlInterface(parts.getOrNull(7).orEmpty())
-                        break
-                    }
-                }
-            }
-
-            var liveAssocIfc = ""
-            dhcpJson.optJSONArray("wlAssociatedDevice")?.let { assocArr ->
-                for (i in 0 until assocArr.length()) {
-                    val assocParts = optPipeRow(assocArr, i).split("|")
-                    val assocMac = assocParts.getOrNull(0)?.trim().orEmpty()
-                    val assocIp = assocParts.getOrNull(1)?.trim().orEmpty()
-                    val macMatches = clientMac.isNotEmpty() && assocMac.equals(clientMac, ignoreCase = true)
-                    if (macMatches || assocIp == cleanIp) {
-                        liveAssocIfc = normalizeWlInterface(assocParts.getOrNull(3).orEmpty()).ifEmpty {
-                            assocParts.firstNotNullOfOrNull { token ->
-                                normalizeWlInterface(token).takeIf { it.isNotEmpty() }
-                            }.orEmpty()
+        if (hasValidSubnetIp) {
+            postOptionalSessionJson("/cgi-bin/luci/dhcpclient.json")?.let { dhcpJson ->
+                var clientMac = ""
+                var leaseIfc = ""
+                dhcpJson.optJSONArray("dhcpInfoList")?.let { dhcpArr ->
+                    for (i in 0 until dhcpArr.length()) {
+                        val parts = optPipeRow(dhcpArr, i).split("|")
+                        if (parts.getOrNull(0)?.trim() == cleanIp) {
+                            clientMac = parts.getOrNull(3)?.trim().orEmpty()
+                            leaseIfc = normalizeWlInterface(parts.getOrNull(7).orEmpty())
+                            break
                         }
-                        if (liveAssocIfc.isNotEmpty()) break
                     }
                 }
+
+                var liveAssocIfc = ""
+                dhcpJson.optJSONArray("wlAssociatedDevice")?.let { assocArr ->
+                    for (i in 0 until assocArr.length()) {
+                        val assocParts = optPipeRow(assocArr, i).split("|")
+                        val assocMac = assocParts.getOrNull(0)?.trim().orEmpty()
+                        val assocIp = assocParts.getOrNull(1)?.trim().orEmpty()
+                        val macMatches = clientMac.isNotEmpty() && assocMac.equals(clientMac, ignoreCase = true)
+                        if (macMatches || assocIp == cleanIp) {
+                            liveAssocIfc = normalizeWlInterface(assocParts.getOrNull(3).orEmpty()).ifEmpty {
+                                assocParts.firstNotNullOfOrNull { token ->
+                                    normalizeWlInterface(token).takeIf { it.isNotEmpty() }
+                                }.orEmpty()
+                            }
+                            if (liveAssocIfc.isNotEmpty()) break
+                        }
+                    }
+                }
+                matchedWlIfc = liveAssocIfc.ifEmpty { leaseIfc }
             }
-            matchedWlIfc = liveAssocIfc.ifEmpty { leaseIfc }
         }
 
         var ontBaseMac: String? = null
+        var wl0Bssid: String? = null
+        var wl1Bssid: String? = null
         var resolvedFromDeviceInfo: WifiBand? = null
+
         postOptionalSessionJson("/cgi-bin/luci/deviceinfo2.json")?.let { devJson ->
             val baseMac = devJson.optString("baseMacAddress", "").trim().ifEmpty { null }
             ontBaseMac = baseMac
             if (baseMac != null && bssid.isNullOrBlank() && currentPass.isNotEmpty()) {
                 bssidPasswordCache[baseMac.uppercase()] = currentPass
             }
-            if (matchedWlIfc.isNotEmpty()) {
-                devJson.optJSONArray("wirelessInfoList")?.let { wlList ->
-                    for (i in 0 until wlList.length()) {
-                        val entryStr = optPipeRow(wlList, i)
-                        if (entryStr.isBlank()) continue
-                        val subData = entryStr.split("|").map { it.trim() }
-                        val entryIfc = normalizeWlInterface(subData.getOrNull(0).orEmpty())
-                        if (entryIfc == matchedWlIfc) {
-                            val chanDigits = CHANNEL_LEADING_DIGITS_REGEX
-                                .find(subData.getOrNull(3).orEmpty())
-                                ?.groupValues
-                                ?.getOrNull(1)
-                                ?.toIntOrNull()
-                                ?: 0
-                            resolvedFromDeviceInfo = when {
-                                chanDigits in 1..14 -> WifiBand.BAND_2_4_GHZ
-                                chanDigits >= 36 -> WifiBand.BAND_5_GHZ
-                                entryIfc == "wl1" -> WifiBand.BAND_5_GHZ
-                                else -> WifiBand.BAND_2_4_GHZ
-                            }
-                            break
+            devJson.optJSONArray("wirelessInfoList")?.let { wlList ->
+                for (i in 0 until wlList.length()) {
+                    val entryStr = optPipeRow(wlList, i)
+                    if (entryStr.isBlank()) continue
+                    val subData = entryStr.split("|").map { it.trim() }
+                    val entryIfc = normalizeWlInterface(subData.getOrNull(0).orEmpty())
+                    val radioBssid = subData.getOrNull(5).orEmpty().takeIf { it.contains(":") }
+                    if (entryIfc == "wl0" && radioBssid != null) wl0Bssid = radioBssid
+                    if (entryIfc == "wl1" && radioBssid != null) wl1Bssid = radioBssid
+                    if (matchedWlIfc.isNotEmpty() && entryIfc == matchedWlIfc && resolvedFromDeviceInfo == null) {
+                        val chanDigits = CHANNEL_LEADING_DIGITS_REGEX
+                            .find(subData.getOrNull(3).orEmpty())
+                            ?.groupValues
+                            ?.getOrNull(1)
+                            ?.toIntOrNull()
+                            ?: 0
+                        resolvedFromDeviceInfo = when {
+                            chanDigits in 1..14 -> WifiBand.BAND_2_4_GHZ
+                            chanDigits >= 36 -> WifiBand.BAND_5_GHZ
+                            entryIfc == "wl1" -> WifiBand.BAND_5_GHZ
+                            else -> WifiBand.BAND_2_4_GHZ
                         }
                     }
                 }
@@ -786,89 +853,132 @@ class OntMobileDriver(
             "wl0" -> WifiBand.BAND_2_4_GHZ
             else -> fallbackBand
         }
-        return finalBand to ontBaseMac
+        return ConnectedBandResolution(
+            connectedBand = finalBand,
+            ontBaseMac = ontBaseMac,
+            wl0Bssid = wl0Bssid,
+            wl1Bssid = wl1Bssid
+        )
     }
 
-    private fun reloginAfterRadioBounce(
-        settings: GlobalSettings,
-        bssid: String?,
-        previousSessionKey: String
-    ): Boolean {
-        val activeAdminPass = currentPass.ifEmpty { settings.adminNewPass }
-        fun attemptLogin(): Boolean {
-            loginAndChangePassword(
-                defaultPass = settings.adminDefaultPass,
-                newPass = settings.adminNewPass,
-                bssid = bssid,
-                lastKnownAdminPass = activeAdminPass
-            )
-            return true
-        }
-        fun handleNonUserExistFailure(e: Exception): Boolean {
-            when (e) {
-                is OntAccountLockoutError,
-                is OntAccountLockoutWarning,
-                is OntAuthenticationError,
-                is CancellationException -> throw e
-                else -> {
-                    if (sessionKey.isEmpty() && lastActiveSessionKey.isNotEmpty()) {
-                        sessionKey = lastActiveSessionKey
-                    }
-                    return false
-                }
+    /**
+     * [Red Team RT-01] Authenticate Connection 2 strictly with `newAdminPass` ONLY — NEVER falling
+     * back to `adminDefaultPass` ("admin"), preventing 180s hardware lockout on socket resets.
+     */
+    private suspend fun authenticateSecondConnection(
+        newAdminPass: String,
+        previousSessionKey: String,
+        userExistWaitBudgetMs: Long = 65_000L
+    ): String {
+        fun attemptNewPassLoginOnce(): String {
+            val loginData = login("admin", newAdminPass)
+            val status = loginData.optString("status", "").trim()
+            val firstLog = loginData.optString("firstlog", "").trim()
+            if (firstLog == "1" || status.equals("FAIL", ignoreCase = true) || !isValidSessionToken(sessionKey)) {
+                throw OntAuthenticationError(
+                    "Đăng nhập Lần kết nối 2 bằng mật khẩu Admin mới thất bại (status=$status, firstlog=$firstLog). " +
+                        "Dừng ngay để tránh khóa ONT — hãy kiểm tra xem điện thoại có bắt nhầm ONT khác không."
+                )
             }
+            return sessionKey
         }
 
-        return try {
-            attemptLogin()
+        try {
+            return attemptNewPassLoginOnce()
+        } catch (e: OntAccountLockoutError) {
+            throw e
+        } catch (e: OntAccountLockoutWarning) {
+            throw e
+        } catch (e: OntAuthenticationError) {
+            throw e
         } catch (_: OntUserExistError) {
             val keyToRelease = previousSessionKey.ifEmpty { lastActiveSessionKey }
-            if (!isValidSessionToken(keyToRelease)) return false
-            try {
+            if (isValidSessionToken(keyToRelease)) {
                 sessionKey = keyToRelease
                 logout()
-                attemptLogin()
-            } catch (e2: Exception) {
-                handleNonUserExistFailure(e2)
+                try {
+                    return attemptNewPassLoginOnce()
+                } catch (e2: OntAccountLockoutError) {
+                    throw e2
+                } catch (e2: OntAccountLockoutWarning) {
+                    throw e2
+                } catch (e2: OntAuthenticationError) {
+                    throw e2
+                } catch (_: OntUserExistError) {
+                    // Fall through to TTL polling loop below
+                } catch (ne: OntNetworkError) {
+                    if (hasTlsCertMismatchCause(ne)) {
+                        throw OntDriverException("Chứng chỉ TLS không khớp với ONT ở Lần kết nối 1.", ne)
+                    }
+                    // Transient socket drop right after logout -> fall through to polling loop
+                }
             }
-        } catch (e: Exception) {
-            handleNonUserExistFailure(e)
+
+            val deadlineMs = monotonicMillis() + userExistWaitBudgetMs.coerceAtLeast(userExistPollIntervalMs)
+            while (monotonicMillis() < deadlineMs) {
+                val sleepMs = minOf(
+                    userExistPollIntervalMs.coerceAtLeast(10L),
+                    (deadlineMs - monotonicMillis()).coerceAtLeast(10L)
+                )
+                delay(sleepMs)
+                try {
+                    return attemptNewPassLoginOnce()
+                } catch (_: OntUserExistError) {
+                    continue
+                } catch (ne: OntNetworkError) {
+                    if (hasTlsCertMismatchCause(ne)) {
+                        throw OntDriverException("Chứng chỉ TLS không khớp với ONT ở Lần kết nối 1.", ne)
+                    }
+                    continue
+                }
+            }
+            throw OntUserExistError(
+                "Tài khoản admin ONT vẫn bận phiên cũ (user exist) sau khi chờ ${userExistWaitBudgetMs / 1000}s ở Lần kết nối 2."
+            )
         }
     }
 
     /**
-     * [Red Team RT-01 & RT-05] Narrow HTTP-only try/catch around `wlrestart.json`, explicit detection
-     * of LuCI's `{"status": "fail authen"}` expiry and missing `_wlrestart_`, dynamic `lastActiveSessionKey`
-     * recovery, zero double-login on `numberLogin >= 2`, and strict `CancellationException` propagation.
+     * [Red Team RT-01 & RT-03] Readiness & session synchronization gate on Secondary Wi-Fi (`Band B`):
+     * Rebinds exclusively to `Band B` (rejecting null SocketFactory when `onRebindWifiNetwork` is set),
+     * verifies pinned TLS + ONT HTML signature, ensures `_wlrestart_ == "0"`, and re-authenticates
+     * ONLY via `authenticateSecondConnection(settings.adminNewPass, ...)`.
      */
-    private suspend fun ensureGatewayReadyBeforeStep7(
+    private suspend fun ensureGatewayReadyOnSecondaryBand(
         settings: GlobalSettings,
-        bssid: String?,
-        previousSessionKey: String = lastActiveSessionKey.ifEmpty { sessionKey },
-        maxAttempts: Int = 8,
-        retryDelayMs: Long = recoveryRetryDelayMs,
-        allowActiveRebind: Boolean = true
+        timeoutBudgetMs: Long
     ): Boolean {
-        for (attempt in 1..maxAttempts) {
-            if (allowActiveRebind && onRebindWifiNetwork != null) {
-                try {
-                    val newSf = onRebindWifiNetwork.invoke()
-                    if (newSf != null && newSf != currentSocketFactory) {
-                        updateSocketFactory(newSf)
-                    }
+        val effectiveBudget = timeoutBudgetMs.coerceAtLeast(timeoutMs)
+        val deadlineMs = monotonicMillis() + effectiveBudget
+        val stepDelayMs = recoveryRetryDelayMs.coerceAtLeast(20L)
+
+        while (monotonicMillis() < deadlineMs) {
+            if (onRebindWifiNetwork != null) {
+                val newSf = try {
+                    onRebindWifiNetwork.invoke()
                 } catch (ce: CancellationException) {
                     throw ce
                 } catch (_: Exception) {
+                    null
                 }
+                if (newSf == null) {
+                    val waitRebind = minOf(stepDelayMs, (deadlineMs - monotonicMillis()).coerceAtLeast(10L))
+                    delay(waitRebind)
+                    continue
+                }
+                updateSocketFactory(newSf)
             }
 
-            if (probeGateway()) {
+            if (probeGateway(failOnCertMismatch = true)) {
                 val activeKey = sessionKey
                 val httpResult = if (isValidSessionToken(activeKey)) {
                     try {
                         val encKey = OntInputValidator.urlEncodeFormValue(activeKey)
                         postForm("/cgi-bin/luci/wlrestart.json", "undefined&sessionKey=$encKey")
-                    } catch (_: IOException) {
+                    } catch (e: IOException) {
+                        if (hasTlsCertMismatchCause(e)) {
+                            throw OntDriverException("Chứng chỉ TLS ONT không khớp khi đồng bộ Lần 2.", e)
+                        }
                         null
                     }
                 } else {
@@ -888,30 +998,221 @@ class OntMobileDriver(
                     }
                 }
                 val statusStr = wlJson?.optString("status", "")?.trim().orEmpty()
-                if (
-                    wlJson == null ||
-                    statusStr.equals("fail authen", ignoreCase = true) ||
-                    !wlJson.has("_wlrestart_")
-                ) {
-                    val keyForRelogin = lastActiveSessionKey.ifEmpty { previousSessionKey }
-                    if (reloginAfterRadioBounce(settings, bssid, keyForRelogin)) {
+                if (wlJson == null || statusStr.equals("fail authen", ignoreCase = true)) {
+                    val remainingAuthMs = (deadlineMs - monotonicMillis()).coerceAtLeast(userExistPollIntervalMs)
+                    try {
+                        authenticateSecondConnection(
+                            newAdminPass = settings.adminNewPass,
+                            previousSessionKey = lastActiveSessionKey,
+                            userExistWaitBudgetMs = remainingAuthMs
+                        )
+                        val postAuthCheck = try {
+                            val encFresh = OntInputValidator.urlEncodeFormValue(sessionKey)
+                            postForm("/cgi-bin/luci/wlrestart.json", "undefined&sessionKey=$encFresh")
+                        } catch (e: IOException) {
+                            if (hasTlsCertMismatchCause(e)) {
+                                throw OntDriverException("Chứng chỉ TLS ONT không khớp sau xác thực Lần 2.", e)
+                            }
+                            null
+                        }
+                        val postAuthRestart = postAuthCheck?.let { (c, b) ->
+                            val t = b.trim()
+                            if (c == 200 && t.isNotEmpty() && !t.startsWith("<")) {
+                                runCatching { JSONObject(t).optString("_wlrestart_", "0").trim() }.getOrDefault("0")
+                            } else {
+                                "0"
+                            }
+                        } ?: "0"
+                        if (postAuthRestart != "0") {
+                            val waitRestart = minOf(
+                                wlRestartPollIntervalMs.coerceAtLeast(10L),
+                                (deadlineMs - monotonicMillis()).coerceAtLeast(10L)
+                            )
+                            delay(waitRestart)
+                            continue
+                        }
                         return true
+                    } catch (e: OntAccountLockoutError) {
+                        throw e
+                    } catch (e: OntAccountLockoutWarning) {
+                        throw e
+                    } catch (e: OntAuthenticationError) {
+                        throw e
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (de: OntDriverException) {
+                        if (de !is OntNetworkError && de !is OntUserExistError) throw de
                     }
                 } else if (wlJson.optString("_wlrestart_", "0").trim() != "0") {
-                    delay(minOf(800L, retryDelayMs.coerceAtLeast(20L)))
+                    val pollSleep = minOf(
+                        wlRestartPollIntervalMs.coerceAtLeast(10L),
+                        (deadlineMs - monotonicMillis()).coerceAtLeast(10L)
+                    )
+                    delay(pollSleep)
                     continue
                 } else {
                     return true
                 }
             }
 
-            if (attempt < maxAttempts && retryDelayMs > 0L) {
-                delay(retryDelayMs)
+            val remaining = deadlineMs - monotonicMillis()
+            if (remaining > 0L) {
+                delay(minOf(stepDelayMs, remaining))
             }
         }
         return false
     }
 
+    /**
+     * [Red Team RT-02] Verify ground-truth ONT identity (`baseMacAddress`) and live wireless interface
+     * (`wlAssociatedDevice` == `expectedBand`, never falling back to stale `dhcpInfoList`) on Connection 2.
+     */
+    private fun verifySecondConnectionBandAndMac(
+        localIpv4: String?,
+        expectedBand: WifiBand,
+        expectedOntBaseMac: String?
+    ) {
+        val ifcBandMap = mutableMapOf<String, WifiBand>()
+        val devJson = postOptionalSessionJson("/cgi-bin/luci/deviceinfo2.json")
+        val actualBaseMac = devJson?.optString("baseMacAddress", "")?.trim()?.ifEmpty { null }
+        if (!expectedOntBaseMac.isNullOrBlank()) {
+            if (actualBaseMac == null || !actualBaseMac.equals(expectedOntBaseMac.trim(), ignoreCase = true)) {
+                throw OntDriverException(
+                    "Địa chỉ MAC của ONT ở Lần kết nối 2 (${actualBaseMac ?: "không xác định"}) không khớp với ONT ban đầu ($expectedOntBaseMac) — nghi ngờ bắt nhầm ONT khác."
+                )
+            }
+        }
+        devJson?.optJSONArray("wirelessInfoList")?.let { wlList ->
+            for (i in 0 until wlList.length()) {
+                val entryStr = optPipeRow(wlList, i)
+                if (entryStr.isBlank()) continue
+                val subData = entryStr.split("|").map { it.trim() }
+                val entryIfc = normalizeWlInterface(subData.getOrNull(0).orEmpty())
+                if (entryIfc.isEmpty()) continue
+                val chanDigits = CHANNEL_LEADING_DIGITS_REGEX
+                    .find(subData.getOrNull(3).orEmpty())
+                    ?.groupValues
+                    ?.getOrNull(1)
+                    ?.toIntOrNull()
+                    ?: 0
+                ifcBandMap[entryIfc] = when {
+                    chanDigits in 1..14 -> WifiBand.BAND_2_4_GHZ
+                    chanDigits >= 36 -> WifiBand.BAND_5_GHZ
+                    entryIfc == "wl1" -> WifiBand.BAND_5_GHZ
+                    else -> WifiBand.BAND_2_4_GHZ
+                }
+            }
+        }
+
+        val dhcpJson = postOptionalSessionJson("/cgi-bin/luci/dhcpclient.json")
+            ?: throw OntNetworkError("Không đọc được bảng kết nối Wi-Fi (dhcpclient.json) ở Lần kết nối 2.")
+
+        val assocArr = dhcpJson.optJSONArray("wlAssociatedDevice")
+            ?: throw OntDriverException(
+                "Không xác thực được giao diện wlAssociatedDevice ở Lần kết nối 2 để đảm bảo đã đứng trên Wi-Fi ${expectedBand.label}."
+            )
+
+        val cleanIp = localIpv4?.trim().orEmpty()
+        var clientMac = ""
+        if (cleanIp.isNotEmpty()) {
+            dhcpJson.optJSONArray("dhcpInfoList")?.let { dhcpArr ->
+                for (i in 0 until dhcpArr.length()) {
+                    val parts = optPipeRow(dhcpArr, i).split("|")
+                    if (parts.getOrNull(0)?.trim() == cleanIp) {
+                        clientMac = parts.getOrNull(3)?.trim().orEmpty()
+                        break
+                    }
+                }
+            }
+        }
+
+        var matchedAssocIfc = ""
+        for (i in 0 until assocArr.length()) {
+            val assocParts = optPipeRow(assocArr, i).split("|")
+            val assocMac = assocParts.getOrNull(0)?.trim().orEmpty()
+            val assocIp = assocParts.getOrNull(1)?.trim().orEmpty()
+            val rowIfc = normalizeWlInterface(assocParts.getOrNull(3).orEmpty()).ifEmpty {
+                assocParts.firstNotNullOfOrNull { token ->
+                    normalizeWlInterface(token).takeIf { it.isNotEmpty() }
+                }.orEmpty()
+            }
+            if (rowIfc.isEmpty()) continue
+            val ipMatches = cleanIp.isNotEmpty() && assocIp == cleanIp
+            val macMatches = clientMac.isNotEmpty() && assocMac.equals(clientMac, ignoreCase = true)
+            if (ipMatches || macMatches || (cleanIp.isEmpty() && assocArr.length() == 1)) {
+                matchedAssocIfc = rowIfc
+                break
+            }
+            if (matchedAssocIfc.isEmpty() && assocIp.isEmpty() && assocArr.length() == 1) {
+                matchedAssocIfc = rowIfc
+            }
+        }
+
+        if (matchedAssocIfc.isEmpty()) {
+            throw OntDriverException(
+                "Chưa thấy thiết bị trong bảng kết nối trực tiếp wlAssociatedDevice của băng tần ${expectedBand.label}."
+            )
+        }
+
+        val liveBand = ifcBandMap[matchedAssocIfc] ?: when (matchedAssocIfc) {
+            "wl1" -> WifiBand.BAND_5_GHZ
+            else -> WifiBand.BAND_2_4_GHZ
+        }
+        if (liveBand != expectedBand) {
+            throw OntDriverException(
+                "Thiết bị vẫn đang kết nối trên băng tần ${liveBand.label} ($matchedAssocIfc) thay vì băng tần ${expectedBand.label}. " +
+                    "Hãy kiểm tra lại Wi-Fi vừa ghép nối (đặc biệt khi 2 băng tần đặt trùng tên)."
+            )
+        }
+    }
+
+    /**
+     * [Red Team RT-02] Read-only NVRAM SSID query for `wl_unit` (`0` or `1`) without `action=Apply`.
+     */
+    private fun readConfiguredBandSsidFromNvram(unit: Int): String? {
+        if (!isValidSessionToken(sessionKey)) return null
+        return try {
+            val encKey = OntInputValidator.urlEncodeFormValue(sessionKey)
+            val payload = "page=ssid.asp&wl_unit=$unit&wl_bssid=0&sessionKey=$encKey"
+            val (code, body) = postForm(
+                path = "/cgi-bin/luci/wirelesscfg.json",
+                rawPayload = payload,
+                useShortLogoutTimeout = false,
+                referer = "$cleanBaseUrl/wireless.html"
+            )
+            val trimmed = body.trim()
+            if (code != 200 || trimmed.isEmpty() || trimmed.startsWith("<")) return null
+            val json = JSONObject(trimmed)
+            val rotated = json.optString("sessionKey", "").trim()
+            if (isValidSessionToken(rotated)) {
+                updateSessionKey(rotated)
+            }
+            if (json.has("nvramWlSsid")) json.optString("nvramWlSsid", "") else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun commitRadioReloadBestEffort() {
+        try {
+            val (resCode, resBody) = postForm(
+                path = "/cgi-bin/luci/wlrestart.json",
+                rawPayload = "undefined&sessionKey=$sessionKey",
+                useShortLogoutTimeout = false
+            )
+            val resJson = parseJsonOrThrow("Khởi động lại driver Wi-Fi (wlrestart.json)", resCode, resBody)
+            if (maxWlRestartPolls > 0 && resJson.optString("_wlrestart_", "0") != "0") {
+                for (pollAttempt in 1..maxWlRestartPolls) {
+                    if (wlRestartPollIntervalMs > 0L) delay(wlRestartPollIntervalMs)
+                    val (pCode, pBody) = postForm("/cgi-bin/luci/wlrestart.json", "undefined&sessionKey=$sessionKey")
+                    val pJson = parseJsonOrThrow("Kiểm tra wlrestart.json", pCode, pBody)
+                    if (pJson.optString("_wlrestart_", "0") == "0") break
+                }
+            }
+        } catch (_: Exception) {
+            // NVRAM already confirmed saved via readConfiguredBandSsidFromNvram
+        }
+    }
     /**
      * [Red Team RT-03 & RT-04] Upload and apply ONT firmware via 3-step LuCI CGI sequence:
      * 1. POST /cgi-bin/luci/updatefwsessioncheck.json -> {"status": "OK"}
@@ -920,7 +1221,8 @@ class OntMobileDriver(
      */
     fun updateFirmware(
         firmwareFile: File,
-        uploadTimeoutMs: Long = 120_000L
+        uploadTimeoutMs: Long = 180_000L,
+        onProgressPercent: ((Int) -> Unit)? = null
     ): JSONObject {
         if (!firmwareFile.exists() || !firmwareFile.isFile) {
             throw OntValidationError("File firmware không tồn tại: '${firmwareFile.path}'")
@@ -988,19 +1290,34 @@ class OntMobileDriver(
             )
         }
 
-        // 3. Upload binary firmware via multipart/form-data with post-flush tracking
+        // 3. Upload binary firmware via multipart/form-data with streaming progress & post-flush tracking
         val allBytesFlushed = AtomicBoolean(false)
-        val baseFileBody = firmwareFile.asRequestBody("application/octet-stream".toMediaType())
+        val octetMediaType = "application/octet-stream".toMediaType()
         val trackingFileBody = object : RequestBody() {
-            override fun contentType() = baseFileBody.contentType()
-            override fun contentLength() = baseFileBody.contentLength()
+            override fun contentType() = octetMediaType
+            override fun contentLength() = fileSize
             override fun writeTo(sink: okio.BufferedSink) {
-                baseFileBody.writeTo(sink)
+                val buffer = ByteArray(32 * 1024)
+                var sentBytes = 0L
+                var lastReportedPct = -1
+                FileInputStream(firmwareFile).use { fis ->
+                    var read: Int
+                    while (fis.read(buffer).also { read = it } != -1) {
+                        sink.write(buffer, 0, read)
+                        sentBytes += read
+                        if (onProgressPercent != null && fileSize > 0L) {
+                            val pct = ((sentBytes * 100L) / fileSize).toInt().coerceIn(0, 100)
+                            if (pct == 100 || pct - lastReportedPct >= 2) {
+                                lastReportedPct = pct
+                                onProgressPercent.invoke(pct)
+                            }
+                        }
+                    }
+                }
                 sink.flush()
                 allBytesFlushed.set(true)
             }
         }
-
         val multipartBody = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("file", safeFilename, trackingFileBody)
@@ -1114,124 +1431,23 @@ class OntMobileDriver(
     }
 
     /**
-     * [Red Team RT-04] Shared 3-attempt final connected Wi-Fi apply + `stillOnOldWifi` verification
-     * state machine used by both `executeMobileSetup` (Step 7) and `executeManualConnectedWifiOnly`.
-     */
-    private suspend fun applyFinalConnectedBandWithRetries(
-        unit: Int,
-        ssid: String,
-        password: String,
-        secMode: String,
-        settings: GlobalSettings,
-        bssid: String?,
-        oldWifiStillAliveMessage: String,
-        fallbackFailureMessage: String,
-        onRetryAttempt: ((nextAttempt: Int) -> Unit)? = null
-    ): WifiApplyOutcome {
-        var lastError: Exception? = null
-
-        for (attempt in 1..3) {
-            val attemptSessionKey = lastActiveSessionKey
-            val outcome = try {
-                configureWifiBand(
-                    unit = unit,
-                    ssid = ssid,
-                    password = password,
-                    secMode = secMode,
-                    isConnectedBandFinalStep = true
-                )
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                if (e is OntValidationError || (e is OntDriverException && e !is OntNetworkError)) {
-                    throw e
-                }
-                lastError = e
-                val causeIo = (e as? IOException) ?: (e.cause as? IOException)
-                val prevKey = lastActiveSessionKey.ifEmpty { attemptSessionKey }
-                if (attempt < 3) {
-                    onRetryAttempt?.invoke(attempt + 1)
-                    if (recoveryRetryDelayMs > 0L) {
-                        delay(recoveryRetryDelayMs)
-                    }
-                    val gatewayReady = ensureGatewayReadyBeforeStep7(
-                        settings = settings,
-                        bssid = bssid,
-                        previousSessionKey = prevKey,
-                        maxAttempts = 6,
-                        retryDelayMs = recoveryRetryDelayMs
-                    )
-                    if (!gatewayReady && causeIo != null && isPostFlushRadioDrop(causeIo)) {
-                        return WifiApplyOutcome(cfgSavedToNvram = false, droppedDuringRadioReload = true)
-                    }
-                    continue
-                }
-                if (causeIo != null && isPostFlushRadioDrop(causeIo)) {
-                    val stillOnOldWifi = ensureGatewayReadyBeforeStep7(
-                        settings = settings,
-                        bssid = bssid,
-                        previousSessionKey = prevKey,
-                        maxAttempts = 3,
-                        retryDelayMs = recoveryRetryDelayMs,
-                        allowActiveRebind = false
-                    )
-                    if (!stillOnOldWifi) {
-                        return WifiApplyOutcome(cfgSavedToNvram = false, droppedDuringRadioReload = true)
-                    }
-                }
-                throw e
-            }
-
-            if (outcome.cfgSavedToNvram) {
-                return outcome
-            }
-            if (outcome.droppedDuringRadioReload) {
-                val stillOnOldWifi = ensureGatewayReadyBeforeStep7(
-                    settings = settings,
-                    bssid = bssid,
-                    previousSessionKey = lastActiveSessionKey.ifEmpty { attemptSessionKey },
-                    maxAttempts = 3,
-                    retryDelayMs = recoveryRetryDelayMs,
-                    allowActiveRebind = false
-                )
-                if (!stillOnOldWifi) {
-                    return outcome
-                }
-                if (attempt < 3) {
-                    onRetryAttempt?.invoke(attempt + 1)
-                    continue
-                }
-                throw OntNetworkError(oldWifiStillAliveMessage)
-            }
-        }
-
-        throw lastError ?: OntNetworkError(fallbackFailureMessage)
-    }
-
-    private fun releaseOrClearSessionAfterFinalWifi(outcome: WifiApplyOutcome) {
-        if (!outcome.droppedDuringRadioReload) {
-            logout()
-        } else {
-            clearSessionKeys()
-        }
-    }
-
-    /**
-     * Execute the 7-step wireless ONT setup workflow with:
-     * - [RT-10] Probe Pause Mutex barrier & Step 1 ONT HTML signature check
-     * - [RT-04] Step 2 Smart Login retry order
-     * - [RT-07] Step 3 Idempotent WAN PPPoE VLAN 11 (serviceId=1 on Edit)
-     * - Step 4 GPON SLID (<= 10 ASCII)
-     * - Step 5 LAN IPv4 (192.168.1.1)
-     * - [RT-02] Step 6 Non-connected Wi-Fi band FIRST + wlrestart.json + 2.5s settling pause
-     * - [RT-02] Step 7 Gateway readiness/rebind check + Connected Wi-Fi band LAST + wlrestart.json
-     * - [RT-01 & RT-06] Mandatory finally { withContext(NonCancellable) { logout(); unbind() } }
+     * Execute the automated Two-Connection Dual-Wi-Fi + Final Firmware Update workflow:
+     * - Connection 1 (Steps 1..6 on initial Band A): Probe & pin TLS SHA-256 -> Smart Login & Admin pass
+     *   + unconditional `deviceinfo2.json`/`dhcpclient.json` ground-truth -> WAN PPPoE -> GPON SLID
+     *   -> LAN IPv4 -> Configure secondary Wi-Fi `Band B` (+ `wlrestart.json` <=30s) -> clean `logout.cmd`.
+     *   (On 2.4GHz-only Android hardware `allowSingleBand24gFallback`, configures 5GHz then 2.4GHz and rejoins 2.4GHz).
+     * - Handover (Step 7): `onSwitchToSecondaryWifi` (120s budget) -> rebuild pinned TLS client ->
+     *   `probeGateway` (<=45s) -> `authenticateSecondConnection` strictly with `adminNewPass` (<=65s user-exist
+     *   recovery, zero `"admin"` fallback) -> `verifySecondConnectionBandAndMac`.
+     * - Connection 2 (Steps 8..9 on `Band B`): Configure remaining Wi-Fi `Band A` (with NVRAM read-only
+     *   verification on transient drop) -> if `enableFirmwareUpdate`, run `ensureGatewayReadyOnSecondaryBand` (<=60s)
+     *   and upload Firmware at Step 9 (<=180s), clearing session keys immediately on `"status": "valid"`.
      */
     suspend fun executeMobileSetup(
         record: SubscriberRecord,
         settings: GlobalSettings = GlobalSettings(baseUrl = baseUrl, requestTimeoutMs = timeoutMs),
         connectedBand: WifiBand = WifiBand.BAND_2_4_GHZ,
         bssid: String? = null,
-        alreadyConfiguredOppositeBand: Boolean = false,
         localWifiIpv4: String? = null,
         onBandResolved: ((WifiBand, String?) -> Unit)? = null,
         onProgress: ((StepProgress) -> Unit)? = null
@@ -1258,11 +1474,12 @@ class OntMobileDriver(
 
         val secMode = WifiSecurityMode.fromFormValue(settings.wifiSecurityMode)
             ?: throw OntValidationError("Chế độ bảo mật Wi-Fi '${settings.wifiSecurityMode}' không hợp lệ.")
-        val totalSteps = if (doFwUpdate) 8 else 7
+        val totalSteps = if (doFwUpdate) 9 else 8
         val wifi24Ssid = record.effectiveWifi24Ssid
         val wifi24Pass = record.effectiveWifi24Pass(secMode.formValue)
         val wifi5Ssid = record.effectiveWifi5Ssid
         val wifi5Pass = record.effectiveWifi5Pass(secMode.formValue)
+
         fun emit(step: Int, title: String, status: StepStatus, detail: String) {
             onProgress?.invoke(
                 StepProgress(
@@ -1278,15 +1495,20 @@ class OntMobileDriver(
         probePauseMutex?.lock()
         var unbindDone = false
         clearSessionKeys()
+        observedPeerCertSha256 = null
 
         try {
-            // Step 1: Probe Gateway & Verify ONT HTML Signature
+            // Step 1: Probe Gateway & Pin Leaf X.509 SHA-256 Certificate
             val step1Title = "Bước 1/$totalSteps: Kiểm tra kết nối & nhận diện ONT Gateway"
             emit(1, step1Title, StepStatus.RUNNING, "Đang kiểm tra $cleanBaseUrl...")
-            if (!probeGateway()) {
+            if (!probeGateway(failOnCertMismatch = false)) {
                 throw OntNetworkError(
                     "Không thể kết nối tới ONT GW040-NSv2 tại $cleanBaseUrl (không nhận diện được chữ ký iGate/GW040/VNPT)."
                 )
+            }
+            if (pinnedPeerCertSha256 == null && observedPeerCertSha256 != null) {
+                pinnedPeerCertSha256 = observedPeerCertSha256
+                rebuildHttpClients(currentSocketFactory)
             }
             emit(1, step1Title, StepStatus.SUCCESS, "Đã xác nhận kết nối tới ONT GW040-NSv2")
 
@@ -1302,20 +1524,21 @@ class OntMobileDriver(
             onAdminPasswordChanged?.invoke(settings.adminNewPass)
             emit(2, step2Title, StepStatus.SUCCESS, "Đã xác thực và bảo mật tài khoản Admin")
 
-            // [Red Team RT-02] Resolve ground-truth connected Wi-Fi band immediately after Step 2
-            // (before Step 5 savelanv4cfg.cmd touches br-lan / dnsmasq)
-            val (effectiveConnectedBand, resolvedOntBaseMac) = if (!localWifiIpv4.isNullOrBlank()) {
-                val resolved = resolveConnectedBandFromOnt(
-                    localIpv4 = localWifiIpv4,
-                    fallbackBand = connectedBand,
-                    bssid = bssid
-                )
-                onBandResolved?.invoke(resolved.first, resolved.second)
-                resolved
+            // Step 2c: Unconditional ONT band & baseMacAddress ground-truth resolution
+            val bandResolution = resolveConnectedBandFromOntInternal(
+                localIpv4 = localWifiIpv4,
+                fallbackBand = connectedBand,
+                bssid = bssid
+            )
+            val effectiveConnectedBand = if (allowSingleBand24gFallback) {
+                WifiBand.BAND_2_4_GHZ
             } else {
-                connectedBand to null
+                bandResolution.connectedBand
             }
-            val effectiveBssid = bssid?.takeIf { it.isNotBlank() } ?: resolvedOntBaseMac
+            val resolvedOntBaseMac = bandResolution.ontBaseMac
+            if (!localWifiIpv4.isNullOrBlank() || resolvedOntBaseMac != null) {
+                onBandResolved?.invoke(effectiveConnectedBand, resolvedOntBaseMac)
+            }
 
             // Step 3: Idempotent WAN PPPoE VLAN 11
             val step3Title = "Bước 3/$totalSteps: Cấu hình WAN PPPoE (VLAN ${settings.vlanId})"
@@ -1340,109 +1563,308 @@ class OntMobileDriver(
             configureLan(settings)
             emit(5, step5Title, StepStatus.SUCCESS, "Đã lưu cấu hình LAN ${settings.lanIp}")
 
-            // Dynamic Band Ordering:
-            // Configure the NON-CONNECTED band in Step 6, keep the active Wi-Fi link alive,
-            // and configure the CONNECTED band LAST in Step 7!
+            // Plan Connection 1 -> Connection 2 bands
             val isConnected24g = (effectiveConnectedBand == WifiBand.BAND_2_4_GHZ)
-            val step6Unit = if (isConnected24g) 1 else 0
-            val step6BandLabel = if (isConnected24g) "5GHz" else "2.4GHz"
-            val step6Ssid = if (isConnected24g) wifi5Ssid else wifi24Ssid
-            val step6Pass = if (isConnected24g) wifi5Pass else wifi24Pass
+            val secondaryBand = if (isConnected24g) WifiBand.BAND_5_GHZ else WifiBand.BAND_2_4_GHZ
+            val secondaryUnit = if (isConnected24g) 1 else 0
+            val secondaryBandLabel = if (isConnected24g) "5GHz" else "2.4GHz"
+            val secondarySsid = if (isConnected24g) wifi5Ssid else wifi24Ssid
+            val secondaryPass = if (isConnected24g) wifi5Pass else wifi24Pass
 
-            val step7Unit = if (isConnected24g) 0 else 1
-            val step7BandLabel = if (isConnected24g) "2.4GHz" else "5GHz"
-            val step7Ssid = if (isConnected24g) wifi24Ssid else wifi5Ssid
-            val step7Pass = if (isConnected24g) wifi24Pass else wifi5Pass
+            val primaryUnit = if (isConnected24g) 0 else 1
+            val primaryBandLabel = if (isConnected24g) "2.4GHz" else "5GHz"
+            val primarySsid = if (isConnected24g) wifi24Ssid else wifi5Ssid
+            val primaryPass = if (isConnected24g) wifi24Pass else wifi5Pass
 
-            // Step 6: Non-connected Wi-Fi band + wlrestart.json (DO NOT logout or unbind!)
-            val step6Title = "Bước 6/$totalSteps: Cấu hình Wi-Fi $step6BandLabel (Băng tần phụ)"
-            emit(6, step6Title, StepStatus.RUNNING, "SSID: $step6Ssid")
-            configureWifiBand(
-                unit = step6Unit,
-                ssid = step6Ssid,
-                password = step6Pass,
-                secMode = secMode.formValue,
-                isConnectedBandFinalStep = false
+            val handoverBand: WifiBand
+            val handoverBandLabel: String
+            val handoverSsid: String
+            val handoverPass: String
+            val handoverBssidHint: String?
+
+            // Step 6: Configure Secondary Wi-Fi Band (or both bands on 2.4GHz-only Android hardware) & Logout Connection 1
+            val conn1SessionKey: String
+            if (allowSingleBand24gFallback) {
+                val step6Title = "Bước 6/$totalSteps: Cấu hình Wi-Fi 5GHz & 2.4GHz (Chế độ máy 2.4GHz)"
+                emit(6, step6Title, StepStatus.RUNNING, "Đang lưu 5GHz ('$wifi5Ssid') và 2.4GHz ('$wifi24Ssid')...")
+                configureWifiBand(
+                    unit = 1,
+                    ssid = wifi5Ssid,
+                    password = wifi5Pass,
+                    secMode = secMode.formValue,
+                    isConnectedBandFinalStep = false
+                )
+                if (settlingDelayMs > 0L) delay(settlingDelayMs)
+                val unit0Outcome = configureWifiBand(
+                    unit = 0,
+                    ssid = wifi24Ssid,
+                    password = wifi24Pass,
+                    secMode = secMode.formValue,
+                    isConnectedBandFinalStep = true
+                )
+                conn1SessionKey = lastActiveSessionKey.ifEmpty { sessionKey }
+                if (!unit0Outcome.droppedDuringRadioReload) {
+                    logout()
+                } else {
+                    sessionKey = ""
+                }
+                if (conn1SessionKey.isNotEmpty()) {
+                    lastActiveSessionKey = conn1SessionKey
+                }
+                handoverBand = WifiBand.BAND_2_4_GHZ
+                handoverBandLabel = "2.4GHz"
+                handoverSsid = wifi24Ssid
+                handoverPass = wifi24Pass
+                handoverBssidHint = bandResolution.wl0Bssid
+                emit(6, step6Title, StepStatus.SUCCESS, "Đã gửi cấu hình 5GHz & 2.4GHz, chuẩn bị kết nối lại '$wifi24Ssid'")
+            } else {
+                val step6Title = "Bước 6/$totalSteps: Đổi tên & cấu hình Wi-Fi phụ $secondaryBandLabel"
+                emit(6, step6Title, StepStatus.RUNNING, "SSID phụ: $secondarySsid")
+                configureWifiBand(
+                    unit = secondaryUnit,
+                    ssid = secondarySsid,
+                    password = secondaryPass,
+                    secMode = secMode.formValue,
+                    isConnectedBandFinalStep = false
+                )
+                if (settlingDelayMs > 0L) delay(settlingDelayMs)
+                conn1SessionKey = lastActiveSessionKey.ifEmpty { sessionKey }
+                logout()
+                if (conn1SessionKey.isNotEmpty()) {
+                    lastActiveSessionKey = conn1SessionKey
+                }
+                handoverBand = secondaryBand
+                handoverBandLabel = secondaryBandLabel
+                handoverSsid = secondarySsid
+                handoverPass = secondaryPass
+                handoverBssidHint = if (handoverBand == WifiBand.BAND_5_GHZ) {
+                    bandResolution.wl1Bssid
+                } else {
+                    bandResolution.wl0Bssid
+                }
+                emit(6, step6Title, StepStatus.SUCCESS, "Đã lưu Wi-Fi phụ $secondaryBandLabel ('$secondarySsid') & đóng phiên Lần 1")
+            }
+
+            // Step 7: Wait for ONT Radio Startup & Auto-Switch to Newly Configured Wi-Fi (Connection 2)
+            val step7Title = "Bước 7/$totalSteps: Đợi ONT phát sóng mới & Chuyển sang Wi-Fi $handoverBandLabel"
+            val switchHandler = onSwitchToSecondaryWifi
+                ?: throw OntDriverException(
+                    "Chưa cấu hình hàm chuyển sóng tự động (onSwitchToSecondaryWifi) cho quy trình 2 lần kết nối."
+                )
+            emit(
+                7,
+                step7Title,
+                StepStatus.RUNNING,
+                "Đang chờ ONT khởi động lại sóng '$handoverSsid' ($handoverBandLabel) và chuyển kết nối..."
+            )
+            val handoverCtx = try {
+                switchHandler.invoke(
+                    handoverSsid,
+                    handoverPass,
+                    handoverBand,
+                    secMode.formValue,
+                    handoverBssidHint,
+                    settings.wifiHandoverTimeoutMs
+                ) { statusDetail ->
+                    emit(7, step7Title, StepStatus.RUNNING, statusDetail)
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (de: OntDriverException) {
+                throw de
+            } catch (e: Exception) {
+                throw OntNetworkError(
+                    "Không thể chuyển kết nối sang Wi-Fi mới '$handoverSsid' ($handoverBandLabel): ${e.message}",
+                    e
+                )
+            }
+
+            rebuildHttpClients(handoverCtx.socketFactory)
+
+            emit(7, step7Title, StepStatus.RUNNING, "Đã ghép nối '$handoverSsid', đang kiểm tra ONT Gateway 192.168.1.1...")
+            val postHandoverBudgetMs = settings.gatewayPostHandoverTimeoutMs.coerceAtLeast(50L)
+            val probeDeadlineMs = monotonicMillis() + postHandoverBudgetMs
+            var gatewayReachableOnConn2 = false
+            while (monotonicMillis() < probeDeadlineMs) {
+                if (probeGateway(failOnCertMismatch = true)) {
+                    gatewayReachableOnConn2 = true
+                    break
+                }
+                val sleepProbe = minOf(
+                    recoveryRetryDelayMs.coerceAtLeast(15L),
+                    (probeDeadlineMs - monotonicMillis()).coerceAtLeast(10L)
+                )
+                delay(sleepProbe)
+            }
+            if (!gatewayReachableOnConn2 && !probeGateway(failOnCertMismatch = true)) {
+                throw OntNetworkError(
+                    "Đã chuyển sang Wi-Fi '$handoverSsid' nhưng không truy cập được ONT Gateway tại $cleanBaseUrl sau ${postHandoverBudgetMs / 1000}s."
+                )
+            }
+
+            emit(7, step7Title, StepStatus.RUNNING, "Đang đăng nhập lại ONT bằng mật khẩu Admin mới...")
+            val userExistBudgetMs = if (settings.gatewayPostHandoverTimeoutMs >= 45_000L) {
+                65_000L
+            } else {
+                settings.gatewayPostHandoverTimeoutMs.coerceAtLeast(userExistPollIntervalMs * 2)
+            }
+            authenticateSecondConnection(
+                newAdminPass = settings.adminNewPass,
+                previousSessionKey = conn1SessionKey,
+                userExistWaitBudgetMs = userExistBudgetMs
             )
 
-            if (doFwUpdate && fwFile != null) {
-                // Firmware Update Mode (8 steps):
-                // Keep current connection stable for Firmware upload at Step 7!
-                if (settlingDelayMs > 0) {
-                    delay(settlingDelayMs)
-                }
-                emit(6, step6Title, StepStatus.SUCCESS, "Đã lưu & khởi động Wi-Fi $step6BandLabel ($step6Ssid)")
+            verifySecondConnectionBandAndMac(
+                localIpv4 = handoverCtx.localWifiIpv4,
+                expectedBand = handoverBand,
+                expectedOntBaseMac = resolvedOntBaseMac
+            )
+            emit(
+                7,
+                step7Title,
+                StepStatus.SUCCESS,
+                "Đã đứng trên Wi-Fi '$handoverSsid' ($handoverBandLabel) & xác thực ONT thành công"
+            )
 
-                val gatewayReady = ensureGatewayReadyBeforeStep7(
-                    settings = settings,
-                    bssid = effectiveBssid,
-                    previousSessionKey = lastActiveSessionKey,
-                    maxAttempts = 8,
-                    retryDelayMs = recoveryRetryDelayMs
+            // Step 8: Configure Remaining Primary Wi-Fi Band (or verify NVRAM on 2.4GHz-only fallback)
+            if (allowSingleBand24gFallback) {
+                val step8Title = "Bước 8/$totalSteps: Xác nhận lưu NVRAM cả 2 băng tần Wi-Fi"
+                emit(8, step8Title, StepStatus.RUNNING, "Đang kiểm tra NVRAM Wi-Fi 5GHz & 2.4GHz...")
+                val nvram5 = readConfiguredBandSsidFromNvram(1)
+                if (nvram5 != wifi5Ssid) {
+                    configureWifiBand(
+                        unit = 1,
+                        ssid = wifi5Ssid,
+                        password = wifi5Pass,
+                        secMode = secMode.formValue,
+                        isConnectedBandFinalStep = false
+                    )
+                }
+                val nvram24 = readConfiguredBandSsidFromNvram(0)
+                if (nvram24 != null && nvram24 != wifi24Ssid) {
+                    configureWifiBand(
+                        unit = 0,
+                        ssid = wifi24Ssid,
+                        password = wifi24Pass,
+                        secMode = secMode.formValue,
+                        isConnectedBandFinalStep = true
+                    )
+                }
+                emit(8, step8Title, StepStatus.SUCCESS, "Đã xác nhận lưu NVRAM cả 2 Wi-Fi ('$wifi24Ssid' & '$wifi5Ssid')")
+            } else {
+                val step8Title = "Bước 8/$totalSteps: Đổi tên & cấu hình Wi-Fi còn lại $primaryBandLabel"
+                emit(
+                    8,
+                    step8Title,
+                    StepStatus.RUNNING,
+                    "SSID mới: $primarySsid (cấu hình từ kết nối phụ $handoverBandLabel)"
                 )
-                if (!gatewayReady) {
+                try {
+                    configureWifiBand(
+                        unit = primaryUnit,
+                        ssid = primarySsid,
+                        password = primaryPass,
+                        secMode = secMode.formValue,
+                        isConnectedBandFinalStep = false
+                    )
+                } catch (e: OntNetworkError) {
+                    emit(
+                        8,
+                        step8Title,
+                        StepStatus.RUNNING,
+                        "Đang đồng bộ lại kết nối '$handoverSsid' để kiểm tra NVRAM cho '$primarySsid'..."
+                    )
+                    val readyAfterDrop = ensureGatewayReadyOnSecondaryBand(
+                        settings = settings,
+                        timeoutBudgetMs = settings.postSecondWifiSettleTimeoutMs
+                    )
+                    if (!readyAfterDrop) {
+                        throw OntNetworkError(
+                            "Mất kết nối tới ONT trên Wi-Fi '$handoverSsid' khi xác nhận cấu hình Wi-Fi $primaryBandLabel ('$primarySsid').",
+                            e
+                        )
+                    }
+                    val savedNvramSsid = readConfiguredBandSsidFromNvram(primaryUnit)
+                    if (savedNvramSsid == primarySsid) {
+                        commitRadioReloadBestEffort()
+                    } else {
+                        configureWifiBand(
+                            unit = primaryUnit,
+                            ssid = primarySsid,
+                            password = primaryPass,
+                            secMode = secMode.formValue,
+                            isConnectedBandFinalStep = false
+                        )
+                    }
+                }
+                if (settlingDelayMs > 0L) delay(settlingDelayMs)
+                emit(
+                    8,
+                    step8Title,
+                    StepStatus.SUCCESS,
+                    "Đã hoàn tất cấu hình cả 2 băng tần Wi-Fi ('$wifi24Ssid' / '$wifi5Ssid')"
+                )
+            }
+
+            // Final Step: Either Step 9 Firmware Update (9/9) or Clean Logout & Finish (8/8)
+            if (doFwUpdate && fwFile != null) {
+                val step9Title = "Bước 9/9: Tải lên & Cập nhật Firmware ONT (Bước cuối)"
+                val fwDisplayName = settings.firmwareFileName.ifBlank { fwFile.name }
+                emit(
+                    9,
+                    step9Title,
+                    StepStatus.RUNNING,
+                    "Đang đồng bộ kết nối '$handoverSsid' trước khi tải lên Firmware..."
+                )
+                val readyForFirmware = ensureGatewayReadyOnSecondaryBand(
+                    settings = settings,
+                    timeoutBudgetMs = settings.postSecondWifiSettleTimeoutMs
+                )
+                if (!readyForFirmware) {
                     throw OntNetworkError(
-                        "Đã lưu cấu hình Bước 1-6 (kể cả Wi-Fi $step6BandLabel '$step6Ssid'), nhưng mất kết nối tới ONT trước khi nạp Firmware (Bước 7). Hãy kiểm tra lại kết nối Wi-Fi ONT rồi bấm Chạy Lại."
+                        "Đã cấu hình xong cả 2 Wi-Fi ('$wifi24Ssid' / '$wifi5Ssid'), nhưng mất kết nối tới ONT trước khi nạp Firmware (Bước 9). Hãy kiểm tra kết nối Wi-Fi '$handoverSsid' rồi thử lại."
                     )
                 }
 
-                // Step 7/8: Upload & Update Firmware BEFORE the final connected Wi-Fi step
-                val step7FwTitle = "Bước 7/8: Tải lên & Cập nhật Firmware ONT (Trước bước cuối)"
-                val fwDisplayName = settings.firmwareFileName.ifBlank { fwFile.name }
+                val fwSizeKb = fwFile.length() / 1024
                 emit(
-                    7,
-                    step7FwTitle,
+                    9,
+                    step9Title,
                     StepStatus.RUNNING,
-                    "Đang tải lên $fwDisplayName (${fwFile.length() / 1024} KB)..."
+                    "Đang tải lên $fwDisplayName ($fwSizeKb KB)..."
                 )
                 try {
                     updateFirmware(
                         firmwareFile = fwFile,
-                        uploadTimeoutMs = settings.firmwareUploadTimeoutMs
+                        uploadTimeoutMs = settings.firmwareUploadTimeoutMs,
+                        onProgressPercent = { pct ->
+                            emit(
+                                9,
+                                step9Title,
+                                StepStatus.RUNNING,
+                                "Đang tải lên $fwDisplayName ($pct% — $fwSizeKb KB)..."
+                            )
+                        }
                     )
                 } catch (e: OntDriverException) {
                     val prefix =
-                        "Đã đổ xong cấu hình (Bước 1-6: WAN, SLID, LAN, Wi-Fi $step6BandLabel), nhưng lỗi Cập nhật Firmware (Bước 7): ${e.message}"
+                        "Đã cấu hình xong cả 2 Wi-Fi ('$wifi24Ssid' / '$wifi5Ssid' — Bước 1-8), nhưng lỗi Cập nhật Firmware (Bước 9): ${e.message}"
                     throw when (e) {
                         is OntNetworkError -> OntNetworkError(prefix, e)
                         is OntValidationError -> OntValidationError(prefix)
                         else -> OntDriverException(prefix, e)
                     }
                 }
-                emit(
-                    7,
-                    step7FwTitle,
-                    StepStatus.SUCCESS,
-                    "Đã nạp Firmware hợp lệ ($fwDisplayName), ONT bắt đầu cập nhật & khởi động lại"
-                )
 
-                // Immediately unbind ONT Wi-Fi so 4G/5G cellular restores while ONT flashes (~2m17s)
                 onUnbindNetwork?.invoke()
                 unbindDone = true
 
-                val step8Title = "Bước 8/8: Đổi Wi-Fi $step7BandLabel kết nối chính (Thủ công sau khi ONT reboot)"
-                val step8Message = if (alreadyConfiguredOppositeBand) {
-                    emit(
-                        8,
-                        step8Title,
-                        StepStatus.SUCCESS,
-                        "Cả 2 băng tần Wi-Fi ('$wifi24Ssid' / '$wifi5Ssid') đã được cấu hình. ONT đang khởi động lại với Firmware mới."
-                    )
-                    "Đã nạp Firmware ($fwDisplayName) và hoàn tất cả 2 băng tần Wi-Fi! Đợi ONT khởi động lại (~2 phút)."
-                } else {
-                    val passNote = if (secMode == WifiSecurityMode.OPEN) {
-                        "Không mật khẩu (Open)"
-                    } else {
-                        "Mật khẩu: $step7Pass"
-                    }
-                    emit(
-                        8,
-                        step8Title,
-                        StepStatus.PENDING,
-                        "Đợi ONT khởi động lại (~2 phút), sau đó đổi Wi-Fi $step7BandLabel sang '$step7Ssid' ($passNote)"
-                    )
-                    "Đã đổ Bước 1-6 & Nạp Firmware ($fwDisplayName)! Đợi ONT khởi động lại (~2 phút) rồi đổi nốt Wi-Fi $step7BandLabel ('$step7Ssid')."
-                }
+                emit(
+                    9,
+                    step9Title,
+                    StepStatus.SUCCESS,
+                    "Đã nạp Firmware ($fwDisplayName) thành công! ONT đang tự ghi flash & khởi động lại (~2 phút 20 giây)."
+                )
                 return@withContext MobileSetupResult(
                     success = true,
                     soMay = record.slid,
@@ -1453,88 +1875,21 @@ class OntMobileDriver(
                     newSsid5g = wifi5Ssid,
                     newPass5g = wifi5Pass,
                     updatedAdminPass = settings.adminNewPass,
-                    message = step8Message,
-                    beaconVerified = alreadyConfiguredOppositeBand,
+                    message = "Hoàn tất 9/9 bước! Đã đổi cả 2 Wi-Fi ($wifi24Ssid / $wifi5Ssid) & nạp Firmware ($fwDisplayName). ONT đang tự khởi động lại (~2 phút 20 giây).",
+                    beaconVerified = true,
                     firmwareUpdated = true,
                     firmwareFileName = fwDisplayName,
-                    manualWifiStepPending = !alreadyConfiguredOppositeBand,
-                    manualWifiUnit = step7Unit,
-                    manualWifiBandLabel = step7BandLabel,
-                    manualWifiSsid = step7Ssid,
-                    manualWifiPass = step7Pass,
-                    configuredSecondaryBandLabel = step6BandLabel,
-                    configuredSecondarySsid = step6Ssid,
-                    configuredSecondaryPass = step6Pass,
+                    configuredSecondaryBandLabel = handoverBandLabel,
+                    configuredSecondarySsid = handoverSsid,
+                    configuredSecondaryPass = handoverPass,
                     wifiSecurityMode = secMode.formValue,
                     resolvedConnectedBand = effectiveConnectedBand
                 )
             }
 
-            if (settlingDelayMs > 0) {
-                delay(settlingDelayMs)
-            }
-            emit(6, step6Title, StepStatus.SUCCESS, "Đã lưu & khởi động Wi-Fi $step6BandLabel ($step6Ssid)")
-
-            // Mandatory readiness & session sync gate over the SAME active Wi-Fi connection before Step 7 Attempt 1
-            val gatewayReadyBeforeStep7 = ensureGatewayReadyBeforeStep7(
-                settings = settings,
-                bssid = effectiveBssid,
-                previousSessionKey = lastActiveSessionKey,
-                maxAttempts = 8,
-                retryDelayMs = recoveryRetryDelayMs
-            )
-            if (!gatewayReadyBeforeStep7) {
-                throw OntNetworkError(
-                    "Đã lưu cấu hình Bước 1-6 (kể cả Wi-Fi $step6BandLabel '$step6Ssid'), nhưng mất kết nối tới ONT trước khi thực hiện Bước 7 ('$step7Ssid'). Hãy kiểm tra lại kết nối Wi-Fi ONT rồi bấm Chạy Lại."
-                )
-            }
-
-            // Step 7: Save connected Wi-Fi band to NVRAM BEFORE allowing disconnect
-            val step7Title = "Bước 7/7: Đổi tên & mật khẩu Wi-Fi $step7BandLabel (Bước cuối)"
-            emit(7, step7Title, StepStatus.RUNNING, "SSID mới: $step7Ssid (Lưu NVRAM trước khi ngắt kết nối)")
-            val step7Outcome = applyFinalConnectedBandWithRetries(
-                unit = step7Unit,
-                ssid = step7Ssid,
-                password = step7Pass,
-                secMode = secMode.formValue,
-                settings = settings,
-                bssid = effectiveBssid,
-                oldWifiStillAliveMessage = "Cả 3 lần thử Bước 7 đều ngắt kết nối trước khi ONT lưu '$step7Ssid' vào NVRAM (sóng cũ vẫn còn phản hồi). Vui lòng đứng gần ONT và bấm Chạy Lại.",
-                fallbackFailureMessage = "Không thể gửi cấu hình Bước 7 cho băng tần $step7BandLabel ('$step7Ssid').",
-                onRetryAttempt = { nextAttempt ->
-                    emit(
-                        7,
-                        step7Title,
-                        StepStatus.RUNNING,
-                        "Đang đồng bộ lại kết nối ONT để áp dụng Bước 7 (lần $nextAttempt/3)..."
-                    )
-                }
-            )
-            releaseOrClearSessionAfterFinalWifi(step7Outcome)
-
-            // Immediately unbind process network so 4G/5G cellular restores right away
+            logout()
             onUnbindNetwork?.invoke()
             unbindDone = true
-
-            // [Red Team RT-04] Skip 4.7s beacon scan wait when wirelesscfg.json already confirmed NVRAM save (HTTP 200 OK)
-            val beaconVerified = if (step7Outcome.cfgSavedToNvram) {
-                true
-            } else {
-                try {
-                    onVerifyNewSsid?.invoke(wifi24Ssid, wifi5Ssid) ?: true
-                } catch (ce: CancellationException) {
-                    throw ce
-                } catch (_: Exception) {
-                    false
-                }
-            }
-
-            emit(
-                7,
-                step7Title,
-                StepStatus.SUCCESS,
-                "Đã đổi Wi-Fi sang '$wifi24Ssid' / '$wifi5Ssid' và khôi phục mạng di động!"
-            )
 
             MobileSetupResult(
                 success = true,
@@ -1546,8 +1901,12 @@ class OntMobileDriver(
                 newSsid5g = wifi5Ssid,
                 newPass5g = wifi5Pass,
                 updatedAdminPass = settings.adminNewPass,
-                message = "Cấu hình hoàn tất 7/7 bước! Wi-Fi mới: $wifi24Ssid / $wifi5Ssid",
-                beaconVerified = beaconVerified,
+                message = "Cấu hình hoàn tất 8/8 bước! Đã đổi thành công cả 2 Wi-Fi: $wifi24Ssid / $wifi5Ssid",
+                beaconVerified = true,
+                firmwareUpdated = false,
+                configuredSecondaryBandLabel = handoverBandLabel,
+                configuredSecondarySsid = handoverSsid,
+                configuredSecondaryPass = handoverPass,
                 wifiSecurityMode = secMode.formValue,
                 resolvedConnectedBand = effectiveConnectedBand
             )
@@ -1563,115 +1922,11 @@ class OntMobileDriver(
                     } catch (_: Exception) {
                     }
                 }
-                try {
-                    probePauseMutex?.unlock()
-                } catch (_: Exception) {
-                }
-            }
-        }
-    }
-
-    /**
-     * [Red Team RT-04 & RT-06] Standalone helper to configure ONLY the remaining connected Wi-Fi band
-     * manually after the ONT finishes its ~2-minute firmware flash & reboot, with full 3-attempt
-     * NVRAM save / old-Wi-Fi disappearance verification.
-     */
-    suspend fun executeManualConnectedWifiOnly(
-        record: SubscriberRecord,
-        settings: GlobalSettings = GlobalSettings(baseUrl = baseUrl, requestTimeoutMs = timeoutMs),
-        targetUnit: Int,
-        targetBandLabel: String,
-        targetSsid: String,
-        targetPass: String,
-        targetSecMode: String = settings.wifiSecurityMode,
-        bssid: String? = null
-    ): MobileSetupResult = withContext(Dispatchers.IO) {
-        val secMode = WifiSecurityMode.fromFormValue(targetSecMode)
-            ?: throw OntValidationError("Chế độ bảo mật Wi-Fi '$targetSecMode' không hợp lệ.")
-        val cleanSsid = targetSsid.trim()
-        val cleanPass = if (secMode == WifiSecurityMode.OPEN) "" else targetPass.trim()
-        if (cleanSsid.length !in 1..32 || !OntInputValidator.isPrintableAscii(cleanSsid)) {
-            throw OntValidationError("Tên Wi-Fi $targetBandLabel phải dài từ 1..32 ký tự ASCII in được.")
-        }
-        if (!OntInputValidator.isPrintableAscii(cleanPass)) {
-            throw OntValidationError("Mật khẩu Wi-Fi $targetBandLabel chỉ chấp nhận ký tự ASCII in được.")
-        }
-        if (secMode.requiresPassword && cleanPass.length !in 8..63) {
-            throw OntValidationError("Mật khẩu Wi-Fi $targetBandLabel phải dài từ 8..63 ký tự.")
-        }
-        try {
-            OntInputValidator.sanitizeInputMetacharacters(cleanSsid)
-            OntInputValidator.sanitizeInputMetacharacters(cleanPass)
-        } catch (e: IllegalArgumentException) {
-            throw OntValidationError(e.message ?: "Tham số Wi-Fi chứa ký tự không hợp lệ")
-        }
-        probePauseMutex?.lock()
-        var unbindDone = false
-        clearSessionKeys()
-        try {
-            if (!probeGateway()) {
-                throw OntNetworkError(
-                    "Chưa kết nối được tới ONT GW040-NSv2 tại $cleanBaseUrl. " +
-                        "Hãy đảm bảo ONT đã khởi động lại xong (~2 phút) và điện thoại đang bắt sóng Wi-Fi của ONT."
-                )
-            }
-
-            loginAndChangePassword(
-                defaultPass = settings.adminDefaultPass,
-                newPass = settings.adminNewPass,
-                bssid = bssid,
-                lastKnownAdminPass = record.lastKnownAdminPass.ifBlank { settings.adminNewPass }
-            )
-            onAdminPasswordChanged?.invoke(settings.adminNewPass)
-
-            val outcome = applyFinalConnectedBandWithRetries(
-                unit = targetUnit,
-                ssid = cleanSsid,
-                password = cleanPass,
-                secMode = secMode.formValue,
-                settings = settings,
-                bssid = bssid,
-                oldWifiStillAliveMessage = "Cả 3 lần thử đổi Wi-Fi $targetBandLabel ('$cleanSsid') đều ngắt kết nối khi sóng cũ vẫn còn hoạt động. Vui lòng đứng gần ONT và thử lại.",
-                fallbackFailureMessage = "Không thể lưu cấu hình Wi-Fi $targetBandLabel ('$cleanSsid')."
-            )
-            releaseOrClearSessionAfterFinalWifi(outcome)
-
-            onUnbindNetwork?.invoke()
-            unbindDone = true
-
-            MobileSetupResult(
-                success = true,
-                soMay = record.slid,
-                slid = record.slid,
-                accountPppoe = record.accountPppoe,
-                newSsid24g = record.effectiveWifi24Ssid,
-                newPass24g = record.effectiveWifi24Pass(secMode.formValue),
-                newSsid5g = record.effectiveWifi5Ssid,
-                newPass5g = record.effectiveWifi5Pass(secMode.formValue),
-                updatedAdminPass = settings.adminNewPass,
-                message = "Đã đổi xong Wi-Fi $targetBandLabel sang '$cleanSsid'! Hoàn tất toàn bộ cấu hình ONT.",
-                beaconVerified = true,
-                firmwareUpdated = settings.enableFirmwareUpdate,
-                firmwareFileName = settings.firmwareFileName,
-                manualWifiStepPending = false,
-                manualWifiUnit = targetUnit,
-                manualWifiBandLabel = targetBandLabel,
-                manualWifiSsid = cleanSsid,
-                manualWifiPass = cleanPass,
-                wifiSecurityMode = secMode.formValue,
-                resolvedConnectedBand = if (targetUnit == 1) WifiBand.BAND_5_GHZ else WifiBand.BAND_2_4_GHZ
-            )
-        } finally {
-            withContext(NonCancellable) {
-                try {
-                    logout()
-                } catch (_: Exception) {
-                }
-                if (!unbindDone) {
-                    try {
-                        onUnbindNetwork?.invoke()
-                    } catch (_: Exception) {
-                    }
+                val hadPin = pinnedPeerCertSha256 != null
+                pinnedPeerCertSha256 = null
+                observedPeerCertSha256 = null
+                if (hadPin) {
+                    rebuildHttpClients(currentSocketFactory)
                 }
                 try {
                     probePauseMutex?.unlock()

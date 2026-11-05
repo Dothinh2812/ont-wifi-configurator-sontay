@@ -9,7 +9,7 @@ public struct ExecutionProgressSheet: View {
     let onShareExcelReport: () -> Void
 
     @State private var copiedWifiPassToast = false
-
+    @State private var rebootCountdownSec: Int = 150
     public init(
         viewModel: MainViewModel,
         onShareExcelReport: @escaping () -> Void
@@ -24,6 +24,10 @@ public struct ExecutionProgressSheet: View {
                 VStack(alignment: .leading, spacing: 16) {
                     headerBanner
 
+                    if let prompt = viewModel.handoverPrompt, viewModel.isRunningSetup {
+                        step7HandoverPromptCard(prompt)
+                    }
+
                     VStack(spacing: 10) {
                         ForEach(viewModel.stepProgressList) { step in
                             stepRow(step)
@@ -31,6 +35,9 @@ public struct ExecutionProgressSheet: View {
                     }
 
                     if let result = viewModel.setupResult, result.success {
+                        if result.firmwareUpdated {
+                            firmwareRebootCountdownCard(result)
+                        }
                         successSummaryCard(result)
                     }
 
@@ -47,20 +54,30 @@ public struct ExecutionProgressSheet: View {
             .navigationTitle("Tiến trình cấu hình ONT")
             .navigationBarTitleDisplayMode(.inline)
             .interactiveDismissDisabled(viewModel.isRunningSetup)
+            .task(id: viewModel.setupResult?.firmwareUpdated == true && viewModel.setupResult?.success == true) {
+                guard let res = viewModel.setupResult, res.success, res.firmwareUpdated else { return }
+                rebootCountdownSec = 150
+                while rebootCountdownSec > 0 && !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    if Task.isCancelled { break }
+                    rebootCountdownSec -= 1
+                }
+            }
         }
     }
 
     private var headerBanner: some View {
-        HStack(spacing: 12) {
+        let totalSteps = viewModel.stepProgressList.first?.totalSteps ?? viewModel.stepProgressList.count
+        return HStack(spacing: 12) {
             if viewModel.isRunningSetup {
                 ProgressView()
-                Text("Đang đổ cấu hình 7 bước qua Wi-Fi ONT... Vui lòng giữ màn hình.")
+                Text("Đang đổ cấu hình qua quy trình 2 lần kết nối... Vui lòng giữ ứng dụng.")
                     .font(.subheadline.weight(.semibold))
             } else if viewModel.setupResult?.success == true {
                 Image(systemName: "checkmark.seal.fill")
                     .foregroundColor(.green)
                     .font(.title2)
-                Text("Hoàn tất 7/7 bước cấu hình ONT thành công!")
+                Text("Hoàn tất \(totalSteps)/\(totalSteps) bước cấu hình ONT thành công!")
                     .font(.headline)
                     .foregroundColor(.green)
             } else {
@@ -111,6 +128,91 @@ public struct ExecutionProgressSheet: View {
             Image(systemName: "exclamationmark.circle.fill")
                 .foregroundColor(.red)
         }
+    }
+
+    private func step7HandoverPromptCard(_ prompt: HandoverPromptState) -> some View {
+        let secMode = WifiSecurityMode(rawValue: prompt.securityMode) ?? .wpa2Wpa3Psk
+        let requiresPass = secMode.requiresPassword && !prompt.targetPass.isEmpty
+        return TimelineView(.periodic(from: .now, by: 1.0)) { context in
+            let remainingSec = max(0, Int(prompt.deadline.timeIntervalSince(context.date)))
+            let mins = remainingSec / 60
+            let secs = remainingSec % 60
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Image(systemName: "wifi.circle.fill")
+                        .foregroundColor(.blue)
+                        .font(.title3)
+                    Text("Bước 7: Chuyển sang Wi-Fi phụ mới (\(prompt.band.label))")
+                        .font(.subheadline.weight(.bold))
+                        .foregroundColor(.blue)
+                }
+                Text("ONT đang phát sóng mới (kênh 5GHz DFS có thể mất 15–60s mới hiện tên). Hãy chọn mạng dưới đây trong Cài đặt Wi-Fi iOS rồi quay lại ứng dụng — Bước 8 & 9 sẽ tự chạy tiếp:")
+                    .font(.caption)
+                Text("• Tên Wi-Fi cần bắt: \(prompt.targetSsid)")
+                    .font(.subheadline.weight(.semibold))
+                Text("• Mật khẩu: \(requiresPass ? prompt.targetPass : "Không mật khẩu (Open)")")
+                    .font(.subheadline.monospaced())
+                Text(String(format: "⏳ Thời gian chờ tự động còn lại: %02d:%02d (%ds)", mins, secs, remainingSec))
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.orange)
+
+                HStack(spacing: 8) {
+                    if requiresPass {
+                        Button {
+                            copyPasswordLocalExpiring(prompt.targetPass)
+                            copiedWifiPassToast = true
+                        } label: {
+                            Label("Chép mật khẩu", systemImage: "doc.on.doc")
+                                .font(.caption.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 6)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+
+                    Button {
+                        viewModel.wifiMonitor.openSystemWifiSettings()
+                    } label: {
+                        Label("Mở Cài Đặt Wi-Fi iOS", systemImage: "gear")
+                            .font(.caption.weight(.bold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding()
+            .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.12)))
+        }
+    }
+
+    private func firmwareRebootCountdownCard(_ result: MobileSetupResult) -> some View {
+        let mins = rebootCountdownSec / 60
+        let secs = rebootCountdownSec % 60
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                    .foregroundColor(.orange)
+                    .font(.title3)
+                Text("ONT Đang Tự Ghi Flash & Khởi Động Lại (~2 phút 20 giây)")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundColor(.orange)
+            }
+            if rebootCountdownSec > 0 {
+                Text(String(format: "⏳ Đếm ngược tham khảo: còn %02d:%02d (%ds) — Tuyệt đối không tắt nguồn ONT!", mins, secs, rebootCountdownSec))
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.orange)
+            } else {
+                Text("✅ Đã qua 2 phút 30 giây — ONT đã có thể hoàn tất khởi động lại với Firmware mới (\(result.firmwareFileName))!")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.green)
+            }
+            Text("• Cả 2 băng tần Wi-Fi (\(result.newSsid24g) / \(result.newSsid5g)) và Firmware (\(result.firmwareFileName)) đã hoàn tất 100%. Bạn có thể xuất báo cáo Excel ngay bên dưới.")
+                .font(.caption)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.orange.opacity(0.14)))
     }
 
     private func successSummaryCard(_ result: MobileSetupResult) -> some View {
@@ -201,6 +303,7 @@ public struct ExecutionProgressSheet: View {
 
     /// Copy Wi-Fi password to UIPasteboard with `.localOnly: true` and 120s expiration
     /// so customer credentials do not leak over Universal Clipboard.
+    @MainActor
     private func copyPasswordLocalExpiring(_ password: String) {
         #if canImport(UIKit)
         UIPasteboard.general.setItems(

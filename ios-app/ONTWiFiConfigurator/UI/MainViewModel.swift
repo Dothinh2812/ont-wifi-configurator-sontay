@@ -6,6 +6,28 @@ import SwiftUI
 import UIKit
 #endif
 
+public struct HandoverPromptState: Equatable, Sendable {
+    public let targetSsid: String
+    public let targetPass: String
+    public let band: WifiBand
+    public let securityMode: String
+    public let deadline: Date
+
+    public init(
+        targetSsid: String,
+        targetPass: String,
+        band: WifiBand,
+        securityMode: String,
+        deadline: Date
+    ) {
+        self.targetSsid = targetSsid
+        self.targetPass = targetPass
+        self.band = band
+        self.securityMode = securityMode
+        self.deadline = deadline
+    }
+}
+
 private final class LockedBox<T>: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: T
@@ -14,23 +36,42 @@ private final class LockedBox<T>: @unchecked Sendable {
         get { lock.lock(); defer { lock.unlock() }; return storage }
         set { lock.lock(); storage = newValue; lock.unlock() }
     }
+    func withValue<R>(_ body: (inout T) -> R) -> R {
+        lock.lock()
+        defer { lock.unlock() }
+        return body(&storage)
+    }
 }
 
 @MainActor
 public final class MainViewModel: ObservableObject {
 
-    public static func defaultSevenSteps() -> [StepProgress] {
+    public static func defaultEightStepsDualWifi() -> [StepProgress] {
         return [
-            StepProgress(stepNumber: 1, totalSteps: 7, title: "Bước 1/7: Kiểm tra kết nối & nhận diện ONT Gateway", status: .pending),
-            StepProgress(stepNumber: 2, totalSteps: 7, title: "Bước 2/7: Đăng nhập & Đổi mật khẩu Admin", status: .pending),
-            StepProgress(stepNumber: 3, totalSteps: 7, title: "Bước 3/7: Cấu hình WAN PPPoE (VLAN 11)", status: .pending),
-            StepProgress(stepNumber: 4, totalSteps: 7, title: "Bước 4/7: Cài đặt GPON Password (SLID / Mã MEN)", status: .pending),
-            StepProgress(stepNumber: 5, totalSteps: 7, title: "Bước 5/7: Kiểm tra & Lưu cấu hình LAN IPv4", status: .pending),
-            StepProgress(stepNumber: 6, totalSteps: 7, title: "Bước 6/7: Cấu hình Wi-Fi băng tần phụ", status: .pending),
-            StepProgress(stepNumber: 7, totalSteps: 7, title: "Bước 7/7: Đổi tên & mật khẩu Wi-Fi băng tần kết nối (Bước cuối)", status: .pending)
+            StepProgress(stepNumber: 1, totalSteps: 8, title: "Bước 1/8: Kiểm tra kết nối & nhận diện ONT Gateway", status: .pending),
+            StepProgress(stepNumber: 2, totalSteps: 8, title: "Bước 2/8: Đăng nhập & Đổi mật khẩu Admin", status: .pending),
+            StepProgress(stepNumber: 3, totalSteps: 8, title: "Bước 3/8: Cấu hình WAN PPPoE (VLAN 11)", status: .pending),
+            StepProgress(stepNumber: 4, totalSteps: 8, title: "Bước 4/8: Cài đặt GPON Password (SLID / Mã MEN)", status: .pending),
+            StepProgress(stepNumber: 5, totalSteps: 8, title: "Bước 5/8: Kiểm tra & Lưu cấu hình LAN IPv4", status: .pending),
+            StepProgress(stepNumber: 6, totalSteps: 8, title: "Bước 6/8: Đổi tên & cấu hình Wi-Fi phụ", status: .pending),
+            StepProgress(stepNumber: 7, totalSteps: 8, title: "Bước 7/8: Đợi ONT phát sóng mới & Chuyển sang Wi-Fi phụ", status: .pending),
+            StepProgress(stepNumber: 8, totalSteps: 8, title: "Bước 8/8: Đổi tên & cấu hình Wi-Fi còn lại", status: .pending)
         ]
     }
 
+    public static func defaultNineStepsWithFirmware() -> [StepProgress] {
+        return [
+            StepProgress(stepNumber: 1, totalSteps: 9, title: "Bước 1/9: Kiểm tra kết nối & nhận diện ONT Gateway", status: .pending),
+            StepProgress(stepNumber: 2, totalSteps: 9, title: "Bước 2/9: Đăng nhập & Đổi mật khẩu Admin", status: .pending),
+            StepProgress(stepNumber: 3, totalSteps: 9, title: "Bước 3/9: Cấu hình WAN PPPoE (VLAN 11)", status: .pending),
+            StepProgress(stepNumber: 4, totalSteps: 9, title: "Bước 4/9: Cài đặt GPON Password (SLID / Mã MEN)", status: .pending),
+            StepProgress(stepNumber: 5, totalSteps: 9, title: "Bước 5/9: Kiểm tra & Lưu cấu hình LAN IPv4", status: .pending),
+            StepProgress(stepNumber: 6, totalSteps: 9, title: "Bước 6/9: Đổi tên & cấu hình Wi-Fi phụ", status: .pending),
+            StepProgress(stepNumber: 7, totalSteps: 9, title: "Bước 7/9: Đợi ONT phát sóng mới & Chuyển sang Wi-Fi phụ", status: .pending),
+            StepProgress(stepNumber: 8, totalSteps: 9, title: "Bước 8/9: Đổi tên & cấu hình Wi-Fi còn lại", status: .pending),
+            StepProgress(stepNumber: 9, totalSteps: 9, title: "Bước 9/9: Tải lên & Cập nhật Firmware ONT (Bước cuối)", status: .pending)
+        ]
+    }
     @Published public var allRecords: [SubscriberRecord] = []
     @Published public var filteredRecords: [SubscriberRecord] = []
     @Published public var searchQuery: String = ""
@@ -54,12 +95,13 @@ public final class MainViewModel: ObservableObject {
     }
     @Published public var showExecutionSheet: Bool = false
     @Published public var isRunningSetup: Bool = false
-    @Published public var stepProgressList: [StepProgress] = MainViewModel.defaultSevenSteps()
+    @Published public var isImportingFirmware: Bool = false
+    @Published public var stepProgressList: [StepProgress] = MainViewModel.defaultEightStepsDualWifi()
+    @Published public var handoverPrompt: HandoverPromptState? = nil
     @Published public var setupResult: MobileSetupResult? = nil
     @Published public var executionError: String? = nil
     @Published public var statusMessage: String? = nil
     @Published public var isInBackground: Bool = false
-
     public let database: AppDatabase
     public let wifiMonitor: IosWifiMonitor
     public let probePauseMutex = AsyncMutex()
@@ -70,6 +112,11 @@ public final class MainViewModel: ObservableObject {
     private var suppressProbeAfterCompletion: Bool = false
     private var cachedSourceExcelData: Data?
     private let backgroundFlagBox = LockedBox<Bool>(false)
+    private let handoverWakeGeneration = LockedBox<Int>(0)
+    #if canImport(UIKit)
+    private var bgTaskId: UIBackgroundTaskIdentifier = .invalid
+    #endif
+
     public init(
         database: AppDatabase = .shared,
         wifiMonitor: IosWifiMonitor = IosWifiMonitor(),
@@ -82,11 +129,15 @@ public final class MainViewModel: ObservableObject {
             timeoutMs: 1200
         )
 
+        cleanupStaleExportFiles()
         loadPersistedRecords()
         loadCachedSourceExcel()
+        loadCachedFirmwareOnInit()
 
+        let wakeBox = self.handoverWakeGeneration
         if startBackgroundLoops {
             wifiMonitor.startMonitoring { [weak self] _ in
+                wakeBox.withValue { $0 += 1 }
                 Task { @MainActor [weak self] in
                     _ = await self?.performGatewayProbeOnce()
                 }
@@ -147,6 +198,10 @@ public final class MainViewModel: ObservableObject {
     public func onScenePhaseActive() {
         isInBackground = false
         backgroundFlagBox.value = false
+        handoverWakeGeneration.withValue { $0 += 1 }
+        if isRunningSetup {
+            renewBackgroundTaskIfNeeded()
+        }
         Task {
             _ = await wifiMonitor.awaitWifiIpv4Ready(maxWaitMs: 1200)
             _ = await performGatewayProbeOnce()
@@ -158,6 +213,25 @@ public final class MainViewModel: ObservableObject {
         backgroundFlagBox.value = true
     }
 
+    private func renewBackgroundTaskIfNeeded() {
+        #if canImport(UIKit)
+        guard bgTaskId == .invalid else { return }
+        bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "ONTTwoConnectionSetup") { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.endActiveBackgroundTask()
+            }
+        }
+        #endif
+    }
+
+    private func endActiveBackgroundTask() {
+        #if canImport(UIKit)
+        if bgTaskId != .invalid {
+            UIApplication.shared.endBackgroundTask(bgTaskId)
+            bgTaskId = .invalid
+        }
+        #endif
+    }
     private func startBackgroundGatewayProbeLoop() {
         backgroundProbeTask?.cancel()
         backgroundProbeTask = Task { [weak self] in
@@ -213,6 +287,7 @@ public final class MainViewModel: ObservableObject {
     }
 
     public func exportExcelReportToTempFile() throws -> URL {
+        cleanupStaleExportFiles()
         let exportedData = try ExcelManager.exportResults(
             sourceExcelData: cachedSourceExcelData,
             records: allRecords
@@ -221,10 +296,12 @@ public final class MainViewModel: ObservableObject {
         formatter.dateFormat = "yyyyMMdd_HHmmss"
         let fileName = "KetQua_CauHinh_ONT_\(formatter.string(from: Date())).xlsx"
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-        try exportedData.write(to: tempURL, options: [.atomic, .completeFileProtection])
+        try exportedData.write(
+            to: tempURL,
+            options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
+        )
         return tempURL
     }
-
     // MARK: - Search, Filter & Record Editing
 
     public func onSearchQueryChange(_ query: String) {
@@ -300,7 +377,13 @@ public final class MainViewModel: ObservableObject {
 
     public func updateGlobalSettings(_ newSettings: GlobalSettings) {
         let urlChanged = globalSettings.baseUrl != newSettings.baseUrl
+        let fwToggleChanged = globalSettings.enableFirmwareUpdate != newSettings.enableFirmwareUpdate
         globalSettings = newSettings
+        if fwToggleChanged && !isRunningSetup {
+            stepProgressList = newSettings.enableFirmwareUpdate
+                ? Self.defaultNineStepsWithFirmware()
+                : Self.defaultEightStepsDualWifi()
+        }
         if urlChanged {
             probeDriver = OntMobileDriver(
                 baseUrl: newSettings.baseUrl,
@@ -309,10 +392,197 @@ public final class MainViewModel: ObservableObject {
         }
     }
 
-    // MARK: - 7-Step Execution with Background Task & Idle Timer Protection
+    // MARK: - Streaming Firmware File Import (32 KB chunks, Security-Scoped Resource Safe)
+
+    private func firmwareCacheDirectoryURL() -> URL {
+        return database.databaseURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("firmware_cache", isDirectory: true)
+    }
+
+    private func loadCachedFirmwareOnInit() {
+        let fwDir = firmwareCacheDirectoryURL()
+        guard let items = try? FileManager.default.contentsOfDirectory(
+            at: fwDir,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+        let validFiles = items.compactMap { url -> (URL, Date, Int64)? in
+            guard OntInputValidator.isValidFirmwareExtension(url.lastPathComponent),
+                  let vals = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
+                  let size = vals.fileSize.map(Int64.init),
+                  (OntInputValidator.minFirmwareSizeBytes...OntInputValidator.maxFirmwareSizeBytes).contains(size) else {
+                return nil
+            }
+            return (url, vals.contentModificationDate ?? .distantPast, size)
+        }
+        guard let latest = validFiles.max(by: { $0.1 < $1.1 }),
+              globalSettings.firmwareFilePath.isEmpty else {
+            return
+        }
+        globalSettings.firmwareFilePath = latest.0.path
+        globalSettings.firmwareFileName = latest.0.lastPathComponent
+        globalSettings.firmwareFileSize = latest.2
+    }
+
+    public func importFirmwareFile(from sourceURL: URL) {
+        guard !isRunningSetup && !isImportingFirmware else { return }
+        isImportingFirmware = true
+        statusMessage = "Đang kiểm tra và sao chép file Firmware..."
+
+        let destDir = firmwareCacheDirectoryURL()
+        Task {
+            do {
+                let imported = try await Task.detached(priority: .userInitiated) { () -> (destURL: URL, displayName: String, sizeBytes: Int64) in
+                    let accessed = sourceURL.startAccessingSecurityScopedResource()
+                    defer {
+                        if accessed {
+                            sourceURL.stopAccessingSecurityScopedResource()
+                        }
+                    }
+
+                    let rawName = sourceURL.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let displayName = rawName.isEmpty ? "firmware.signed" : rawName
+                    guard OntInputValidator.isValidFirmwareExtension(displayName) else {
+                        throw NSError(
+                            domain: "FirmwareImport",
+                            code: 1,
+                            userInfo: [NSLocalizedDescriptionKey: "Định dạng file '\(displayName)' không hợp lệ (chỉ hỗ trợ .signed, .bin, .img)."]
+                        )
+                    }
+
+                    let fm = FileManager.default
+                    try fm.createDirectory(
+                        at: destDir,
+                        withIntermediateDirectories: true,
+                        attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
+                    )
+                    var dirVals = URLResourceValues()
+                    dirVals.isExcludedFromBackup = true
+                    var mutableDir = destDir
+                    try? mutableDir.setResourceValues(dirVals)
+
+                    let tmpURL = fm.temporaryDirectory.appendingPathComponent("fw_import_\(UUID().uuidString).tmp")
+                    fm.createFile(
+                        atPath: tmpURL.path,
+                        contents: nil,
+                        attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
+                    )
+                    defer {
+                        try? fm.removeItem(at: tmpURL)
+                    }
+
+                    guard let inStream = InputStream(url: sourceURL),
+                          let outStream = OutputStream(url: tmpURL, append: false) else {
+                        throw NSError(
+                            domain: "FirmwareImport",
+                            code: 2,
+                            userInfo: [NSLocalizedDescriptionKey: "Không thể mở luồng đọc/ghi file Firmware."]
+                        )
+                    }
+                    inStream.open()
+                    outStream.open()
+                    defer {
+                        inStream.close()
+                        outStream.close()
+                    }
+
+                    let chunkSize = 32 * 1024
+                    var buffer = [UInt8](repeating: 0, count: chunkSize)
+                    var totalBytes: Int64 = 0
+
+                    while inStream.hasBytesAvailable {
+                        let readCount = inStream.read(&buffer, maxLength: chunkSize)
+                        if readCount > 0 {
+                            totalBytes += Int64(readCount)
+                            if totalBytes > OntInputValidator.maxFirmwareSizeBytes {
+                                throw NSError(
+                                    domain: "FirmwareImport",
+                                    code: 3,
+                                    userInfo: [NSLocalizedDescriptionKey: "File Firmware vượt quá giới hạn tối đa 64 MB."]
+                                )
+                            }
+                            var offset = 0
+                            while offset < readCount {
+                                let written = buffer.withUnsafeBufferPointer { ptr in
+                                    outStream.write(ptr.baseAddress!.advanced(by: offset), maxLength: readCount - offset)
+                                }
+                                if written <= 0 {
+                                    throw outStream.streamError ?? NSError(
+                                        domain: "FirmwareImport",
+                                        code: 4,
+                                        userInfo: [NSLocalizedDescriptionKey: "Lỗi ghi file Firmware vào bộ nhớ đệm."]
+                                    )
+                                }
+                                offset += written
+                            }
+                        } else if readCount < 0 {
+                            throw inStream.streamError ?? NSError(
+                                domain: "FirmwareImport",
+                                code: 5,
+                                userInfo: [NSLocalizedDescriptionKey: "Lỗi đọc file Firmware đã chọn."]
+                            )
+                        } else {
+                            break
+                        }
+                    }
+
+                    guard (OntInputValidator.minFirmwareSizeBytes...OntInputValidator.maxFirmwareSizeBytes).contains(totalBytes) else {
+                        throw NSError(
+                            domain: "FirmwareImport",
+                            code: 6,
+                            userInfo: [NSLocalizedDescriptionKey: "Dung lượng file Firmware không hợp lệ (\(totalBytes / 1024) KB — yêu cầu 64 KB đến 64 MB)."]
+                        )
+                    }
+
+                    let safeName = OntInputValidator.sanitizeFirmwareFilename(displayName)
+                    let destURL = destDir.appendingPathComponent(safeName)
+                    if let existingItems = try? fm.contentsOfDirectory(at: destDir, includingPropertiesForKeys: nil) {
+                        for item in existingItems where item.path != destURL.path {
+                            try? fm.removeItem(at: item)
+                        }
+                    }
+                    if fm.fileExists(atPath: destURL.path) {
+                        try? fm.removeItem(at: destURL)
+                    }
+                    try fm.moveItem(at: tmpURL, to: destURL)
+                    try? fm.setAttributes(
+                        [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                        ofItemAtPath: destURL.path
+                    )
+                    var destVals = URLResourceValues()
+                    destVals.isExcludedFromBackup = true
+                    var mutableDest = destURL
+                    try? mutableDest.setResourceValues(destVals)
+
+                    return (destURL, displayName, totalBytes)
+                }.value
+
+                var updatedSettings = globalSettings
+                updatedSettings.enableFirmwareUpdate = true
+                updatedSettings.firmwareFilePath = imported.destURL.path
+                updatedSettings.firmwareFileName = imported.displayName
+                updatedSettings.firmwareFileSize = imported.sizeBytes
+                globalSettings = updatedSettings
+                if !isRunningSetup {
+                    stepProgressList = Self.defaultNineStepsWithFirmware()
+                }
+                isImportingFirmware = false
+                let sizeMb = String(format: "%.2f", Double(imported.sizeBytes) / (1024.0 * 1024.0))
+                statusMessage = "Đã nạp file Firmware: \(imported.displayName) (\(sizeMb) MB)"
+            } catch {
+                isImportingFirmware = false
+                statusMessage = "Lỗi chọn file Firmware: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    // MARK: - Two-Connection 8/9-Step Execution with Background Task & Hybrid Handover
 
     public func runOntConfiguration() {
-        guard !isRunningSetup else { return }
+        guard !isRunningSetup && !isImportingFirmware else { return }
         guard let record = selectedRecord else { return }
         let settings = globalSettings
         let preRun = OntInputValidator.validateBeforeRun(record, settings: settings)
@@ -328,7 +598,10 @@ public final class MainViewModel: ObservableObject {
 
         showExecutionSheet = true
         isRunningSetup = true
-        stepProgressList = Self.defaultSevenSteps()
+        handoverPrompt = nil
+        stepProgressList = settings.enableFirmwareUpdate
+            ? Self.defaultNineStepsWithFirmware()
+            : Self.defaultEightStepsDualWifi()
         setupResult = nil
         executionError = nil
 
@@ -341,19 +614,10 @@ public final class MainViewModel: ObservableObject {
         Task {
             #if canImport(UIKit)
             UIApplication.shared.isIdleTimerDisabled = true
-            var bgTaskId: UIBackgroundTaskIdentifier = .invalid
-            bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "ONT7StepSetup") {
-                if bgTaskId != .invalid {
-                    UIApplication.shared.endBackgroundTask(bgTaskId)
-                    bgTaskId = .invalid
-                }
-            }
+            self.renewBackgroundTaskIfNeeded()
             defer {
                 UIApplication.shared.isIdleTimerDisabled = false
-                if bgTaskId != .invalid {
-                    UIApplication.shared.endBackgroundTask(bgTaskId)
-                    bgTaskId = .invalid
-                }
+                self.endActiveBackgroundTask()
             }
             #endif
 
@@ -378,8 +642,21 @@ public final class MainViewModel: ObservableObject {
 
             let latestAdminPassBox = LockedBox<String>(record.lastKnownAdminPass)
             let bgBox = self.backgroundFlagBox
+            let wakeBox = self.handoverWakeGeneration
+            let monitorRef = self.wifiMonitor
             let dbRef = self.database
             let localIpv4 = snapshot.en0IpAddress
+            let handoverAttemptBox = LockedBox<Int>(0)
+            let lastObservedEn0Box = LockedBox<String>(localIpv4)
+            let joinedOpenSsidBox = LockedBox<String>("")
+
+            defer {
+                let openSsid = joinedOpenSsidBox.value
+                if !openSsid.isEmpty {
+                    monitorRef.removeTemporaryOpenWifiIfNeeded(ssid: openSsid, securityMode: settings.wifiSecurityMode)
+                }
+                self.handoverPrompt = nil
+            }
 
             let driver = OntMobileDriver(
                 baseUrl: settings.baseUrl,
@@ -395,6 +672,92 @@ public final class MainViewModel: ObservableObject {
                 },
                 isAppInBackground: {
                     bgBox.value
+                },
+                onSwitchToSecondaryWifi: { [weak self] targetSsid, targetPass, targetBand, targetSecMode, _, timeoutMs, onDetail in
+                    let attemptIdx = handoverAttemptBox.withValue { val -> Int in
+                        val += 1
+                        return val
+                    }
+                    let deadline = Date().addingTimeInterval(Double(max(timeoutMs, 1000)) / 1000.0)
+
+                    if attemptIdx == 1 {
+                        onDetail("Đang đợi ONT khởi động lại sóng '\(targetSsid)' (\(targetBand.label))...")
+                        try await Task.sleep(nanoseconds: 3_500_000_000)
+                        let joinedViaEntitlement = await monitorRef.tryJoinWifiIfEntitled(
+                            ssid: targetSsid,
+                            passphrase: targetPass,
+                            securityMode: targetSecMode
+                        )
+                        if joinedViaEntitlement {
+                            if targetSecMode.lowercased() == WifiSecurityMode.open.rawValue {
+                                joinedOpenSsidBox.value = targetSsid
+                            }
+                            let readySnap = await monitorRef.awaitWifiIpv4Ready(maxWaitMs: 5000)
+                            lastObservedEn0Box.value = readySnap.en0IpAddress
+                            return readySnap.en0IpAddress
+                        }
+
+                        let requiresPass = WifiSecurityMode(rawValue: targetSecMode)?.requiresPassword ?? true
+                        await MainActor.run { [weak self] in
+                            self?.handoverPrompt = HandoverPromptState(
+                                targetSsid: targetSsid,
+                                targetPass: targetPass,
+                                band: targetBand,
+                                securityMode: targetSecMode,
+                                deadline: deadline
+                            )
+                            #if canImport(UIKit)
+                            if requiresPass && !targetPass.isEmpty {
+                                UIPasteboard.general.setItems(
+                                    [[UIPasteboard.typeAutomatic: targetPass]],
+                                    options: [
+                                        .localOnly: true,
+                                        .expirationDate: Date().addingTimeInterval(120)
+                                    ]
+                                )
+                            }
+                            #endif
+                        }
+                    }
+
+                    // [Red Team RT-07] When Attempt >= 2 (still on Band A), pause HTTP polling while in background
+                    // until en0 IP changes, NWPathMonitor fires, or onScenePhaseActive() wakes us!
+                    let startWakeGen = wakeBox.value
+                    let priorIp = lastObservedEn0Box.value
+                    var waitedForegroundTicks = 0
+
+                    while Date() < deadline {
+                        try Task.checkCancellation()
+                        let snap = monitorRef.inspectInterfaces()
+                        let wakeChanged = wakeBox.value != startWakeGen
+                        let ipChanged = snap.isOnOntSubnet && snap.en0IpAddress != priorIp
+
+                        if snap.isOnOntSubnet {
+                            if attemptIdx == 1 || ipChanged || wakeChanged {
+                                lastObservedEn0Box.value = snap.en0IpAddress
+                                return snap.en0IpAddress
+                            }
+                            if !bgBox.value && waitedForegroundTicks >= 12 {
+                                lastObservedEn0Box.value = snap.en0IpAddress
+                                return snap.en0IpAddress
+                            }
+                        }
+                        try await Task.sleep(nanoseconds: 250_000_000)
+                        if !bgBox.value {
+                            waitedForegroundTicks += 1
+                        }
+                    }
+
+                    // One final post-deadline interface check if KTV just switched back from iOS Settings
+                    let finalSnap = await monitorRef.awaitWifiIpv4Ready(maxWaitMs: 800)
+                    if finalSnap.isOnOntSubnet {
+                        lastObservedEn0Box.value = finalSnap.en0IpAddress
+                        return finalSnap.en0IpAddress
+                    }
+
+                    throw OntNetworkError(
+                        "Hết thời gian chờ (\(timeoutMs / 1000)s) kết nối sang Wi-Fi mới '\(targetSsid)' (\(targetBand.label)) trong Cài đặt iOS."
+                    )
                 }
             )
 
@@ -404,7 +767,7 @@ public final class MainViewModel: ObservableObject {
                     settings: settings,
                     connectedBand: activeBand,
                     localWifiIpv4: localIpv4,
-                    onBandResolved: { [weak self] resolvedBand in
+                    onBandResolved: { [weak self] resolvedBand, _ in
                         Task { @MainActor [weak self] in
                             self?.connectedBand = resolvedBand
                         }
@@ -412,8 +775,16 @@ public final class MainViewModel: ObservableObject {
                 ) { [weak self] stepUpdate in
                     Task { @MainActor [weak self] in
                         guard let self = self else { return }
-                        self.stepProgressList = self.stepProgressList.map { existing in
-                            existing.stepNumber == stepUpdate.stepNumber ? stepUpdate : existing
+                        if stepUpdate.stepNumber == 7 && stepUpdate.status == .success {
+                            self.handoverPrompt = nil
+                        }
+                        let exists = self.stepProgressList.contains { $0.stepNumber == stepUpdate.stepNumber }
+                        if exists {
+                            self.stepProgressList = self.stepProgressList.map { existing in
+                                existing.stepNumber == stepUpdate.stepNumber ? stepUpdate : existing
+                            }
+                        } else {
+                            self.stepProgressList = (self.stepProgressList + [stepUpdate]).sorted { $0.stepNumber < $1.stepNumber }
                         }
                     }
                 }
@@ -433,6 +804,7 @@ public final class MainViewModel: ObservableObject {
                 updateRecordsList(all, message: result.message)
 
                 suppressProbeAfterCompletion = true
+                handoverPrompt = nil
                 isRunningSetup = false
                 setupResult = result
                 selectedRecord = completed
@@ -462,6 +834,7 @@ public final class MainViewModel: ObservableObject {
                     }
                     return st
                 }
+                handoverPrompt = nil
                 isRunningSetup = false
                 executionError = maskedErr
                 selectedRecord = failed
@@ -507,7 +880,10 @@ public final class MainViewModel: ObservableObject {
     private func saveCachedSourceExcel(_ data: Data) {
         cachedSourceExcelData = data
         let url = sourceCacheFileURL()
-        try? data.write(to: url, options: [.atomic, .completeFileProtection])
+        try? data.write(
+            to: url,
+            options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
+        )
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         var mutableURL = url
@@ -517,5 +893,19 @@ public final class MainViewModel: ObservableObject {
     private func loadCachedSourceExcel() {
         let url = sourceCacheFileURL()
         cachedSourceExcelData = try? Data(contentsOf: url)
+    }
+
+    private func cleanupStaleExportFiles() {
+        let tmpDir = FileManager.default.temporaryDirectory
+        guard let items = try? FileManager.default.contentsOfDirectory(
+            at: tmpDir,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+        for item in items where item.lastPathComponent.hasPrefix("KetQua_CauHinh_ONT_") && item.pathExtension.lowercased() == "xlsx" {
+            try? FileManager.default.removeItem(at: item)
+        }
     }
 }
