@@ -15,6 +15,7 @@ import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import vn.vnpt.ontconfig.core.driver.OntAccountLockoutWarning
+import vn.vnpt.ontconfig.core.driver.OntAuthenticationError
 import vn.vnpt.ontconfig.core.driver.OntDriverException
 import vn.vnpt.ontconfig.core.driver.OntMobileDriver
 import vn.vnpt.ontconfig.core.driver.OntNetworkError
@@ -83,8 +84,8 @@ class OntMobileDriverTest {
         firmwareFilePath = firmwareFile?.absolutePath.orEmpty(),
         firmwareFileName = firmwareFile?.name.orEmpty(),
         firmwareFileSize = firmwareFile?.length() ?: 0L,
-        wifiHandoverTimeoutMs = 150L,
-        gatewayPostHandoverTimeoutMs = 150L,
+        wifiHandoverTimeoutMs = 400L,
+        gatewayPostHandoverTimeoutMs = 200L,
         postSecondWifiSettleTimeoutMs = 150L,
         firmwareUploadTimeoutMs = 5_000L
     )
@@ -100,7 +101,10 @@ class OntMobileDriverTest {
         allowSingleBand24gFallback: Boolean = false,
         onUnbind: (() -> Unit)? = null,
         onRebind: (suspend () -> SocketFactory?)? = null,
-        onHandover: ((String, WifiBand, String?) -> Unit)? = null
+        onHandover: ((String, WifiBand, String?) -> Unit)? = null,
+        onHandoverDetailed: ((String, WifiBand, String?, Long, Int, Boolean) -> Unit)? = null,
+        isNetworkTransportAlive: (() -> Boolean)? = null,
+        onLog: ((vn.vnpt.ontconfig.core.logging.LogLevel, String, String) -> Unit)? = null
     ): OntMobileDriver = OntMobileDriver(
         baseUrl = baseUrl,
         timeoutMs = 1500L,
@@ -109,13 +113,21 @@ class OntMobileDriverTest {
         wlRestartPollIntervalMs = 10L,
         maxWlRestartPolls = 3,
         userExistPollIntervalMs = 20L,
+        postDhcpGatewaySettleMs = 5L,
+        handoverRetryInitialBackoffMs = 15L,
+        handoverRetryMaxBackoffMs = 40L,
+        bandVerifyPollTimeoutMs = 60L,
+        bandVerifyPollIntervalMs = 15L,
         allowSingleBand24gFallback = allowSingleBand24gFallback,
         probePauseMutex = probeMutex,
         onUnbindNetwork = onUnbind,
         onRebindWifiNetwork = onRebind,
-        onSwitchToSecondaryWifi = { ssid, _, band, _, bssidHint, _, _ ->
+        isNetworkTransportAlive = isNetworkTransportAlive,
+        onLog = onLog,
+        onSwitchToSecondaryWifi = { ssid, _, band, _, bssidHint, _, minScanMicros, outerAttempt, lockToBssid, _ ->
             activeBandRef.set(band)
             onHandover?.invoke(ssid, band, bssidHint)
+            onHandoverDetailed?.invoke(ssid, band, bssidHint, minScanMicros, outerAttempt, lockToBssid)
             WifiHandoverContext(
                 socketFactory = SocketFactory.getDefault(),
                 localWifiIpv4 = "192.168.1.3"
@@ -1128,6 +1140,335 @@ class OntMobileDriverTest {
             assertTrue(e.message!!.contains("Mesh", ignoreCase = true))
         }
         assertEquals(1, step8Attempts)
+    }
+
+    @Test
+    fun `Step 7 outer spaced-backoff loop recovers from transport drop during user exist and converges wlAssociatedDevice`() = runBlocking {
+        val fwFile = createTempFirmwareFile(68 * 1024)
+        try {
+            val activeBand = AtomicReference(WifiBand.BAND_2_4_GHZ)
+            val transportAlive = AtomicBoolean(true)
+            val outerCalls = CopyOnWriteArrayList<Triple<Long, Int, Boolean>>()
+            val loggedLines = CopyOnWriteArrayList<String>()
+            var conn2DhcpPolls = 0
+            val onSecondConn = AtomicBoolean(false)
+
+            server.dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    val path = request.path ?: ""
+                    request.body.readByteArray()
+                    return when (path) {
+                        "/" -> MockResponse().setResponseCode(200).setBody("<html>VNPT iGate GW040-NSv2</html>")
+                        "/cgi-bin/luci/login.cmd" -> {
+                            if (!onSecondConn.get()) {
+                                MockResponse().setResponseCode(200).setBody("""{"status":"OK","firstlog":"0","sessionKey":"sess_c1"}""")
+                            } else if (outerCalls.size == 1) {
+                                // Drop Wi-Fi transport right as ONT reports user exist on outer attempt 1
+                                transportAlive.set(false)
+                                MockResponse().setResponseCode(200).setBody("""{"status":"user exist"}""")
+                            } else {
+                                MockResponse().setResponseCode(200).setBody("""{"status":"OK","firstlog":"0","sessionKey":"sess_c2"}""")
+                            }
+                        }
+                        "/cgi-bin/luci/deviceinfo2.json" -> MockResponse().setResponseCode(200).setBody(
+                            """{"baseMacAddress":"C4:2C:7B:60:BC:D8","wirelessInfoList":["wl0|Manh Ngoc|1|6|20MHz|C4:2C:7B:60:BC:D9","wl1|Manh Ngoc 5G|1|36|80MHz|C4:2C:7B:60:BC:DA"]}"""
+                        )
+                        "/cgi-bin/luci/dhcpclient.json" -> {
+                            if (!onSecondConn.get()) {
+                                MockResponse().setResponseCode(200).setBody(assocDhcpBody(WifiBand.BAND_2_4_GHZ, "192.168.1.2"))
+                            } else {
+                                conn2DhcpPolls++
+                                // Simulate wlAssociatedDevice still empty on 1st poll, converging on 2nd poll
+                                if (conn2DhcpPolls == 1) {
+                                    MockResponse().setResponseCode(200).setBody("""{"dhcpInfoList":[],"wlAssociatedDevice":[]}""")
+                                } else {
+                                    MockResponse().setResponseCode(200).setBody(assocDhcpBody(WifiBand.BAND_5_GHZ, "192.168.1.3"))
+                                }
+                            }
+                        }
+                        "/cgi-bin/luci/wancfg.json" -> MockResponse().setResponseCode(200).setBody("""{"wanCfg":[]}""")
+                        "/cgi-bin/luci/updatefwsessioncheck.json" -> MockResponse().setResponseCode(200).setBody("""{"status":"OK"}""")
+                        "/cgi-bin/luci/imagesize.json" -> MockResponse().setResponseCode(200).setBody("""{"ramFree":"251696"}""")
+                        "/cgi-bin/luci/uploadsoftware.conf" -> MockResponse().setResponseCode(200).setBody("""{"status":"valid"}""")
+                        else -> MockResponse().setResponseCode(200).setBody("""{"status":"OK","_wlrestart_":"0"}""")
+                    }
+                }
+            }
+
+            val driver = createTestDriver(
+                activeBandRef = activeBand,
+                isNetworkTransportAlive = { transportAlive.get() },
+                onLog = { level, tag, msg -> loggedLines.add("[$level][$tag] $msg") },
+                onHandoverDetailed = { _, _, _, minScanMicros, outerAttempt, lockToBssid ->
+                    onSecondConn.set(true)
+                    transportAlive.set(true)
+                    outerCalls.add(Triple(minScanMicros, outerAttempt, lockToBssid))
+                }
+            )
+
+            val result = driver.executeMobileSetup(
+                record = sampleRecord.copy(lastKnownAdminPass = "Passwd2@"),
+                settings = testSettings(enableFirmwareUpdate = true, firmwareFile = fwFile),
+                connectedBand = WifiBand.BAND_2_4_GHZ,
+                localWifiIpv4 = "192.168.1.2"
+            )
+
+            assertTrue(result.success)
+            assertTrue(result.firmwareUpdated)
+            assertEquals("Expected Step 7 outer retry after transport drop", 2, outerCalls.size)
+            assertEquals(1, outerCalls[0].second)
+            assertEquals(2, outerCalls[1].second)
+            assertTrue(outerCalls[0].first > 0L)
+            assertEquals("step6CompletedMicros must stay preserved across outer retries", outerCalls[0].first, outerCalls[1].first)
+            assertTrue("Expected wlAssociatedDevice convergence polling >= 2", conn2DhcpPolls >= 2)
+            assertTrue("Expected driver diagnostic logs", loggedLines.isNotEmpty())
+        } finally {
+            fwFile.delete()
+        }
+    }
+
+    @Test
+    fun `Step 7 aborts immediately without outer retry on neighbor baseMac mismatch TLS pin mismatch or wrong adminNewPass and escalates lockToBssidHint on same-SSID wl0`() = runBlocking {
+        // 1. Neighbor baseMac mismatch -> 1 attempt only
+        val switchAttempts = CopyOnWriteArrayList<Int>()
+        val onSecondConn = AtomicBoolean(false)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                request.body.readByteArray()
+                return when (request.path) {
+                    "/" -> MockResponse().setResponseCode(200).setBody("<html>VNPT iGate GW040-NSv2</html>")
+                    "/cgi-bin/luci/login.cmd" -> MockResponse().setResponseCode(200).setBody("""{"status":"OK","firstlog":"0","sessionKey":"sess_m"}""")
+                    "/cgi-bin/luci/deviceinfo2.json" -> {
+                        val mac = if (onSecondConn.get()) "DE:AD:BE:EF:00:01" else "C4:2C:7B:60:BC:D8"
+                        MockResponse().setResponseCode(200).setBody("""{"baseMacAddress":"$mac"}""")
+                    }
+                    "/cgi-bin/luci/dhcpclient.json" -> MockResponse().setResponseCode(200).setBody(assocDhcpBody(WifiBand.BAND_5_GHZ))
+                    "/cgi-bin/luci/wancfg.json" -> MockResponse().setResponseCode(200).setBody("""{"wanCfg":[]}""")
+                    else -> MockResponse().setResponseCode(200).setBody("""{"status":"OK","_wlrestart_":"0"}""")
+                }
+            }
+        }
+
+        val driver = createTestDriver(
+            activeBandRef = AtomicReference(WifiBand.BAND_2_4_GHZ),
+            onHandoverDetailed = { _, _, _, _, outerAttempt, _ ->
+                onSecondConn.set(true)
+                switchAttempts.add(outerAttempt)
+            }
+        )
+
+        try {
+            driver.executeMobileSetup(
+                record = sampleRecord.copy(lastKnownAdminPass = "Passwd2@"),
+                settings = testSettings(),
+                connectedBand = WifiBand.BAND_2_4_GHZ,
+                localWifiIpv4 = "192.168.1.2"
+            )
+            fail("Expected fatal baseMac mismatch")
+        } catch (e: OntDriverException) {
+            assertTrue(e.message!!.contains("MAC"))
+        }
+        assertEquals("Fatal baseMac mismatch must NOT trigger outer handover retries", listOf(1), switchAttempts.toList())
+
+        // 2. Wrong adminNewPass on Connection 2 -> OntAuthenticationError, 1 attempt only
+        switchAttempts.clear()
+        onSecondConn.set(false)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                request.body.readByteArray()
+                return when (request.path) {
+                    "/" -> MockResponse().setResponseCode(200).setBody("<html>VNPT iGate GW040-NSv2</html>")
+                    "/cgi-bin/luci/login.cmd" -> {
+                        if (!onSecondConn.get()) {
+                            MockResponse().setResponseCode(200).setBody("""{"status":"OK","firstlog":"0","sessionKey":"sess_ok1"}""")
+                        } else {
+                            MockResponse().setResponseCode(200).setBody("""{"status":"FAIL","firstlog":"0","numberLogin":"1","timeoutLogin":"0"}""")
+                        }
+                    }
+                    "/cgi-bin/luci/wancfg.json" -> MockResponse().setResponseCode(200).setBody("""{"wanCfg":[]}""")
+                    else -> MockResponse().setResponseCode(200).setBody("""{"status":"OK","_wlrestart_":"0"}""")
+                }
+            }
+        }
+        try {
+            driver.executeMobileSetup(
+                record = sampleRecord.copy(lastKnownAdminPass = "Passwd2@"),
+                settings = testSettings(),
+                connectedBand = WifiBand.BAND_2_4_GHZ,
+                localWifiIpv4 = "192.168.1.2"
+            )
+            fail("Expected OntAuthenticationError on wrong adminNewPass")
+        } catch (_: OntAuthenticationError) {
+        }
+        assertEquals("Wrong adminNewPass must NOT trigger outer handover retries", listOf(1), switchAttempts.toList())
+
+        // 3. TLS certificate pin mismatch inside postOptionalSessionJson (deviceinfo2.json on Connection 2) -> rethrows immediately, 1 attempt only
+        val tlsSwitchAttempts = CopyOnWriteArrayList<Int>()
+        val conn2SocketCounter = java.util.concurrent.atomic.AtomicInteger(0)
+        val tlsMismatchSocketFactory = object : SocketFactory() {
+            private val delegate = SocketFactory.getDefault()
+            private fun maybeFailTls() {
+                // Socket 1 = probeGateway, Socket 2 = login.cmd, Socket 3 = deviceinfo2.json (postOptionalSessionJson)
+                if (conn2SocketCounter.incrementAndGet() >= 3) {
+                    throw SSLPeerUnverifiedException("Pinned leaf cert SHA-256 mismatch on deviceinfo2.json")
+                }
+            }
+            override fun createSocket(): java.net.Socket {
+                maybeFailTls()
+                return delegate.createSocket()
+            }
+            override fun createSocket(host: String?, port: Int): java.net.Socket {
+                maybeFailTls()
+                return delegate.createSocket(host, port)
+            }
+            override fun createSocket(host: String?, port: Int, localHost: java.net.InetAddress?, localPort: Int): java.net.Socket {
+                maybeFailTls()
+                return delegate.createSocket(host, port, localHost, localPort)
+            }
+            override fun createSocket(host: java.net.InetAddress?, port: Int): java.net.Socket {
+                maybeFailTls()
+                return delegate.createSocket(host, port)
+            }
+            override fun createSocket(address: java.net.InetAddress?, port: Int, localAddress: java.net.InetAddress?, localPort: Int): java.net.Socket {
+                maybeFailTls()
+                return delegate.createSocket(address, port, localAddress, localPort)
+            }
+        }
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                request.body.readByteArray()
+                return when (request.path) {
+                    "/" -> MockResponse().setResponseCode(200).setBody("<html>VNPT iGate GW040-NSv2</html>")
+                    "/cgi-bin/luci/login.cmd" -> MockResponse().setResponseCode(200).setBody("""{"status":"OK","firstlog":"0","sessionKey":"sess_tls"}""")
+                    "/cgi-bin/luci/deviceinfo2.json" -> MockResponse().setResponseCode(200).setBody("""{"baseMacAddress":"C4:2C:7B:60:BC:D8"}""")
+                    "/cgi-bin/luci/dhcpclient.json" -> MockResponse().setResponseCode(200).setBody(assocDhcpBody(WifiBand.BAND_5_GHZ))
+                    "/cgi-bin/luci/wancfg.json" -> MockResponse().setResponseCode(200).setBody("""{"wanCfg":[]}""")
+                    else -> MockResponse().setResponseCode(200).setBody("""{"status":"OK","_wlrestart_":"0"}""")
+                }
+            }
+        }
+        val tlsDriver = OntMobileDriver(
+            baseUrl = baseUrl,
+            timeoutMs = 1500L,
+            settlingDelayMs = 5L,
+            recoveryRetryDelayMs = 15L,
+            wlRestartPollIntervalMs = 10L,
+            maxWlRestartPolls = 3,
+            userExistPollIntervalMs = 20L,
+            postDhcpGatewaySettleMs = 5L,
+            handoverRetryInitialBackoffMs = 15L,
+            handoverRetryMaxBackoffMs = 40L,
+            bandVerifyPollTimeoutMs = 60L,
+            bandVerifyPollIntervalMs = 15L,
+            onSwitchToSecondaryWifi = { _, _, _, _, _, _, _, outerAttempt, _, _ ->
+                tlsSwitchAttempts.add(outerAttempt)
+                WifiHandoverContext(socketFactory = tlsMismatchSocketFactory, localWifiIpv4 = "192.168.1.3")
+            }
+        )
+        try {
+            tlsDriver.executeMobileSetup(
+                record = sampleRecord.copy(lastKnownAdminPass = "Passwd2@"),
+                settings = testSettings(),
+                connectedBand = WifiBand.BAND_2_4_GHZ,
+                localWifiIpv4 = "192.168.1.2"
+            )
+            fail("Expected OntDriverException on TLS pin mismatch inside postOptionalSessionJson")
+        } catch (e: OntDriverException) {
+            assertFalse("TLS pin mismatch must NOT be treated as retryable OntNetworkError", e is OntNetworkError)
+            assertTrue(e.message!!.contains("TLS"))
+        }
+        assertEquals("TLS pin mismatch must stop on attempt 1", listOf(1), tlsSwitchAttempts.toList())
+
+        // 4. Same-SSID ("GiaDinh") landing on wl0 on attempt 1 escalates lockToBssidHint = true on attempt 2 (RT-02)
+        val lockFlags = CopyOnWriteArrayList<Boolean>()
+        val currentSameSsidBand = AtomicReference(WifiBand.BAND_2_4_GHZ)
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                request.body.readByteArray()
+                return when (request.path) {
+                    "/" -> MockResponse().setResponseCode(200).setBody("<html>VNPT iGate GW040-NSv2</html>")
+                    "/cgi-bin/luci/login.cmd" -> MockResponse().setResponseCode(200).setBody("""{"status":"OK","firstlog":"0","sessionKey":"sess_bssid"}""")
+                    "/cgi-bin/luci/deviceinfo2.json" -> MockResponse().setResponseCode(200).setBody(
+                        """{"baseMacAddress":"C4:2C:7B:60:BC:D8","wirelessInfoList":["wl0|GiaDinh|1|6|20MHz|C4:2C:7B:60:BC:D9","wl1|GiaDinh|1|36|80MHz|C4:2C:7B:60:BC:DA"]}"""
+                    )
+                    "/cgi-bin/luci/dhcpclient.json" -> MockResponse().setResponseCode(200).setBody(
+                        assocDhcpBody(currentSameSsidBand.get(), "192.168.1.3")
+                    )
+                    "/cgi-bin/luci/wancfg.json" -> MockResponse().setResponseCode(200).setBody("""{"wanCfg":[]}""")
+                    else -> MockResponse().setResponseCode(200).setBody("""{"status":"OK","_wlrestart_":"0"}""")
+                }
+            }
+        }
+        val sameSsidDriver = createTestDriver(
+            activeBandRef = AtomicReference(WifiBand.BAND_2_4_GHZ),
+            onHandoverDetailed = { _, _, _, _, outerAttempt, lockToBssid ->
+                lockFlags.add(lockToBssid)
+                // Attempt 1 mistakenly lands on wl0 (2.4GHz); Attempt 2 with BSSID lock lands on wl1 (5GHz)
+                currentSameSsidBand.set(if (outerAttempt == 1) WifiBand.BAND_2_4_GHZ else WifiBand.BAND_5_GHZ)
+            }
+        )
+        val sameSsidRes = sameSsidDriver.executeMobileSetup(
+            record = sampleRecord.copy(ssid24g = "GiaDinh", ssid5g = "GiaDinh", lastKnownAdminPass = "Passwd2@"),
+            settings = testSettings(),
+            connectedBand = WifiBand.BAND_2_4_GHZ,
+            localWifiIpv4 = "192.168.1.3"
+        )
+        assertTrue(sameSsidRes.success)
+        assertEquals(listOf(false, true), lockFlags.toList())
+    }
+
+    @Test
+    fun `Step 7 distinct SSIDs succeeds even when dhcpInfoList reports wl0 and wlAssociatedDevice is delayed or has stale wl0`() = runBlocking {
+        val onSecondConn = AtomicBoolean(false)
+        var conn2DhcpPolls = 0
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path ?: ""
+                request.body.readByteArray()
+                return when (path) {
+                    "/" -> MockResponse().setResponseCode(200).setBody("<html>VNPT iGate GW040-NSv2</html>")
+                    "/cgi-bin/luci/login.cmd" -> MockResponse().setResponseCode(200).setBody("""{"status":"OK","firstlog":"0","sessionKey":"sess_test"}""")
+                    "/cgi-bin/luci/deviceinfo2.json" -> MockResponse().setResponseCode(200).setBody(
+                        """{"baseMacAddress":"C4:2C:7B:60:BC:D8","wirelessInfoList":["wl0|VNPT|1|6|20MHz|C4:2C:7B:60:BC:D9","wl1|VNPT 5G|1|36|80MHz|C4:2C:7B:60:BC:DA"]}"""
+                    )
+                    "/cgi-bin/luci/dhcpclient.json" -> {
+                        if (!onSecondConn.get()) {
+                            MockResponse().setResponseCode(200).setBody(assocDhcpBody(WifiBand.BAND_2_4_GHZ, "192.168.1.2"))
+                        } else {
+                            conn2DhcpPolls++
+                            if (conn2DhcpPolls == 1) {
+                                MockResponse().setResponseCode(200).setBody(
+                                    """{"dhcpInfoList":["192.168.1.176|DHCP||aa:bb:cc:dd:ee:ff|phone|WiFi|1|wl0"],"wlAssociatedDevice":["aa:bb:cc:dd:ee:ff|192.168.1.2|1|wl0|-40"]}"""
+                                )
+                            } else {
+                                MockResponse().setResponseCode(200).setBody(
+                                    """{"dhcpInfoList":["192.168.1.176|DHCP||aa:bb:cc:dd:ee:ff|phone|WiFi|1|wl0"],"wlAssociatedDevice":["aa:bb:cc:dd:ee:ff|192.168.1.176|1|wl1|-42"]}"""
+                                )
+                            }
+                        }
+                    }
+                    "/cgi-bin/luci/wancfg.json" -> MockResponse().setResponseCode(200).setBody("""{"wanCfg":[]}""")
+                    else -> MockResponse().setResponseCode(200).setBody("""{"status":"OK","_wlrestart_":"0"}""")
+                }
+            }
+        }
+
+        val driver = createTestDriver(
+            activeBandRef = AtomicReference(WifiBand.BAND_2_4_GHZ),
+            onHandover = { _, _, _ ->
+                onSecondConn.set(true)
+            }
+        )
+
+        val result = driver.executeMobileSetup(
+            record = sampleRecord.copy(ssid24g = "VNPT", ssid5g = "VNPT 5G", lastKnownAdminPass = "Passwd2@"),
+            settings = testSettings(),
+            connectedBand = WifiBand.BAND_2_4_GHZ,
+            localWifiIpv4 = "192.168.1.2"
+        )
+
+        assertTrue(result.success)
+        assertTrue("Expected >= 2 polls for convergence", conn2DhcpPolls >= 2)
     }
 
     private class ConcurrentMapStub {

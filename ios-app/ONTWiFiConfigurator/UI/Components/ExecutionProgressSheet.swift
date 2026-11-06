@@ -10,6 +10,9 @@ public struct ExecutionProgressSheet: View {
 
     @State private var copiedWifiPassToast = false
     @State private var rebootCountdownSec: Int = 150
+    @State private var isLogPanelExpanded: Bool = false
+    @State private var showFullLogSheet: Bool = false
+
     public init(
         viewModel: MainViewModel,
         onShareExcelReport: @escaping () -> Void
@@ -45,6 +48,8 @@ public struct ExecutionProgressSheet: View {
                         errorCard(errorMsg)
                     }
 
+                    diagnosticLogPanelCard
+
                     if !viewModel.isRunningSetup {
                         actionButtons
                     }
@@ -54,6 +59,19 @@ public struct ExecutionProgressSheet: View {
             .navigationTitle("Tiến trình cấu hình ONT")
             .navigationBarTitleDisplayMode(.inline)
             .interactiveDismissDisabled(viewModel.isRunningSetup)
+            .onChange(of: viewModel.executionError) { newErr in
+                if let err = newErr, !err.isEmpty {
+                    isLogPanelExpanded = true
+                }
+            }
+            .onAppear {
+                if let err = viewModel.executionError, !err.isEmpty {
+                    isLogPanelExpanded = true
+                }
+            }
+            .sheet(isPresented: $showFullLogSheet) {
+                DiagnosticLogSheet(viewModel: viewModel)
+            }
             .task(id: viewModel.setupResult?.firmwareUpdated == true && viewModel.setupResult?.success == true) {
                 guard let res = viewModel.setupResult, res.success, res.firmwareUpdated else { return }
                 rebootCountdownSec = 150
@@ -146,7 +164,7 @@ public struct ExecutionProgressSheet: View {
                         .font(.subheadline.weight(.bold))
                         .foregroundColor(.blue)
                 }
-                Text("ONT đang phát sóng mới (kênh 5GHz DFS có thể mất 15–60s mới hiện tên). Hãy chọn mạng dưới đây trong Cài đặt Wi-Fi iOS rồi quay lại ứng dụng — Bước 8 & 9 sẽ tự chạy tiếp:")
+                Text("ONT đang phát sóng mới & ổn định dịch vụ WPA/DHCP (tổng ngân sách 240s, tự động retry giãn cách 5s → 10s → 15s → 20s). Hãy chọn mạng dưới đây trong Cài đặt Wi-Fi iOS rồi quay lại ứng dụng — Bước 8 & 9 sẽ tự chạy tiếp:")
                     .font(.caption)
                 Text("• Tên Wi-Fi cần bắt: \(prompt.targetSsid)")
                     .font(.subheadline.weight(.semibold))
@@ -263,6 +281,100 @@ public struct ExecutionProgressSheet: View {
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.red.opacity(0.12)))
+    }
+
+    private var diagnosticLogPanelCard: some View {
+        let recentLogs = Array(viewModel.diagnosticLogs.suffix(200))
+        return VStack(alignment: .leading, spacing: 8) {
+            Button {
+                withAnimation {
+                    isLogPanelExpanded.toggle()
+                }
+            } label: {
+                HStack {
+                    Text("📋 Nhật ký tiến trình & Debug (\(viewModel.diagnosticLogs.count))")
+                        .font(.subheadline.weight(.bold))
+                        .foregroundColor(.primary)
+                    Spacer()
+                    Image(systemName: isLogPanelExpanded ? "chevron.up" : "chevron.down")
+                        .foregroundColor(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
+
+            if isLogPanelExpanded {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(Color(red: 0.06, green: 0.09, blue: 0.16))
+
+                    if recentLogs.isEmpty {
+                        Text("Chưa có dòng nhật ký nào trong phiên hiện tại.")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.gray)
+                            .padding(8)
+                    } else {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 3) {
+                                ForEach(recentLogs) { entry in
+                                    Text(entry.formatLine())
+                                        .font(.system(size: 10, design: .monospaced))
+                                        .foregroundColor(logColor(entry.level))
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                            .padding(6)
+                        }
+                    }
+                }
+                .frame(height: 150)
+
+                HStack(spacing: 8) {
+                    Button {
+                        showFullLogSheet = true
+                    } label: {
+                        Label("Mở rộng", systemImage: "arrow.up.left.and.arrow.down.right")
+                            .font(.caption.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        viewModel.copyDiagnosticLogsToPasteboard()
+                    } label: {
+                        Label("Chép Log", systemImage: "doc.on.doc")
+                            .font(.caption.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        #if canImport(UIKit)
+                        if let url = try? viewModel.exportDiagnosticLogToTempFile() {
+                            DiagnosticLogSharePresenter.presentShareSheet(for: url)
+                        }
+                        #endif
+                    } label: {
+                        Label("Chia sẻ (.txt)", systemImage: "square.and.arrow.up")
+                            .font(.caption.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(UIColor.secondarySystemBackground)))
+    }
+
+    private func logColor(_ level: LogLevel) -> Color {
+        switch level {
+        case .error:
+            return Color(red: 1.0, green: 0.54, blue: 0.50)
+        case .warn:
+            return Color(red: 1.0, green: 0.84, blue: 0.31)
+        case .info:
+            return Color(red: 0.89, green: 0.91, blue: 0.94)
+        }
     }
 
     private var actionButtons: some View {

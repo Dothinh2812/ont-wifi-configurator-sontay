@@ -29,21 +29,34 @@ object OntInputValidator {
     private val SEVEN_DIGITS_REGEX = Regex("^\\d{7}$")
     private val UNSAFE_FIRMWARE_CHARS_REGEX = Regex("[^a-zA-Z0-9_.\\-]+")
 
-    private val SENSITIVE_PATTERNS = listOf(
-        Regex("(pppPassword=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
-        Regex("(pass=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
-        Regex("(newPass=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
-        Regex("(oldPass=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
-        Regex("(wl_wpa_psk=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
-        Regex("(nvramWlWpaPsk=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
-        Regex("(nvramWlRadiusKey=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
-        Regex("(nvramWlKey[1-4]?=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
-        Regex("(password=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
-        Regex("(sessionKey=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
-        Regex("""(["'](?:sessionKey|nvramWlWpaPsk|nvramWlRadiusKey|nvramWlKey[1-4]?)["']\s*:\s*["'])([^"'\u007f]+)""", RegexOption.IGNORE_CASE),
-        Regex("""(["']?(?:sessionKey|nvramWlWpaPsk|nvramWlRadiusKey|nvramWlKey[1-4]?)["']?\s*[:=]\s*["']?)([^"'\s,&}\]\u007f]+)""", RegexOption.IGNORE_CASE),
-        Regex("(data=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE)
+    private val SENSITIVE_KEYS: List<String> = listOf(
+        "pppPassword",
+        "nvramWlRadiusKey",
+        "nvramWlWpaPsk",
+        "nvramWlKey1",
+        "nvramWlKey2",
+        "nvramWlKey3",
+        "nvramWlKey4",
+        "nvramWlKey",
+        "preSharedKey",
+        "passphrase",
+        "sessionKey",
+        "wl_wpa_psk",
+        "wpa_psk",
+        "password",
+        "newPass",
+        "oldPass",
+        "pass",
+        "data"
     )
+
+    private val SENSITIVE_PATTERNS: List<Regex> = SENSITIVE_KEYS.flatMap { key ->
+        listOf(
+            Regex("((?:^|(?<=[^a-zA-Z0-9_]))$key=)([^&\\s\\u007f]+)", RegexOption.IGNORE_CASE),
+            Regex("""(["']$key["']\s*:\s*["'])([^"'\u007f]+)""", RegexOption.IGNORE_CASE),
+            Regex("""((?:^|(?<=[^a-zA-Z0-9_]))["']?$key["']?\s*[:=]\s*["']?)([^"'\s,&}\]\u007f]+)""", RegexOption.IGNORE_CASE)
+        )
+    }
 
     /**
      * Firmware encode_query reproduction: replaces '&' with '\u007f' (0x7f).

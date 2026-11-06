@@ -39,6 +39,12 @@ public struct WifiInterfaceSnapshot: Equatable, Sendable {
     }
 }
 
+public enum HotspotJoinResult: Equatable, Sendable {
+    case joined(WifiInterfaceSnapshot)
+    case entitlementUnavailable(String)
+    case transientFailure(String)
+}
+
 /// Inspects iOS network interfaces directly via POSIX/Darwin `getifaddrs("en0")` and `NWPathMonitor`:
 /// - Requires ZERO paid Apple Developer Entitlements (100% compatible with free Sideloadly / AltStore / TrollStore).
 /// - Verifies that `"en0"` (iPhone Wi-Fi card) holds an IPv4 address in `192.168.1.x` (`!= 192.168.1.1`).
@@ -146,15 +152,36 @@ public final class IosWifiMonitor: @unchecked Sendable {
         return .band24GHz
     }
 
-    /// Best-effort programmatic Wi-Fi association via `NEHotspotConfigurationManager` when signed with
-    /// TrollStore / Developer Certificate; returns `false` cleanly (<10ms) on unsigned Sideloadly/AltStore `.ipa`.
-    public func tryJoinWifiIfEntitled(
+    public static func computeReconnectBackoffMs(
+        attempt: Int,
+        initialBackoffMs: Int = 5_000,
+        maxBackoffMs: Int = 20_000
+    ) -> Int {
+        let safeInitial = max(0, initialBackoffMs)
+        let safeMax = max(safeInitial, maxBackoffMs)
+        let step = max(1, attempt)
+        return min(max(safeInitial * step, safeInitial), safeMax)
+    }
+
+    /// Detailed programmatic Wi-Fi association via `NEHotspotConfigurationManager` (`[Red Team RT-01]`):
+    /// - Treats `error == nil` or `alreadyAssociated` (`code == 13`) as L2-associated and immediately
+    ///   records `onOpenProfileApplied` BEFORE DHCP wait so temporary Open profiles never leak.
+    /// - Waits up to `dhcpWaitMs` (`15_000ms`) for `en0` `192.168.1.x` + holds `1_200ms` link stability.
+    /// - Classifies `NEHotspotConfigurationError.internal` (`code == 8`) returning in `< 40ms` with
+    ///   unchanged `en0` IP (or `userDenied` `code == 7`) as `.entitlementUnavailable` (unsigned Sideloadly `.ipa`),
+    ///   while classifying `>= 40ms` association timeouts / DHCP delays as `.transientFailure` for spaced retry.
+    public func tryJoinWifiDetailed(
         ssid: String,
         passphrase: String,
-        securityMode: String
-    ) async -> Bool {
+        securityMode: String,
+        dhcpWaitMs: Int = 15_000,
+        stabilityHoldMs: Int = 1_200,
+        onOpenProfileApplied: (@Sendable () -> Void)? = nil
+    ) async -> HotspotJoinResult {
         let cleanSsid = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanSsid.isEmpty else { return false }
+        guard !cleanSsid.isEmpty else {
+            return .transientFailure("Tên Wi-Fi đích rỗng.")
+        }
         #if canImport(NetworkExtension)
         let isOpen = securityMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == WifiSecurityMode.open.rawValue
         let config: NEHotspotConfiguration
@@ -162,21 +189,93 @@ public final class IosWifiMonitor: @unchecked Sendable {
             config = NEHotspotConfiguration(ssid: cleanSsid)
             config.joinOnce = true
         } else {
-            guard passphrase.count >= 8 else { return false }
+            guard passphrase.count >= 8 else {
+                return .transientFailure("Mật khẩu Wi-Fi WPA ngắn hơn 8 ký tự.")
+            }
             config = NEHotspotConfiguration(ssid: cleanSsid, passphrase: passphrase, isWEP: false)
             config.joinOnce = false
         }
-        let applied: Bool = await withCheckedContinuation { continuation in
+
+        let preApplyIp = inspectInterfaces().en0IpAddress
+        let startUptime = ProcessInfo.processInfo.systemUptime
+        let applyError: Error? = await withCheckedContinuation { continuation in
             NEHotspotConfigurationManager.shared.apply(config) { error in
-                continuation.resume(returning: error == nil)
+                continuation.resume(returning: error)
             }
         }
-        guard applied else { return false }
-        let snapshot = await awaitWifiIpv4Ready(maxWaitMs: 5000)
-        return snapshot.isOnOntSubnet
+        let elapsedMs = (ProcessInfo.processInfo.systemUptime - startUptime) * 1000.0
+
+        let isAlreadyAssociated: Bool = {
+            guard let err = applyError as NSError? else { return false }
+            return err.domain == NEHotspotConfigurationErrorDomain &&
+                err.code == NEHotspotConfigurationError.alreadyAssociated.rawValue
+        }()
+
+        if applyError == nil || isAlreadyAssociated {
+            if isOpen {
+                onOpenProfileApplied?()
+            }
+            let dhcpSnap = await awaitWifiIpv4Ready(maxWaitMs: max(800, dhcpWaitMs))
+            guard dhcpSnap.isOnOntSubnet else {
+                return .transientFailure(
+                    "Đã ghép nối sóng '\(cleanSsid)' nhưng ONT chưa cấp xong IP DHCP 192.168.1.x sau \(dhcpWaitMs / 1000)s."
+                )
+            }
+            if stabilityHoldMs > 0 {
+                var heldMs = 0
+                while heldMs < stabilityHoldMs {
+                    let slice = min(300, stabilityHoldMs - heldMs)
+                    try? await Task.sleep(nanoseconds: UInt64(slice) * 1_000_000)
+                    heldMs += slice
+                    if !inspectInterfaces().isOnOntSubnet {
+                        return .transientFailure(
+                            "Liên kết Wi-Fi '\(cleanSsid)' vừa nháy tắt trong cửa sổ kiểm tra ổn định (\(heldMs)/\(stabilityHoldMs)ms)."
+                        )
+                    }
+                }
+            }
+            return .joined(inspectInterfaces())
+        }
+
+        let nsErr = applyError! as NSError
+        if nsErr.domain == NEHotspotConfigurationErrorDomain {
+            if nsErr.code == NEHotspotConfigurationError.userDenied.rawValue {
+                return .entitlementUnavailable(
+                    "Người dùng đã đóng hộp thoại ghép nối tự động — vui lòng chọn Wi-Fi '\(cleanSsid)' trong Cài đặt iOS."
+                )
+            }
+            let postApplyIp = inspectInterfaces().en0IpAddress
+            if nsErr.code == NEHotspotConfigurationError.internal.rawValue &&
+                elapsedMs < 40.0 &&
+                postApplyIp == preApplyIp {
+                return .entitlementUnavailable(
+                    "Bản cài Sideloadly miễn phí không hỗ trợ NEHotspotConfiguration tự động (<40ms) — chuyển sang kết nối trong Cài đặt iOS."
+                )
+            }
+        }
+        return .transientFailure(
+            "Ghép nối tự động '\(cleanSsid)' chưa thành công (code=\(nsErr.code), \(Int(elapsedMs))ms): \(nsErr.localizedDescription)"
+        )
         #else
-        return false
+        return .entitlementUnavailable("Thiết bị không hỗ trợ NetworkExtension.")
         #endif
+    }
+
+    /// Compatibility wrapper delegating to `tryJoinWifiDetailed`.
+    public func tryJoinWifiIfEntitled(
+        ssid: String,
+        passphrase: String,
+        securityMode: String
+    ) async -> Bool {
+        if case .joined = await tryJoinWifiDetailed(
+            ssid: ssid,
+            passphrase: passphrase,
+            securityMode: securityMode,
+            dhcpWaitMs: 15_000
+        ) {
+            return true
+        }
+        return false
     }
 
     /// Clean up temporary Open Wi-Fi configuration so the iPhone does not retain an open profile.

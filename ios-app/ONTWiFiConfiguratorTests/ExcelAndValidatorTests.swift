@@ -291,9 +291,9 @@ final class ExcelAndValidatorTests: XCTestCase {
     func testGlobalSettingsFirmwareTimeoutCodableAndNvramCredentialMasking() throws {
         let defaults = GlobalSettings()
         XCTAssertFalse(defaults.enableFirmwareUpdate)
-        XCTAssertEqual(defaults.wifiHandoverTimeoutMs, 180_000)
-        XCTAssertEqual(defaults.gatewayPostHandoverTimeoutMs, 45_000)
-        XCTAssertEqual(defaults.postSecondWifiSettleTimeoutMs, 60_000)
+        XCTAssertEqual(defaults.wifiHandoverTimeoutMs, 240_000)
+        XCTAssertEqual(defaults.gatewayPostHandoverTimeoutMs, 60_000)
+        XCTAssertEqual(defaults.postSecondWifiSettleTimeoutMs, 90_000)
         XCTAssertEqual(defaults.firmwareUploadTimeoutMs, 180_000)
 
         // Legacy JSON missing new firmware/handover fields must decode cleanly with defaults
@@ -303,7 +303,7 @@ final class ExcelAndValidatorTests: XCTestCase {
         let decoded = try JSONDecoder().decode(GlobalSettings.self, from: legacyJson)
         XCTAssertEqual(decoded.wifiSecurityMode, "wpa2_psk")
         XCTAssertFalse(decoded.enableFirmwareUpdate)
-        XCTAssertEqual(decoded.wifiHandoverTimeoutMs, 180_000)
+        XCTAssertEqual(decoded.wifiHandoverTimeoutMs, 240_000)
         XCTAssertEqual(decoded.firmwareUploadTimeoutMs, 180_000)
 
         // Firmware extension & filename sanitization
@@ -353,5 +353,74 @@ final class ExcelAndValidatorTests: XCTestCase {
         XCTAssertFalse(masked.contains("wep1"))
         XCTAssertFalse(masked.contains("tok_xyz"))
         XCTAssertTrue(masked.contains("WIFI-5G"))
+
+        let spacedJson = """
+        { "pass" : "Manh Ngoc@26", "passphrase": "My Secret 5G", "wpa_psk": "WpaKey 88", "preSharedKey": "Psk 99" }
+        """
+        let maskedSpaced = OntInputValidator.maskSensitiveCredentials(spacedJson)
+        XCTAssertFalse(maskedSpaced.contains("Manh Ngoc@26"))
+        XCTAssertFalse(maskedSpaced.contains("My Secret 5G"))
+        XCTAssertFalse(maskedSpaced.contains("WpaKey 88"))
+        XCTAssertFalse(maskedSpaced.contains("Psk 99"))
+    }
+
+    func testReconnectBackoffAndAppDiagnosticLoggerSynchronousScrubbingAndRotation() throws {
+        XCTAssertEqual(IosWifiMonitor.computeReconnectBackoffMs(attempt: 1), 5_000)
+        XCTAssertEqual(IosWifiMonitor.computeReconnectBackoffMs(attempt: 2), 10_000)
+        XCTAssertEqual(IosWifiMonitor.computeReconnectBackoffMs(attempt: 3), 15_000)
+        XCTAssertEqual(IosWifiMonitor.computeReconnectBackoffMs(attempt: 4), 20_000)
+        XCTAssertEqual(IosWifiMonitor.computeReconnectBackoffMs(attempt: 8), 20_000)
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ont_ios_diag_test_\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let logger = AppDiagnosticLogger(logDirURL: tempDir, maxFileBytes: 2_048)
+        logger.registerActiveSecrets(
+            ["admin", "Passwd2@", "Manh&Ngoc#2026", "short"],
+            subscriberIdentifiers: ["manh9653_st", "005501941"]
+        )
+        let encodedAdmin = OntInputValidator.urlEncodeFormValue("Passwd2@")
+        let ontQueryPass = OntInputValidator.ontEncodeQuery("Manh&Ngoc#2026")
+        logger.log(
+            .info,
+            tag: "AUTH",
+            "Gửi user=admin với tài khoản admin token=\(encodedAdmin) raw=Passwd2@ query=\(ontQueryPass) bssid=AA:BB:CC:11:22:D8 acc=manh9653_st slid=005501941"
+        )
+
+        let ramSnap = logger.currentEntriesSnapshot()
+        XCTAssertEqual(ramSnap.count, 1)
+        XCTAssertFalse(ramSnap[0].message.contains("Passwd2@"))
+        XCTAssertFalse(ramSnap[0].message.localizedCaseInsensitiveContains("Passwd2%40"))
+        XCTAssertFalse(ramSnap[0].message.contains(ontQueryPass))
+        XCTAssertTrue(ramSnap[0].message.contains("user=admin"))
+        XCTAssertTrue(ramSnap[0].message.contains("tài khoản admin"))
+
+        let filler = String(repeating: "X", count: 180)
+        for idx in 0..<12 {
+            logger.log(.warn, tag: "HANDOVER", "Retry #\(idx) Passwd2%40 \(filler)")
+        }
+        logger.flushForTest()
+
+        let curURL = tempDir.appendingPathComponent("ont_debug.log")
+        let prevURL = tempDir.appendingPathComponent("ont_debug.prev.log")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: curURL.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: prevURL.path))
+
+        let exported = logger.exportCombinedLogText(
+            deviceHeader: "Device: iPhoneTest",
+            maskSubscriberIdentifiers: true
+        )
+        XCTAssertTrue(exported.contains("Device: iPhoneTest"))
+        XCTAssertFalse(exported.contains("Passwd2@"))
+        XCTAssertFalse(exported.localizedCaseInsensitiveContains("Passwd2%40"))
+        XCTAssertTrue(exported.contains("AA:BB:CC:**:**:D8"))
+        XCTAssertFalse(exported.contains("manh9653_st"))
+        XCTAssertFalse(exported.contains("005501941"))
+        XCTAssertTrue(exported.contains("user=admin"))
+
+        logger.clearLogs()
+        XCTAssertTrue(logger.currentEntriesSnapshot().isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: prevURL.path))
     }
 }

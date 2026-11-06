@@ -135,9 +135,9 @@ public struct GlobalSettings: Codable, Equatable, Sendable {
         firmwareFilePath: String = "",
         firmwareFileName: String = "",
         firmwareFileSize: Int64 = 0,
-        wifiHandoverTimeoutMs: Int = 180_000,
-        gatewayPostHandoverTimeoutMs: Int = 45_000,
-        postSecondWifiSettleTimeoutMs: Int = 60_000,
+        wifiHandoverTimeoutMs: Int = 240_000,
+        gatewayPostHandoverTimeoutMs: Int = 60_000,
+        postSecondWifiSettleTimeoutMs: Int = 90_000,
         firmwareUploadTimeoutMs: Int = 180_000
     ) {
         self.baseUrl = baseUrl
@@ -186,9 +186,9 @@ public struct GlobalSettings: Codable, Equatable, Sendable {
         self.firmwareFilePath = try container.decodeIfPresent(String.self, forKey: .firmwareFilePath) ?? ""
         self.firmwareFileName = try container.decodeIfPresent(String.self, forKey: .firmwareFileName) ?? ""
         self.firmwareFileSize = try container.decodeIfPresent(Int64.self, forKey: .firmwareFileSize) ?? 0
-        self.wifiHandoverTimeoutMs = try container.decodeIfPresent(Int.self, forKey: .wifiHandoverTimeoutMs) ?? 180_000
-        self.gatewayPostHandoverTimeoutMs = try container.decodeIfPresent(Int.self, forKey: .gatewayPostHandoverTimeoutMs) ?? 45_000
-        self.postSecondWifiSettleTimeoutMs = try container.decodeIfPresent(Int.self, forKey: .postSecondWifiSettleTimeoutMs) ?? 60_000
+        self.wifiHandoverTimeoutMs = try container.decodeIfPresent(Int.self, forKey: .wifiHandoverTimeoutMs) ?? 240_000
+        self.gatewayPostHandoverTimeoutMs = try container.decodeIfPresent(Int.self, forKey: .gatewayPostHandoverTimeoutMs) ?? 60_000
+        self.postSecondWifiSettleTimeoutMs = try container.decodeIfPresent(Int.self, forKey: .postSecondWifiSettleTimeoutMs) ?? 90_000
         self.firmwareUploadTimeoutMs = try container.decodeIfPresent(Int.self, forKey: .firmwareUploadTimeoutMs) ?? 180_000
     }
 }

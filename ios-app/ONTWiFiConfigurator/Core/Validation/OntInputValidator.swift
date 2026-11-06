@@ -379,52 +379,41 @@ public enum OntInputValidator {
         )
     }
 
+    private static let sensitiveQueryKeys: [String] = [
+        "pppPassword", "nvramWlRadiusKey", "nvramWlWpaPsk",
+        "nvramWlKey1", "nvramWlKey2", "nvramWlKey3", "nvramWlKey4", "nvramWlKey",
+        "preSharedKey", "passphrase", "sessionKey", "wl_wpa_psk", "wpa_psk",
+        "password", "newPass", "oldPass", "pass", "data"
+    ]
+
+    private static let precompiledSensitiveRegexes: [NSRegularExpression] = {
+        var compiled: [NSRegularExpression] = []
+        for key in sensitiveQueryKeys {
+            let patterns = [
+                "((?:^|(?<=[^a-zA-Z0-9_]))\(key)=)([^&\\s\\u007f]+)",
+                "([\"']\(key)[\"']\\s*:\\s*[\"'])([^\"'\\u007f]+)",
+                "((?:^|(?<=[^a-zA-Z0-9_]))[\"']?\(key)[\"']?\\s*[:=]\\s*[\"']?)([^\"'\\s,&}\\]\\u007f]+)"
+            ]
+            for pat in patterns {
+                if let rx = try? NSRegularExpression(pattern: pat, options: [.caseInsensitive]) {
+                    compiled.append(rx)
+                }
+            }
+        }
+        return compiled
+    }()
+
     /// Mask sensitive passwords, SLID data, NVRAM Wi-Fi PSKs, and session tokens before logging or exporting.
     public static func maskSensitiveCredentials(_ text: String) -> String {
         var masked = text
-        let queryKeys = [
-            "pppPassword", "pass", "newPass", "oldPass",
-            "wl_wpa_psk", "nvramWlWpaPsk", "nvramWlRadiusKey",
-            "nvramWlKey1", "nvramWlKey2", "nvramWlKey3", "nvramWlKey4", "nvramWlKey",
-            "password", "sessionKey", "data"
-        ]
-        for key in queryKeys {
-            if let regex = try? NSRegularExpression(
-                pattern: "(\(key)=)([^&\\s\\u007f]+)",
-                options: [.caseInsensitive]
-            ) {
-                let range = NSRange(masked.startIndex..<masked.endIndex, in: masked)
-                masked = regex.stringByReplacingMatches(
-                    in: masked,
-                    options: [],
-                    range: range,
-                    withTemplate: "$1***"
-                )
-            }
-            if let jsonQuotedRegex = try? NSRegularExpression(
-                pattern: "([\"']\(key)[\"']\\s*:\\s*[\"'])([^\"'\\u007f]+)",
-                options: [.caseInsensitive]
-            ) {
-                let range = NSRange(masked.startIndex..<masked.endIndex, in: masked)
-                masked = jsonQuotedRegex.stringByReplacingMatches(
-                    in: masked,
-                    options: [],
-                    range: range,
-                    withTemplate: "$1***"
-                )
-            }
-            if let jsonUnquotedRegex = try? NSRegularExpression(
-                pattern: "([\"']?\(key)[\"']?\\s*[:=]\\s*[\"']?)([^\"'\\s,&}\\]\\u007f]+)",
-                options: [.caseInsensitive]
-            ) {
-                let range = NSRange(masked.startIndex..<masked.endIndex, in: masked)
-                masked = jsonUnquotedRegex.stringByReplacingMatches(
-                    in: masked,
-                    options: [],
-                    range: range,
-                    withTemplate: "$1***"
-                )
-            }
+        for regex in precompiledSensitiveRegexes {
+            let range = NSRange(masked.startIndex..<masked.endIndex, in: masked)
+            masked = regex.stringByReplacingMatches(
+                in: masked,
+                options: [],
+                range: range,
+                withTemplate: "$1***"
+            )
         }
         return masked
     }

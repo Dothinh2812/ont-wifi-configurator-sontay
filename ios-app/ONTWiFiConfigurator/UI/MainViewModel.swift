@@ -102,10 +102,12 @@ public final class MainViewModel: ObservableObject {
     @Published public var executionError: String? = nil
     @Published public var statusMessage: String? = nil
     @Published public var isInBackground: Bool = false
+    @Published public var diagnosticLogs: [DiagnosticLogEntry] = []
+    @Published public var showDiagnosticLogSheet: Bool = false
     public let database: AppDatabase
     public let wifiMonitor: IosWifiMonitor
+    public let diagnosticLogger: AppDiagnosticLogger
     public let probePauseMutex = AsyncMutex()
-
     private var probeDriver: OntMobileDriver
     private var backgroundProbeTask: Task<Void, Never>?
     private var consecutiveMisses: Int = 0
@@ -120,15 +122,22 @@ public final class MainViewModel: ObservableObject {
     public init(
         database: AppDatabase = .shared,
         wifiMonitor: IosWifiMonitor = IosWifiMonitor(),
+        diagnosticLogger: AppDiagnosticLogger = AppDiagnosticLogger(),
         startBackgroundLoops: Bool = true
     ) {
         self.database = database
         self.wifiMonitor = wifiMonitor
+        self.diagnosticLogger = diagnosticLogger
         self.probeDriver = OntMobileDriver(
             baseUrl: "https://192.168.1.1",
             timeoutMs: 1200
         )
-
+        diagnosticLogger.setOnSnapshotUpdated { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self = self else { return }
+                self.diagnosticLogs = self.diagnosticLogger.currentEntriesSnapshot()
+            }
+        }
         cleanupStaleExportFiles()
         loadPersistedRecords()
         loadCachedSourceExcel()
@@ -172,11 +181,15 @@ public final class MainViewModel: ObservableObject {
             probePauseMutex.unlock()
         }
 
+        let wasOnline = isOntGatewayOnline
         let snapshot = wifiMonitor.inspectInterfaces()
         if globalSettings.baseUrl.contains("192.168.1.") && !snapshot.isOnOntSubnet {
             consecutiveMisses = 2
             applyWifiSnapshot(snapshot)
             self.isOntGatewayOnline = false
+            if wasOnline {
+                diagnosticLogger.log(.info, tag: "PROBE", "ONT Gateway 192.168.1.1 chuyển sang OFFLINE (en0 chưa thuộc dải 192.168.1.x).")
+            }
             return false
         }
         let reachable = await probeDriver.probeGateway()
@@ -192,7 +205,89 @@ public final class MainViewModel: ObservableObject {
 
         applyWifiSnapshot(snapshot)
         self.isOntGatewayOnline = isOnline
+        if wasOnline != isOnline {
+            diagnosticLogger.log(
+                .info,
+                tag: "PROBE",
+                isOnline
+                    ? "ONT Gateway 192.168.1.1 chuyển sang ONLINE (en0=\(snapshot.en0IpAddress))."
+                    : "ONT Gateway 192.168.1.1 chuyển sang OFFLINE."
+            )
+        }
         return isOnline
+    }
+
+    public func openDiagnosticLogSheet() {
+        guard !showExecutionSheet && !showWifiGuideSheet else { return }
+        showDiagnosticLogSheet = true
+    }
+
+    public func clearDiagnosticLogs() {
+        let logger = diagnosticLogger
+        Task.detached(priority: .utility) {
+            logger.clearLogs()
+            await MainActor.run { [weak self] in
+                self?.statusMessage = "Đã xóa sạch nhật ký tiến trình debug."
+            }
+        }
+    }
+
+    public func copyDiagnosticLogsToPasteboard() {
+        let header = buildDeviceDiagnosticHeader()
+        let logger = diagnosticLogger
+        Task.detached(priority: .userInitiated) {
+            let text = logger.exportCombinedLogText(
+                deviceHeader: header,
+                maskSubscriberIdentifiers: true
+            )
+            await MainActor.run { [weak self] in
+                #if canImport(UIKit)
+                UIPasteboard.general.setItems(
+                    [[UIPasteboard.typeAutomatic: text]],
+                    options: [
+                        .localOnly: true,
+                        .expirationDate: Date().addingTimeInterval(180)
+                    ]
+                )
+                #endif
+                self?.statusMessage = "Đã chép Nhật ký Debug (tự xóa khỏi bộ nhớ tạm sau 180s)."
+            }
+        }
+    }
+
+    public func exportDiagnosticLogToTempFile() throws -> URL {
+        cleanupStaleExportFiles()
+        let exportedText = diagnosticLogger.exportCombinedLogText(
+            deviceHeader: buildDeviceDiagnosticHeader(),
+            maskSubscriberIdentifiers: true
+        )
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd_HHmmss"
+        let fileName = "ONT_Debug_Log_\(formatter.string(from: Date())).txt"
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+        try Data(exportedText.utf8).write(
+            to: tempURL,
+            options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication]
+        )
+        return tempURL
+    }
+
+    private func buildDeviceDiagnosticHeader() -> String {
+        let settings = globalSettings
+        #if canImport(UIKit)
+        let sysVer = UIDevice.current.systemVersion
+        let model = UIDevice.current.model
+        #else
+        let sysVer = "unknown"
+        let model = "iOS"
+        #endif
+        return [
+            "ONT Wi-Fi Configurator — Diagnostic Log",
+            "Platform: iOS \(sysVer) (\(model)) | en0=\(en0IpAddress.isEmpty ? "none" : en0IpAddress)",
+            "Timeouts: Handover=\(settings.wifiHandoverTimeoutMs)ms, Gateway=\(settings.gatewayPostHandoverTimeoutMs)ms, PreFW=\(settings.postSecondWifiSettleTimeoutMs)ms",
+            "Security Mode: \(settings.wifiSecurityMode) | Firmware Update: \(settings.enableFirmwareUpdate)"
+        ].joined(separator: "\n")
     }
 
     public func onScenePhaseActive() {
@@ -621,6 +716,29 @@ public final class MainViewModel: ObservableObject {
             }
             #endif
 
+            let diagLogger = self.diagnosticLogger
+            diagLogger.registerActiveSecrets(
+                [
+                    settings.adminDefaultPass,
+                    settings.adminNewPass,
+                    record.lastKnownAdminPass,
+                    record.passPppoe,
+                    record.effectiveWifi24Pass(secMode: settings.wifiSecurityMode),
+                    record.effectiveWifi5Pass(secMode: settings.wifiSecurityMode),
+                    settings.defaultWifi5Pass
+                ],
+                subscriberIdentifiers: [record.accountPppoe, record.slid]
+            )
+            defer {
+                diagLogger.flushUiSnapshotImmediately()
+                diagLogger.clearActiveSecrets()
+            }
+            diagLogger.log(
+                .info,
+                tag: "RUN",
+                "=== BẮT ĐẦU PHIÊN CẤU HÌNH ONT iOS: account=\(record.accountPppoe), SLID=\(record.slid), SSID_24='\(record.effectiveWifi24Ssid)', SSID_5='\(record.effectiveWifi5Ssid)', sec=\(settings.wifiSecurityMode), fw=\(settings.enableFirmwareUpdate) ==="
+            )
+
             var snapshot = self.wifiMonitor.inspectInterfaces()
             if settings.baseUrl.contains("192.168.1.") && !snapshot.isOnOntSubnet {
                 snapshot = await self.wifiMonitor.awaitWifiIpv4Ready(maxWaitMs: 1200)
@@ -633,6 +751,7 @@ public final class MainViewModel: ObservableObject {
                     : ""
                 let noSubnetMsg =
                     "iPhone chưa có địa chỉ IP 192.168.1.x trên card Wi-Fi (en0). Vui lòng kết nối Wi-Fi ONT trong Cài đặt iOS trước khi bấm RUN.\(vpnHint)"
+                diagLogger.log(.error, tag: "RUN", noSubnetMsg)
                 self.isRunningSetup = false
                 self.executionError = noSubnetMsg
                 self.statusMessage = noSubnetMsg
@@ -649,6 +768,7 @@ public final class MainViewModel: ObservableObject {
             let handoverAttemptBox = LockedBox<Int>(0)
             let lastObservedEn0Box = LockedBox<String>(localIpv4)
             let joinedOpenSsidBox = LockedBox<String>("")
+            let entitlementModeBox = LockedBox<Bool?>(nil)
 
             defer {
                 let openSsid = joinedOpenSsidBox.value
@@ -673,33 +793,102 @@ public final class MainViewModel: ObservableObject {
                 isAppInBackground: {
                     bgBox.value
                 },
+                isNetworkTransportAlive: {
+                    monitorRef.inspectInterfaces().isOnOntSubnet
+                },
+                onLog: { level, tag, message in
+                    diagLogger.log(level, tag: tag, message)
+                },
                 onSwitchToSecondaryWifi: { [weak self] targetSsid, targetPass, targetBand, targetSecMode, _, timeoutMs, onDetail in
                     let attemptIdx = handoverAttemptBox.withValue { val -> Int in
                         val += 1
                         return val
                     }
                     let deadline = Date().addingTimeInterval(Double(max(timeoutMs, 1000)) / 1000.0)
+                    let startWakeGen = wakeBox.value
+                    let priorIp = lastObservedEn0Box.value
 
                     if attemptIdx == 1 {
-                        onDetail("Đang đợi ONT khởi động lại sóng '\(targetSsid)' (\(targetBand.label))...")
-                        try await Task.sleep(nanoseconds: 3_500_000_000)
-                        let joinedViaEntitlement = await monitorRef.tryJoinWifiIfEntitled(
-                            ssid: targetSsid,
-                            passphrase: targetPass,
-                            securityMode: targetSecMode
-                        )
-                        if joinedViaEntitlement {
-                            if targetSecMode.lowercased() == WifiSecurityMode.open.rawValue {
-                                joinedOpenSsidBox.value = targetSsid
-                            }
-                            let readySnap = await monitorRef.awaitWifiIpv4Ready(maxWaitMs: 5000)
-                            lastObservedEn0Box.value = readySnap.en0IpAddress
-                            return readySnap.en0IpAddress
-                        }
+                        onDetail("Đang đợi ONT khởi động lại sóng & ổn định dịch vụ cho '\(targetSsid)' (\(targetBand.label)) — chờ 8s...")
+                        diagLogger.log(.info, tag: "HANDOVER", "Bước 7 lượt 1: chờ lắng đầu 8s để ONT khởi động wlmngr + udhcpd cho '\(targetSsid)' (\(targetBand.label)).")
+                        let initialSettleMs = min(8_000, max(500, timeoutMs / 4))
+                        try await Task.sleep(nanoseconds: UInt64(initialSettleMs) * 1_000_000)
+                    }
 
+                    // [Red Team RT-01] Entitled auto-join branch (6s -> 12s -> 18s spaced retries) vs Sideloadly manual flow
+                    if entitlementModeBox.value != false {
+                        let autoBackoffsMs = [6_000, 12_000, 18_000]
+                        var autoJoinRound = 0
+                        while Date() < deadline {
+                            try Task.checkCancellation()
+                            autoJoinRound += 1
+                            if bgBox.value {
+                                break
+                            }
+                            let remMs = max(1_000, Int(deadline.timeIntervalSinceNow * 1000.0))
+                            let dhcpBudgetMs = min(15_000, max(1_500, remMs - 500))
+                            onDetail("Đang ghép nối tự động Wi-Fi '\(targetSsid)' (\(targetBand.label), lượt \(autoJoinRound))...")
+                            let joinResult = await monitorRef.tryJoinWifiDetailed(
+                                ssid: targetSsid,
+                                passphrase: targetPass,
+                                securityMode: targetSecMode,
+                                dhcpWaitMs: dhcpBudgetMs,
+                                onOpenProfileApplied: {
+                                    joinedOpenSsidBox.value = targetSsid
+                                }
+                            )
+
+                            switch joinResult {
+                            case .joined(let readySnap):
+                                entitlementModeBox.value = true
+                                lastObservedEn0Box.value = readySnap.en0IpAddress
+                                diagLogger.log(.info, tag: "HANDOVER", "Ghép nối tự động '\(targetSsid)' thành công (en0=\(readySnap.en0IpAddress)).")
+                                return readySnap.en0IpAddress
+
+                            case .entitlementUnavailable(let reason):
+                                entitlementModeBox.value = false
+                                diagLogger.log(.info, tag: "HANDOVER", reason)
+
+                            case .transientFailure(let reason):
+                                entitlementModeBox.value = true
+                                diagLogger.log(.warn, tag: "HANDOVER", "Lượt auto-join #\(autoJoinRound) chưa sẵn sàng: \(reason)")
+                                let backoffTargetMs = autoBackoffsMs[min(autoJoinRound - 1, autoBackoffsMs.count - 1)]
+                                let remSleepMs = Int(deadline.timeIntervalSinceNow * 1000.0)
+                                if remSleepMs <= 1_000 {
+                                    break
+                                }
+                                let actualBackoffMs = min(backoffTargetMs, remSleepMs)
+                                var sleptMs = 0
+                                while sleptMs < actualBackoffMs && Date() < deadline {
+                                    try Task.checkCancellation()
+                                    let snap = monitorRef.inspectInterfaces()
+                                    if snap.isOnOntSubnet && (snap.en0IpAddress != priorIp || wakeBox.value != startWakeGen) {
+                                        lastObservedEn0Box.value = snap.en0IpAddress
+                                        diagLogger.log(.info, tag: "HANDOVER", "Phát hiện iOS tự hoàn tất chuyển mạng sang en0=\(snap.en0IpAddress) trong lúc nghỉ giãn cách.")
+                                        return snap.en0IpAddress
+                                    }
+                                    if sleptMs % 1_000 == 0 {
+                                        let secLeft = max(1, (actualBackoffMs - sleptMs + 999) / 1_000)
+                                        onDetail("ONT đang ổn định dịch vụ '\(targetSsid)' — tự động kết nối lại sau \(secLeft)s...")
+                                    }
+                                    let stepMs = min(250, actualBackoffMs - sleptMs)
+                                    try await Task.sleep(nanoseconds: UInt64(stepMs) * 1_000_000)
+                                    sleptMs += stepMs
+                                }
+                            }
+
+                            if entitlementModeBox.value == false {
+                                break
+                            }
+                        }
+                    }
+
+                    if entitlementModeBox.value == false {
                         let requiresPass = WifiSecurityMode(rawValue: targetSecMode)?.requiresPassword ?? true
                         await MainActor.run { [weak self] in
-                            self?.handoverPrompt = HandoverPromptState(
+                            guard let self = self else { return }
+                            let firstPrompt = (self.handoverPrompt == nil)
+                            self.handoverPrompt = HandoverPromptState(
                                 targetSsid: targetSsid,
                                 targetPass: targetPass,
                                 band: targetBand,
@@ -707,7 +896,7 @@ public final class MainViewModel: ObservableObject {
                                 deadline: deadline
                             )
                             #if canImport(UIKit)
-                            if requiresPass && !targetPass.isEmpty {
+                            if firstPrompt && requiresPass && !targetPass.isEmpty {
                                 UIPasteboard.general.setItems(
                                     [[UIPasteboard.typeAutomatic: targetPass]],
                                     options: [
@@ -720,27 +909,19 @@ public final class MainViewModel: ObservableObject {
                         }
                     }
 
-                    // [Red Team RT-07] When Attempt >= 2 (still on Band A), pause HTTP polling while in background
-                    // until en0 IP changes, NWPathMonitor fires, or onScenePhaseActive() wakes us!
-                    let startWakeGen = wakeBox.value
-                    let priorIp = lastObservedEn0Box.value
+                    // [Red Team RT-01 & RT-07] Never return Band A's unchanged IP at 0ms or 3s!
+                    // Wait for ipChanged, wakeChanged (NWPathMonitor / return from iOS Settings), or 15s foreground check.
                     var waitedForegroundTicks = 0
-
                     while Date() < deadline {
                         try Task.checkCancellation()
                         let snap = monitorRef.inspectInterfaces()
                         let wakeChanged = wakeBox.value != startWakeGen
                         let ipChanged = snap.isOnOntSubnet && snap.en0IpAddress != priorIp
 
-                        if snap.isOnOntSubnet {
-                            if attemptIdx == 1 || ipChanged || wakeChanged {
-                                lastObservedEn0Box.value = snap.en0IpAddress
-                                return snap.en0IpAddress
-                            }
-                            if !bgBox.value && waitedForegroundTicks >= 12 {
-                                lastObservedEn0Box.value = snap.en0IpAddress
-                                return snap.en0IpAddress
-                            }
+                        if snap.isOnOntSubnet && (ipChanged || wakeChanged || (!bgBox.value && waitedForegroundTicks >= 60)) {
+                            lastObservedEn0Box.value = snap.en0IpAddress
+                            diagLogger.log(.info, tag: "HANDOVER", "Kiểm tra kết nối Lần 2 trên en0=\(snap.en0IpAddress) (ipChanged=\(ipChanged), wakeChanged=\(wakeChanged)).")
+                            return snap.en0IpAddress
                         }
                         try await Task.sleep(nanoseconds: 250_000_000)
                         if !bgBox.value {
@@ -748,9 +929,8 @@ public final class MainViewModel: ObservableObject {
                         }
                     }
 
-                    // One final post-deadline interface check if KTV just switched back from iOS Settings
-                    let finalSnap = await monitorRef.awaitWifiIpv4Ready(maxWaitMs: 800)
-                    if finalSnap.isOnOntSubnet {
+                    let finalSnap = await monitorRef.awaitWifiIpv4Ready(maxWaitMs: 1_500)
+                    if finalSnap.isOnOntSubnet && (finalSnap.en0IpAddress != priorIp || wakeBox.value != startWakeGen) {
                         lastObservedEn0Box.value = finalSnap.en0IpAddress
                         return finalSnap.en0IpAddress
                     }
@@ -760,7 +940,6 @@ public final class MainViewModel: ObservableObject {
                     )
                 }
             )
-
             do {
                 let result = try await driver.executeMobileSetup(
                     record: record,
@@ -803,6 +982,7 @@ public final class MainViewModel: ObservableObject {
                 let all = database.getAll()
                 updateRecordsList(all, message: result.message)
 
+                diagLogger.log(.info, tag: "RUN", "=== HOÀN TẤT THÀNH CÔNG: \(result.message) ===")
                 suppressProbeAfterCompletion = true
                 handoverPrompt = nil
                 isRunningSetup = false
@@ -813,6 +993,7 @@ public final class MainViewModel: ObservableObject {
             } catch {
                 let endTimeStr = timeFormatter.string(from: Date())
                 let maskedErr = OntInputValidator.maskSensitiveCredentials(error.localizedDescription)
+                diagLogger.log(.error, tag: "RUN", "=== PHIÊN CẤU HÌNH THẤT BẠI: \(maskedErr) ===")
 
                 var failed = record
                 failed.status = .failed
@@ -904,8 +1085,14 @@ public final class MainViewModel: ObservableObject {
         ) else {
             return
         }
-        for item in items where item.lastPathComponent.hasPrefix("KetQua_CauHinh_ONT_") && item.pathExtension.lowercased() == "xlsx" {
-            try? FileManager.default.removeItem(at: item)
+        for item in items {
+            let name = item.lastPathComponent
+            let ext = item.pathExtension.lowercased()
+            let isStaleExcel = name.hasPrefix("KetQua_CauHinh_ONT_") && ext == "xlsx"
+            let isStaleLog = name.hasPrefix("ONT_Debug_Log_") && ext == "txt"
+            if isStaleExcel || isStaleLog {
+                try? FileManager.default.removeItem(at: item)
+            }
         }
     }
 }

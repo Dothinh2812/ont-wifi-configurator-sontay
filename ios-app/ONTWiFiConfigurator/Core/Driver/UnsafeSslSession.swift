@@ -336,9 +336,7 @@ public final class UnsafeSslSession: NSObject, URLSessionDelegate, URLSessionTas
 
     private func recordObservedCertIfNeeded(_ sha256Hex: String) {
         byteTrackingLock.lock()
-        if _lastPeerCertSha256 == nil {
-            _lastPeerCertSha256 = sha256Hex
-        }
+        _lastPeerCertSha256 = sha256Hex
         byteTrackingLock.unlock()
     }
 
@@ -427,7 +425,7 @@ public final class UnsafeSslSession: NSObject, URLSessionDelegate, URLSessionTas
         let leafSha = certs?.first.map(Self.certificateSha256Hex)
 
         byteTrackingLock.lock()
-        if let sha = leafSha, _lastPeerCertSha256 == nil {
+        if let sha = leafSha {
             _lastPeerCertSha256 = sha
         }
         let expectedPin = _pinnedCertSha256

@@ -21,11 +21,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import vn.vnpt.ontconfig.ui.MainViewModel
+import vn.vnpt.ontconfig.ui.components.DiagnosticLogDialog
 import vn.vnpt.ontconfig.ui.components.ExecutionProgressSheet
 import vn.vnpt.ontconfig.ui.components.OntWifiScannerDialog
 import vn.vnpt.ontconfig.ui.screens.ConfigReviewScreen
 import vn.vnpt.ontconfig.ui.screens.SubscriberListScreen
-
+import java.io.File
 private val VnptLightColorScheme = lightColorScheme(
     primary = Color(0xFF005BAA),
     onPrimary = Color.White,
@@ -163,6 +164,7 @@ class MainActivity : ComponentActivity() {
                             onPrependZeroWifiPass = viewModel::prependLeadingZeroOnSelectedRecord,
                             onSaveChanges = viewModel::saveSelectedRecordChanges,
                             onRunConfiguration = viewModel::runOntConfiguration,
+                            onOpenDiagnosticLogs = viewModel::openDiagnosticLogDialog,
                             onBack = { viewModel.selectSubscriber(null) }
                         )
                     } else {
@@ -190,6 +192,7 @@ class MainActivity : ComponentActivity() {
                             onLoadDemoExcel = viewModel::loadDemoExcelFromAssets,
                             onExportReport = viewModel::exportAndShareExcelReport,
                             onOpenWifiScanner = ::ensurePermissionsAndOpenWifiScanner,
+                            onOpenDiagnosticLogs = viewModel::openDiagnosticLogDialog,
                             onSelectSubscriber = viewModel::selectSubscriber
                         )
                     }
@@ -218,11 +221,32 @@ class MainActivity : ComponentActivity() {
                                 ensurePermissionsAndOpenWifiScanner()
                             },
                             onRetryRun = viewModel::runOntConfiguration,
+                            logEntriesFlow = viewModel.diagnosticLogger.entriesFlow,
+                            onOpenFullLogDialog = viewModel::openDiagnosticLogDialog,
+                            onCopyDiagnosticLog = viewModel::copyDiagnosticLogsToClipboard,
+                            onShareDiagnosticLog = viewModel::exportAndShareDiagnosticLog,
                             onDismiss = viewModel::dismissExecutionSheet
+                        )
+                    }
+
+                    if (uiState.showDiagnosticLogDialog) {
+                        DiagnosticLogDialog(
+                            logEntriesFlow = viewModel.diagnosticLogger.entriesFlow,
+                            onCopyLogs = viewModel::copyDiagnosticLogsToClipboard,
+                            onShareLogsTxt = viewModel::exportAndShareDiagnosticLog,
+                            onClearLogs = viewModel::clearDiagnosticLogs,
+                            onDismiss = viewModel::dismissDiagnosticLogDialog
                         )
                     }
                 }
             }
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (!viewModel.isShareInGraceWindow()) {
+            MainViewModel.cleanupStaleExportFiles(File(applicationContext.cacheDir, "exports"))
         }
     }
 }

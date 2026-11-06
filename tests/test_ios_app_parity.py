@@ -427,6 +427,7 @@ def test_phase6_two_connection_dual_wifi_handover_and_final_firmware_cross_platf
         "testNineStepDualWifiAndStreamedBinaryFirmwareUploadFlow",
         "testStep7RejectsPrematureSecondConnectionWhileStillOnPrimaryBandWl0AndRejectsMismatchedBaseMac",
         "testUpdateFirmwarePostFlushDropWhileAppInBackgroundClearsSessionWithoutSendingLogoutCmd",
+        "testStep7DistinctSsidsSucceedsEvenWhenDhcpInfoListReportsWl0AndWlAssociatedDeviceIsDelayed",
     ]:
         assert xctest_name in ios_tests, f"Missing {xctest_name} in OntMobileDriverTests.swift"
     assert "testGlobalSettingsFirmwareTimeoutCodableAndNvramCredentialMasking" in ios_val_tests
@@ -444,3 +445,196 @@ def test_phase6_two_connection_dual_wifi_handover_and_final_firmware_cross_platf
     ]:
         assert stale_doc_phrase not in readme, f"Stale manual-step phrase '{stale_doc_phrase}' still in README.md"
         assert stale_doc_phrase not in huong_dan, f"Stale manual-step phrase '{stale_doc_phrase}' still in HUONG_DAN_SU_DUNG_TOOL_ONT.md"
+
+
+def test_phase7_reconnect_readiness_spaced_backoff_and_diagnostic_logger_parity():
+    """Verify ONT readiness stabilization, spaced-backoff reconnect, and synchronous diagnostic logger parity."""
+    android_logger_path = (
+        ROOT_DIR
+        / "android-app"
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "vn"
+        / "vnpt"
+        / "ontconfig"
+        / "core"
+        / "logging"
+        / "AppDiagnosticLogger.kt"
+    )
+    android_dialog_path = (
+        ROOT_DIR
+        / "android-app"
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "vn"
+        / "vnpt"
+        / "ontconfig"
+        / "ui"
+        / "components"
+        / "DiagnosticLogDialog.kt"
+    )
+    ios_logger_path = IOS_APP_DIR / "Core" / "Logging" / "AppDiagnosticLogger.swift"
+    ios_sheet_path = IOS_APP_DIR / "UI" / "Components" / "DiagnosticLogSheet.swift"
+
+    assert android_logger_path.exists(), "Missing Android AppDiagnosticLogger.kt"
+    assert android_dialog_path.exists(), "Missing Android DiagnosticLogDialog.kt"
+    assert ios_logger_path.exists(), "Missing iOS AppDiagnosticLogger.swift"
+    assert ios_sheet_path.exists(), "Missing iOS DiagnosticLogSheet.swift"
+
+    android_logger = android_logger_path.read_text(encoding="utf-8")
+    ios_logger = ios_logger_path.read_text(encoding="utf-8")
+    for logger_token in [
+        "DiagnosticLogEntry",
+        "registerActiveSecrets",
+        "clearActiveSecrets",
+        "exportCombinedLogText",
+        "clearLogs",
+        "flushForTest",
+        "ont_debug.log",
+        "ont_debug.prev.log",
+        "urlEncodeFormValue",
+        "ontEncodeQuery",
+        '"admin"',
+    ]:
+        assert logger_token in android_logger, f"Missing {logger_token} in AppDiagnosticLogger.kt"
+        assert logger_token in ios_logger, f"Missing {logger_token} in AppDiagnosticLogger.swift"
+
+    assert "completeUntilFirstUserAuthentication" in ios_logger
+    assert "isExcludedFromBackup = true" in ios_logger
+    assert "FileProtectionType.complete]" not in ios_logger
+
+    ios_settings = (IOS_APP_DIR / "Data" / "Model" / "GlobalSettings.swift").read_text(encoding="utf-8")
+    assert "wifiHandoverTimeoutMs: Int = 240_000" in ios_settings
+    assert "gatewayPostHandoverTimeoutMs: Int = 60_000" in ios_settings
+    assert "postSecondWifiSettleTimeoutMs: Int = 90_000" in ios_settings
+    assert "?? 240_000" in ios_settings
+    assert "?? 60_000" in ios_settings
+    assert "?? 90_000" in ios_settings
+
+    android_validator = (
+        ROOT_DIR
+        / "android-app"
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "vn"
+        / "vnpt"
+        / "ontconfig"
+        / "core"
+        / "validation"
+        / "OntInputValidator.kt"
+    ).read_text(encoding="utf-8")
+    ios_validator = (IOS_APP_DIR / "Core" / "Validation" / "OntInputValidator.swift").read_text(encoding="utf-8")
+    for key_token in ['"passphrase"', '"wpa_psk"', '"preSharedKey"']:
+        assert key_token in android_validator, f"Missing {key_token} in OntInputValidator.kt"
+        assert key_token in ios_validator, f"Missing {key_token} in OntInputValidator.swift"
+
+    android_wifi = (
+        ROOT_DIR
+        / "android-app"
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "vn"
+        / "vnpt"
+        / "ontconfig"
+        / "core"
+        / "wifi"
+        / "OntWifiConnector.kt"
+    ).read_text(encoding="utf-8")
+    ios_wifi = (IOS_APP_DIR / "Core" / "Wifi" / "IosWifiMonitor.swift").read_text(encoding="utf-8")
+    assert "computeReconnectBackoffMs" in android_wifi
+    assert "computeReconnectBackoffMs" in ios_wifi
+    assert "HotspotJoinResult" in ios_wifi
+    assert "tryJoinWifiDetailed" in ios_wifi
+    assert "alreadyAssociated" in ios_wifi
+    assert "entitlementUnavailable" in ios_wifi
+    assert "transientFailure" in ios_wifi
+
+    android_driver = (
+        ROOT_DIR
+        / "android-app"
+        / "app"
+        / "src"
+        / "main"
+        / "java"
+        / "vn"
+        / "vnpt"
+        / "ontconfig"
+        / "core"
+        / "driver"
+        / "OntMobileDriver.kt"
+    ).read_text(encoding="utf-8")
+    ios_driver = (IOS_APP_DIR / "Core" / "Driver" / "OntMobileDriver.swift").read_text(encoding="utf-8")
+    for driver_token in [
+        "postDhcpGatewaySettleMs",
+        "handoverRetryInitialBackoffMs",
+        "handoverRetryMaxBackoffMs",
+        "bandVerifyPollTimeoutMs",
+        "bandVerifyPollIntervalMs",
+        "isNetworkTransportAlive",
+        "onLog",
+    ]:
+        assert driver_token in android_driver, f"Missing {driver_token} in OntMobileDriver.kt"
+        assert driver_token in ios_driver, f"Missing {driver_token} in OntMobileDriver.swift"
+
+    assert "StillOnPrimaryBandException" in android_driver
+    assert "StillOnPrimaryBandError" in ios_driver
+    assert "IosWifiMonitor" not in ios_driver, "OntMobileDriver.swift must never reference IosWifiMonitor directly"
+    assert "HttpFormResponse" not in ios_driver, "Kotlin type HttpFormResponse must never appear in OntMobileDriver.swift"
+
+    file_paths_xml = (
+        ROOT_DIR / "android-app" / "app" / "src" / "main" / "res" / "xml" / "file_paths.xml"
+    ).read_text(encoding="utf-8")
+    assert "<files-path" not in file_paths_xml
+    assert 'path="exports/"' in file_paths_xml
+
+    ios_vm = (IOS_APP_DIR / "UI" / "MainViewModel.swift").read_text(encoding="utf-8")
+    assert "exportDiagnosticLogToTempFile" in ios_vm
+    assert "copyDiagnosticLogsToPasteboard" in ios_vm
+    assert "addingTimeInterval(180)" in ios_vm
+    assert "ONT_Debug_Log_" in ios_vm
+
+    ios_progress_sheet = (IOS_APP_DIR / "UI" / "Components" / "ExecutionProgressSheet.swift").read_text(encoding="utf-8")
+    ios_diag_sheet = ios_sheet_path.read_text(encoding="utf-8")
+    ios_list_view = (IOS_APP_DIR / "UI" / "Screens" / "SubscriberListView.swift").read_text(encoding="utf-8")
+    ios_review_view = (IOS_APP_DIR / "UI" / "Screens" / "ConfigReviewView.swift").read_text(encoding="utf-8")
+    assert "LazyVStack" in ios_progress_sheet
+    assert "LazyVStack" in ios_diag_sheet
+    assert "showDiagnosticLogSheet" in ios_list_view
+    assert ".sheet(isPresented: $viewModel.showDiagnosticLogSheet)" not in ios_review_view
+
+    pbx_text = (IOS_DIR / "ONTWiFiConfigurator.xcodeproj" / "project.pbxproj").read_text(encoding="utf-8")
+    assert pbx_text.count("AppDiagnosticLogger.swift") >= 4
+    assert pbx_text.count("DiagnosticLogSheet.swift") >= 4
+    assert "B100001A0000000000000001" in pbx_text
+    assert "B100001B0000000000000001" in pbx_text
+
+    ios_driver_tests = (IOS_TESTS_DIR / "OntMobileDriverTests.swift").read_text(encoding="utf-8")
+    ios_val_tests = (IOS_TESTS_DIR / "ExcelAndValidatorTests.swift").read_text(encoding="utf-8")
+    assert "testStep7ConvergencePollingAndTlsPinRethrowInPostOptionalSessionJson" in ios_driver_tests
+    assert "testReconnectBackoffAndAppDiagnosticLoggerSynchronousScrubbingAndRotation" in ios_val_tests
+
+    # Every OntMobileDriver(...) constructor call site in OntMobileDriverTests.swift must pass fast overrides (RT-05)
+    import re
+
+    ctor_blocks = [
+        ios_driver_tests[m.start() : m.start() + 650]
+        for m in re.finditer(r"\bOntMobileDriver\s*\(", ios_driver_tests)
+    ]
+    assert len(ctor_blocks) >= 8, f"Expected >= 8 OntMobileDriver(...) sites in OntMobileDriverTests.swift, got {len(ctor_blocks)}"
+    for idx, block in enumerate(ctor_blocks, start=1):
+        assert "postDhcpGatewaySettleMs:" in block, f"OntMobileDriver(...) site #{idx} missing postDhcpGatewaySettleMs fast override"
+        assert "handoverRetryInitialBackoffMs:" in block, f"OntMobileDriver(...) site #{idx} missing handoverRetryInitialBackoffMs fast override"
+
+    readme = (ROOT_DIR / "README.md").read_text(encoding="utf-8")
+    huong_dan = (ROOT_DIR / "HUONG_DAN_SU_DUNG_TOOL_ONT.md").read_text(encoding="utf-8")
+    for debug_doc_phrase in ["180s", "240s", "5s", "ONT_Debug_Log_"]:
+        assert debug_doc_phrase in readme, f"Missing '{debug_doc_phrase}' in README.md"
+        assert debug_doc_phrase in huong_dan, f"Missing '{debug_doc_phrase}' in HUONG_DAN_SU_DUNG_TOOL_ONT.md"

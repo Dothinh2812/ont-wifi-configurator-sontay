@@ -1,6 +1,8 @@
 package vn.vnpt.ontconfig.ui
 
 import android.app.Application
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.media.AudioManager
@@ -8,6 +10,7 @@ import android.media.ToneGenerator
 import android.net.Network
 import android.net.Uri
 import android.os.Build
+import android.os.PersistableBundle
 import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
@@ -31,6 +34,8 @@ import vn.vnpt.ontconfig.core.driver.OntMobileDriver
 import vn.vnpt.ontconfig.core.driver.StepProgress
 import vn.vnpt.ontconfig.core.driver.StepStatus
 import vn.vnpt.ontconfig.core.driver.WifiHandoverContext
+import vn.vnpt.ontconfig.core.logging.AppDiagnosticLogger
+import vn.vnpt.ontconfig.core.logging.LogLevel
 import vn.vnpt.ontconfig.core.validation.OntInputValidator
 import vn.vnpt.ontconfig.core.wifi.OntWifiConnector
 import vn.vnpt.ontconfig.core.wifi.WifiBand
@@ -73,7 +78,8 @@ data class MainUiState(
     val setupResult: MobileSetupResult? = null,
     val executionError: String? = null,
     val statusMessage: String? = null,
-    val is5GHzSupported: Boolean = true
+    val is5GHzSupported: Boolean = true,
+    val showDiagnosticLogDialog: Boolean = false
 ) {
     companion object {
         fun defaultEightStepsDualWifi(): List<StepProgress> = listOf(
@@ -105,8 +111,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val appContext: Context = application.applicationContext
     private val dao = AppDatabase.getInstance(appContext).subscriberDao()
-    val wifiConnector = OntWifiConnector(appContext)
-
+    val diagnosticLogger = AppDiagnosticLogger(appContext)
+    val wifiConnector = OntWifiConnector(appContext, onLog = diagnosticLogger::log)
     // [Red Team RT-10] Shared Mutex barrier between background gateway probe and active setup
     private val probePauseMutex = Mutex()
 
@@ -131,6 +137,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     @Volatile
     private var suppressAutoBindAfterCompletion = false
 
+    @Volatile
+    private var lastShareLaunchRealtimeMs: Long = -1_000_000L
+
     init {
         viewModelScope.launch(Dispatchers.IO) {
             cleanupStaleExportFiles(File(appContext.cacheDir, "exports"))
@@ -138,7 +147,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         loadPersistedRecords()
         loadCachedFirmwareOnInit()
         wifiConnector.startMonitoringSystemWifi(
-            shouldAutoBind = { !suppressAutoBindAfterCompletion && !_uiState.value.isRunningSetup }
+            shouldAutoBind = {
+                !suppressAutoBindAfterCompletion &&
+                    !_uiState.value.isRunningSetup &&
+                    !_uiState.value.isConnectingWifi
+            }
         ) {
             viewModelScope.launch(Dispatchers.IO) {
                 performGatewayProbeOnce()
@@ -199,6 +212,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val (ssid, bssid) = wifiConnector.getConnectedSsidAndBssid()
             val boundNet = wifiConnector.boundWifiNetwork
             if (boundNet == null) {
+                val wasOnline = _uiState.value.isOntGatewayOnline
                 consecutiveMisses = 2
                 _uiState.update { state ->
                     state.copy(
@@ -207,6 +221,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         isOntGatewayOnline = false,
                         consecutiveProbeSuccess = 0
                     )
+                }
+                if (wasOnline) {
+                    diagnosticLogger.log(LogLevel.INFO, "PROBE", "ONT Gateway 192.168.1.1 chuyển sang OFFLINE (chưa có mạng Wi-Fi gắn kết).")
                 }
                 return false
             }
@@ -224,6 +241,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     false
                 }
             }
+            val wasOnline = _uiState.value.isOntGatewayOnline
             val consecutiveCount = if (isOnline) 3 else 0
 
             _uiState.update { state ->
@@ -241,6 +259,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     connectedBand = effectiveBand,
                     isOntGatewayOnline = isOnline,
                     consecutiveProbeSuccess = consecutiveCount
+                )
+            }
+            if (wasOnline != isOnline) {
+                diagnosticLogger.log(
+                    LogLevel.INFO,
+                    "PROBE",
+                    if (isOnline) {
+                        "ONT Gateway 192.168.1.1 chuyển sang ONLINE qua '${ssid.ifBlank { "Wi-Fi ONT" }}'."
+                    } else {
+                        "ONT Gateway 192.168.1.1 chuyển sang OFFLINE."
+                    }
                 )
             }
             return isOnline
@@ -634,6 +663,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun connectToOntCandidate(candidate: WifiScanCandidate, passphrase: String?) {
         suppressAutoBindAfterCompletion = false
+        if (!passphrase.isNullOrBlank()) {
+            diagnosticLogger.registerActiveSecrets(listOf(passphrase))
+        }
+        diagnosticLogger.log(
+            LogLevel.INFO,
+            "SCANNER",
+            "Chọn kết nối Wi-Fi ONT '${candidate.ssid}' (${candidate.band.label}, freq=${candidate.frequencyMhz}MHz, RSSI=${candidate.rssi}dBm, open=${candidate.isOpen})."
+        )
         viewModelScope.launch {
             _uiState.update { it.copy(isConnectingWifi = true) }
             try {
@@ -641,7 +678,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     ssid = candidate.ssid,
                     bssid = candidate.bssid,
                     passphrase = passphrase,
-                    timeoutMs = 10000L,
+                    timeoutMs = 35_000L,
                     securityMode = if (candidate.isOpen && passphrase.isNullOrBlank()) {
                         WifiSecurityMode.OPEN.formValue
                     } else {
@@ -670,11 +707,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             } catch (e: Exception) {
+                val maskedMsg = OntInputValidator.maskSensitiveCredentials(e.message ?: "Lỗi kết nối Wi-Fi")
+                diagnosticLogger.log(
+                    LogLevel.ERROR,
+                    "SCANNER",
+                    "Không thể bắt Wi-Fi '${candidate.ssid}': $maskedMsg"
+                )
                 _uiState.update {
                     it.copy(
                         isConnectingWifi = false,
-                        statusMessage = "Không thể tự bắt '${candidate.ssid}': ${e.message}"
+                        statusMessage = "Không thể tự bắt '${candidate.ssid}': $maskedMsg"
                     )
+                }
+            } finally {
+                if (!_uiState.value.isRunningSetup) {
+                    diagnosticLogger.clearActiveSecrets()
                 }
             }
         }
@@ -733,8 +780,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         band: WifiBand,
         isSecondaryConnection: Boolean,
         excludedNetwork: Network?,
-        timeoutMs: Long = 25_000L
+        timeoutMs: Long = 35_000L
     ): SocketFactory? {
+        diagnosticLogger.log(
+            LogLevel.INFO,
+            "REBIND",
+            "Yêu cầu rebind Wi-Fi '$ssid' (${band.label}, secondary=$isSecondaryConnection, timeout=${timeoutMs}ms)."
+        )
         if (!isSecondaryConnection) {
             var rebound = wifiConnector.bindCurrentWifiNetworkIfConnected()
             var remaining = 6
@@ -830,74 +882,102 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                dao.update(SubscriberEntity.fromRecord(record.copy(startTime = startTimeStr)))
-            }
-
-            wifiConnector.bindCurrentWifiNetworkIfConnected()
-            val conn1Network = wifiConnector.boundWifiNetwork
-            if (conn1Network == null) {
-                val noWifiErr = "Chưa kết nối Wi-Fi của ONT. Vui lòng bấm 'Bắt Wi-Fi ONT' hoặc kết nối Wi-Fi ONT trong Cài đặt máy trước khi bấm RUN."
-                _uiState.update { state ->
-                    state.copy(
-                        isRunningSetup = false,
-                        executionError = noWifiErr,
-                        statusMessage = noWifiErr
-                    )
-                }
-                notifyCompletionFeedback(success = false)
-                return@launch
-            }
-            val socketFactory = conn1Network.socketFactory
-            val (detectedSsid, detectedBssid) = wifiConnector.getConnectedSsidAndBssid()
-            val effectiveSsid = detectedSsid.ifBlank { _uiState.value.connectedWifiSsid }
-            val effectiveBssid = detectedBssid.ifBlank { _uiState.value.connectedWifiBssid }
-            val connectedBand = wifiConnector.detectConnectedBand(
-                ssidHint = effectiveSsid,
-                configured24Ssid = record.effectiveWifi24Ssid,
-                configured5Ssid = record.effectiveWifi5Ssid
+            diagnosticLogger.registerActiveSecrets(
+                secrets = listOf(
+                    settings.adminDefaultPass,
+                    settings.adminNewPass,
+                    record.lastKnownAdminPass,
+                    record.passPppoe,
+                    record.effectiveWifi24Pass(settings.wifiSecurityMode),
+                    record.effectiveWifi5Pass(settings.wifiSecurityMode),
+                    settings.defaultWifi5Pass
+                ),
+                subscriberIdentifiers = listOf(record.accountPppoe, record.slid)
             )
-            val localWifiIpv4 = wifiConnector.getBoundWifiIpv4Address()
-
-            var currentTargetSsid = effectiveSsid
-            var currentTargetPass: String? = null
-            var currentTargetBand = connectedBand
-            var currentTargetSecMode = settings.wifiSecurityMode
-            var isOnSecondaryConnection = false
-            var currentExcludedNetwork: Network? = conn1Network
+            diagnosticLogger.log(
+                LogLevel.INFO,
+                "RUN",
+                "=== BẮT ĐẦU PHIÊN CẤU HÌNH ONT: account=${record.accountPppoe}, SLID=${record.slid}, SSID_24='${record.effectiveWifi24Ssid}', SSID_5='${record.effectiveWifi5Ssid}', sec=${settings.wifiSecurityMode}, fw=${settings.enableFirmwareUpdate}, 5GHzSupported=$supports5Ghz ==="
+            )
             var latestAdminPass = record.lastKnownAdminPass
+            try {
+                withContext(Dispatchers.IO) {
+                    dao.update(SubscriberEntity.fromRecord(record.copy(startTime = startTimeStr)))
+                }
 
-            val driver = OntMobileDriver(
-                baseUrl = settings.baseUrl,
-                timeoutMs = settings.requestTimeoutMs,
-                socketFactory = socketFactory,
-                settlingDelayMs = 400L,
-                allowSingleBand24gFallback = !supports5Ghz,
-                probePauseMutex = probePauseMutex,
-                onUnbindNetwork = {
-                    wifiConnector.unbindOntWifi(clearSelectedMetadata = false)
-                },
-                onAdminPasswordChanged = { newAdminPass ->
-                    latestAdminPass = newAdminPass
-                    val updatedWithPass = record.copy(
-                        startTime = startTimeStr,
-                        lastKnownAdminPass = newAdminPass
-                    )
-                    dao.update(SubscriberEntity.fromRecord(updatedWithPass))
-                },
-                onRebindWifiNetwork = {
-                    rebindOntWifiSocketFactory(
-                        ssid = currentTargetSsid,
-                        passphrase = currentTargetPass,
-                        securityMode = currentTargetSecMode,
-                        band = currentTargetBand,
-                        isSecondaryConnection = isOnSecondaryConnection,
-                        excludedNetwork = if (isOnSecondaryConnection) currentExcludedNetwork else null,
-                        timeoutMs = 25_000L
-                    )
-                },
-                onSwitchToSecondaryWifi = { targetSsid, targetPass, targetBand, targetSecMode, bssidHint, handoverTimeoutMs, onDetail ->
-                    val excludedForHandover = if (
+                wifiConnector.bindCurrentWifiNetworkIfConnected()
+                val conn1Network = wifiConnector.boundWifiNetwork
+                if (conn1Network == null) {
+                    val noWifiErr = "Chưa kết nối Wi-Fi của ONT. Vui lòng bấm 'Bắt Wi-Fi ONT' hoặc kết nối Wi-Fi ONT trong Cài đặt máy trước khi bấm RUN."
+                    diagnosticLogger.log(LogLevel.ERROR, "RUN", noWifiErr)
+                    _uiState.update { state ->
+                        state.copy(
+                            isRunningSetup = false,
+                            executionError = noWifiErr,
+                            statusMessage = noWifiErr
+                        )
+                    }
+                    notifyCompletionFeedback(success = false)
+                    return@launch
+                }
+                val socketFactory = conn1Network.socketFactory
+                val (detectedSsid, detectedBssid) = wifiConnector.getConnectedSsidAndBssid()
+                val effectiveSsid = detectedSsid.ifBlank { _uiState.value.connectedWifiSsid }
+                val effectiveBssid = detectedBssid.ifBlank { _uiState.value.connectedWifiBssid }
+                val connectedBand = wifiConnector.detectConnectedBand(
+                    ssidHint = effectiveSsid,
+                    configured24Ssid = record.effectiveWifi24Ssid,
+                    configured5Ssid = record.effectiveWifi5Ssid
+                )
+                val localWifiIpv4 = wifiConnector.getBoundWifiIpv4Address()
+                diagnosticLogger.log(
+                    LogLevel.INFO,
+                    "RUN",
+                    "Lần kết nối 1: SSID='${effectiveSsid.ifBlank { "<unknown>" }}', BSSID='${effectiveBssid.ifBlank { "N/A" }}', band=${connectedBand.label}, localIP=${localWifiIpv4 ?: "unknown"}."
+                )
+
+                var currentTargetSsid = effectiveSsid
+                var currentTargetPass: String? = null
+                var currentTargetBand = connectedBand
+                var currentTargetSecMode = settings.wifiSecurityMode
+                var isOnSecondaryConnection = false
+                var currentExcludedNetwork: Network? = conn1Network
+
+                val driver = OntMobileDriver(
+                    baseUrl = settings.baseUrl,
+                    timeoutMs = settings.requestTimeoutMs,
+                    socketFactory = socketFactory,
+                    settlingDelayMs = 400L,
+                    allowSingleBand24gFallback = !supports5Ghz,
+                    probePauseMutex = probePauseMutex,
+                    onUnbindNetwork = {
+                        wifiConnector.unbindOntWifi(clearSelectedMetadata = false)
+                    },
+                    onAdminPasswordChanged = { newAdminPass ->
+                        latestAdminPass = newAdminPass
+                        val updatedWithPass = record.copy(
+                            startTime = startTimeStr,
+                            lastKnownAdminPass = newAdminPass
+                        )
+                        dao.update(SubscriberEntity.fromRecord(updatedWithPass))
+                    },
+                    onRebindWifiNetwork = {
+                        rebindOntWifiSocketFactory(
+                            ssid = currentTargetSsid,
+                            passphrase = currentTargetPass,
+                            securityMode = currentTargetSecMode,
+                            band = currentTargetBand,
+                            isSecondaryConnection = isOnSecondaryConnection,
+                            excludedNetwork = if (isOnSecondaryConnection) currentExcludedNetwork else null,
+                            timeoutMs = 35_000L
+                        )
+                    },
+                    isNetworkTransportAlive = {
+                        wifiConnector.boundWifiNetwork != null
+                    },
+                    onLog = diagnosticLogger::log,
+                    onSwitchToSecondaryWifi = { targetSsid, targetPass, targetBand, targetSecMode, bssidHint, handoverTimeoutMs, minScanMicros, outerAttempt, lockToBssid, onDetail ->
+                        val excludedForHandover = if (
                         !supports5Ghz &&
                         effectiveSsid.isNotBlank() &&
                         effectiveSsid.equals(targetSsid, ignoreCase = true)
@@ -914,6 +994,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         targetBssidHint = bssidHint,
                         excludedNetwork = excludedForHandover,
                         timeoutMs = handoverTimeoutMs,
+                        minScanTimestampMicros = minScanMicros,
+                        outerAttemptIndex = outerAttempt,
+                        lockToBssidHint = lockToBssid,
                         onStatusUpdate = onDetail
                     )
                     currentTargetSsid = targetSsid
@@ -935,8 +1018,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             )
-
-            try {
                 val result = driver.executeMobileSetup(
                     record = record,
                     settings = settings,
@@ -988,6 +1069,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     updateRecordsList(all, result.message)
                 }
 
+                diagnosticLogger.log(LogLevel.INFO, "RUN", "=== HOÀN TẤT THÀNH CÔNG: ${result.message} ===")
                 _uiState.update {
                     it.copy(
                         isRunningSetup = false,
@@ -1001,6 +1083,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 val endTimeStr = timeFormat.format(Date())
                 val maskedErr = OntInputValidator.maskSensitiveCredentials(e.message ?: "Lỗi không xác định")
+                diagnosticLogger.log(
+                    LogLevel.ERROR,
+                    "RUN",
+                    "=== PHIÊN CẤU HÌNH THẤT BẠI (${e.javaClass.simpleName}): $maskedErr ==="
+                )
                 val failedRecord = record.copy(
                     status = SubscriberStatus.FAILED,
                     startTime = startTimeStr,
@@ -1031,6 +1118,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 notifyCompletionFeedback(success = false)
+            } finally {
+                // [Red Team RT-03] Clear active run secrets strictly AFTER catch finishes logging
+                diagnosticLogger.clearActiveSecrets()
             }
         }
     }
@@ -1098,6 +1188,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
 
+                lastShareLaunchRealtimeMs = SystemClock.elapsedRealtime()
                 val chooser = Intent.createChooser(shareIntent, "Chia sẻ báo cáo Excel qua Zalo / Email").apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
@@ -1111,6 +1202,107 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(statusMessage = "Lỗi xuất báo cáo Excel: ${e.message}")
                 }
             }
+        }
+    }
+
+    fun openDiagnosticLogDialog() {
+        _uiState.update { it.copy(showDiagnosticLogDialog = true) }
+    }
+
+    fun dismissDiagnosticLogDialog() {
+        _uiState.update { it.copy(showDiagnosticLogDialog = false) }
+    }
+
+    fun clearDiagnosticLogs() {
+        viewModelScope.launch(Dispatchers.IO) {
+            diagnosticLogger.clearLogs()
+            _uiState.update { it.copy(statusMessage = "Đã xóa sạch nhật ký tiến trình debug.") }
+        }
+    }
+
+    fun copyDiagnosticLogsToClipboard() {
+        viewModelScope.launch {
+            try {
+                val header = buildDeviceDiagnosticHeader()
+                val logText = withContext(Dispatchers.IO) {
+                    diagnosticLogger.exportCombinedLogText(
+                        deviceHeader = header,
+                        maskSubscriberIdentifiers = true
+                    )
+                }
+                val cm = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                if (cm != null) {
+                    val clip = ClipData.newPlainText("ONT_Debug_Log", logText)
+                    clip.description.extras = PersistableBundle().apply {
+                        putBoolean("android.content.extra.IS_SENSITIVE", true)
+                    }
+                    cm.setPrimaryClip(clip)
+                    _uiState.update {
+                        it.copy(statusMessage = "Đã chép Nhật ký Debug (đã ẩn mật khẩu & định danh) vào bộ nhớ tạm.")
+                    }
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(statusMessage = "Không thể chép nhật ký: ${e.message}")
+                }
+            }
+        }
+    }
+
+    fun exportAndShareDiagnosticLog() {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                if (!_uiState.value.isRunningSetup) {
+                    wifiConnector.unbindOntWifi(clearSelectedMetadata = false)
+                }
+                val exportsDir = File(appContext.cacheDir, "exports").apply { mkdirs() }
+                cleanupStaleExportFiles(exportsDir)
+                val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+                val outFile = File(exportsDir, "ONT_Debug_Log_$timestamp.txt")
+                val exportedText = diagnosticLogger.exportCombinedLogText(
+                    deviceHeader = buildDeviceDiagnosticHeader(),
+                    maskSubscriberIdentifiers = true
+                )
+                outFile.writeText(exportedText, Charsets.UTF_8)
+
+                val uri = FileProvider.getUriForFile(
+                    appContext,
+                    "${appContext.packageName}.fileprovider",
+                    outFile
+                )
+                val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    putExtra(Intent.EXTRA_SUBJECT, "Nhật ký Debug ONT VNPT ($timestamp)")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                lastShareLaunchRealtimeMs = SystemClock.elapsedRealtime()
+                val chooser = Intent.createChooser(shareIntent, "Chia sẻ Nhật ký Debug (.txt) qua Zalo / Telegram").apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                appContext.startActivity(chooser)
+                _uiState.update {
+                    it.copy(statusMessage = "Đã xuất Nhật ký Debug: ${outFile.name}")
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(statusMessage = "Lỗi chia sẻ Nhật ký Debug: ${e.message}")
+                }
+            }
+        }
+    }
+
+    fun isShareInGraceWindow(): Boolean =
+        (SystemClock.elapsedRealtime() - lastShareLaunchRealtimeMs) in 0L..120_000L
+
+    private fun buildDeviceDiagnosticHeader(): String {
+        val settings = _uiState.value.globalSettings
+        return buildString {
+            appendLine("ONT Wi-Fi Configurator — Diagnostic Log")
+            appendLine("Platform: Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}) | ${Build.MANUFACTURER} ${Build.MODEL}")
+            appendLine("5GHz Supported: ${wifiConnector.is5GHzBandSupported()} | Location Enabled: ${wifiConnector.isLocationServiceEnabled()}")
+            appendLine("Timeouts: Handover=${settings.wifiHandoverTimeoutMs}ms, Gateway=${settings.gatewayPostHandoverTimeoutMs}ms, PreFW=${settings.postSecondWifiSettleTimeoutMs}ms")
+            append("Security Mode: ${settings.wifiSecurityMode} | Firmware Update: ${settings.enableFirmwareUpdate}")
         }
     }
 
@@ -1142,6 +1334,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
         wifiConnector.stopMonitoringSystemWifi()
         wifiConnector.unbindOntWifi()
+        cleanupStaleExportFiles(File(appContext.cacheDir, "exports"))
+        diagnosticLogger.close()
     }
 
     companion object {
@@ -1149,7 +1343,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 if (!exportsDir.exists() || !exportsDir.isDirectory) return
                 exportsDir.listFiles()?.forEach { file ->
-                    if (file.isFile && file.name.endsWith(".xlsx", ignoreCase = true)) {
+                    val isStaleExcel = file.name.endsWith(".xlsx", ignoreCase = true)
+                    val isStaleDebugLog = file.name.startsWith("ONT_Debug_Log_") &&
+                        file.name.endsWith(".txt", ignoreCase = true)
+                    if (file.isFile && (isStaleExcel || isStaleDebugLog)) {
                         runCatching { file.delete() }
                     }
                 }

@@ -425,9 +425,9 @@ class ExcelAndValidatorTest {
     @Test
     fun `GlobalSettings exposes long handover timeouts and maskSensitiveCredentials masks wirelesscfg NVRAM keys`() {
         val defaults = GlobalSettings()
-        assertEquals(120_000L, defaults.wifiHandoverTimeoutMs)
-        assertEquals(45_000L, defaults.gatewayPostHandoverTimeoutMs)
-        assertEquals(60_000L, defaults.postSecondWifiSettleTimeoutMs)
+        assertEquals(180_000L, defaults.wifiHandoverTimeoutMs)
+        assertEquals(60_000L, defaults.gatewayPostHandoverTimeoutMs)
+        assertEquals(90_000L, defaults.postSecondWifiSettleTimeoutMs)
         assertEquals(180_000L, defaults.firmwareUploadTimeoutMs)
 
         val rawWirelessCfgJson = """{"nvramWlSsid":"WIFI-5G","nvramWlWpaPsk":"MySecretWifiPass 2026","nvramWlRadiusKey":"radSecret99","nvramWlKey1":"wepKeyOne","nvramWlKey":"mainWepKey","sessionKey":"tok_abc123"}"""
@@ -444,6 +444,13 @@ class ExcelAndValidatorTest {
         assertFalse(maskedForm.contains("FormPass88"))
         assertFalse(maskedForm.contains("FormRad77"))
         assertFalse(maskedForm.contains("FormWep22"))
+
+        val spacedJson = """{ "pass" : "Manh Ngoc@26", "passphrase": "My Secret 5G", "wpa_psk": "WpaKey 88", "preSharedKey": "Psk 99" }"""
+        val maskedSpacedJson = OntInputValidator.maskSensitiveCredentials(spacedJson)
+        assertFalse("JSON pass with spaces must be masked: $maskedSpacedJson", maskedSpacedJson.contains("Manh Ngoc@26"))
+        assertFalse("JSON passphrase must be masked: $maskedSpacedJson", maskedSpacedJson.contains("My Secret 5G"))
+        assertFalse("JSON wpa_psk must be masked: $maskedSpacedJson", maskedSpacedJson.contains("WpaKey 88"))
+        assertFalse("JSON preSharedKey must be masked: $maskedSpacedJson", maskedSpacedJson.contains("Psk 99"))
     }
 
     @Test
@@ -502,6 +509,15 @@ class ExcelAndValidatorTest {
         assertTrue(vn.vnpt.ontconfig.core.wifi.OntWifiConnector.tryConsumeScanQuotaInWindow(deque, 15_000L))
         assertFalse("5th scan within 120s must be throttled", vn.vnpt.ontconfig.core.wifi.OntWifiConnector.tryConsumeScanQuotaInWindow(deque, 50_000L))
         assertTrue("After 120s from 1st scan, 1 slot opens", vn.vnpt.ontconfig.core.wifi.OntWifiConnector.tryConsumeScanQuotaInWindow(deque, 121_500L))
+
+        // Non-consuming quota check and progressive spaced backoff 5s -> 10s -> 15s -> 20s -> 20s
+        assertFalse(vn.vnpt.ontconfig.core.wifi.OntWifiConnector.hasAvailableScanQuotaInWindow(deque, 122_000L))
+        assertTrue(vn.vnpt.ontconfig.core.wifi.OntWifiConnector.hasAvailableScanQuotaInWindow(deque, 126_000L))
+        assertEquals(5_000L, vn.vnpt.ontconfig.core.wifi.OntWifiConnector.computeReconnectBackoffMs(1))
+        assertEquals(10_000L, vn.vnpt.ontconfig.core.wifi.OntWifiConnector.computeReconnectBackoffMs(2))
+        assertEquals(15_000L, vn.vnpt.ontconfig.core.wifi.OntWifiConnector.computeReconnectBackoffMs(3))
+        assertEquals(20_000L, vn.vnpt.ontconfig.core.wifi.OntWifiConnector.computeReconnectBackoffMs(4))
+        assertEquals(20_000L, vn.vnpt.ontconfig.core.wifi.OntWifiConnector.computeReconnectBackoffMs(7))
     }
 
     @Test
@@ -522,12 +538,87 @@ class ExcelAndValidatorTest {
         try {
             val stale1 = File(tempExportsDir, "BaoCao_CauHinh_ONT_20261104_100000.xlsx").apply { writeText("pii1") }
             val stale2 = File(tempExportsDir, "BaoCao_CauHinh_ONT_20261105_090000.xlsx").apply { writeText("pii2") }
-            assertTrue(stale1.exists() && stale2.exists())
+            val staleLog = File(tempExportsDir, "ONT_Debug_Log_20261106_090500.txt").apply { writeText("debug_log") }
+            assertTrue(stale1.exists() && stale2.exists() && staleLog.exists())
             vn.vnpt.ontconfig.ui.MainViewModel.cleanupStaleExportFiles(tempExportsDir)
             assertFalse(stale1.exists())
             assertFalse(stale2.exists())
+            assertFalse("Stale ONT_Debug_Log_*.txt must be deleted on cleanup", staleLog.exists())
+
+            val uiState = vn.vnpt.ontconfig.ui.MainUiState()
+            assertFalse(uiState.showDiagnosticLogDialog)
+            assertTrue(
+                "MainUiState must NOT embed diagnosticLogs list to prevent Compose recomposition storms",
+                vn.vnpt.ontconfig.ui.MainUiState::class.java.declaredFields.none {
+                    it.name.contains("diagnosticLog", ignoreCase = true) && List::class.java.isAssignableFrom(it.type)
+                }
+            )
+
+            val filePathsXml = File("src/main/res/xml/file_paths.xml").readText(Charsets.UTF_8)
+            assertTrue(filePathsXml.contains("exported_reports"))
+            assertFalse("file_paths.xml must NOT expose internal files-path", filePathsXml.contains("<files-path"))
         } finally {
             tempExportsDir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `AppDiagnosticLogger scrubs raw and URL-encoded secrets synchronously preserves admin token rotates 512KB files and middle-masks PII on export`() {
+        val tempLogDir = java.nio.file.Files.createTempDirectory("ont_diag_logger_test").toFile()
+        val logger = vn.vnpt.ontconfig.core.logging.AppDiagnosticLogger(
+            logDir = tempLogDir,
+            maxFileBytes = 2_048L
+        )
+        try {
+            logger.registerActiveSecrets(
+                secrets = listOf("admin", "Passwd2@", "Manh&Ngoc#2026", "short"),
+                subscriberIdentifiers = listOf("manh9653_st", "005501941")
+            )
+            val encodedAdminPass = OntInputValidator.urlEncodeFormValue("Passwd2@")
+            val ontQuerySecret = OntInputValidator.ontEncodeQuery("Manh&Ngoc#2026")
+            logger.log(
+                vn.vnpt.ontconfig.core.logging.LogLevel.INFO,
+                "AUTH",
+                "Gửi user=admin với tài khoản admin token=$encodedAdminPass raw=Passwd2@ query=$ontQuerySecret bssid=AA:BB:CC:11:22:D8 acc=manh9653_st slid=005501941"
+            )
+
+            // Synchronous caller-thread check on RAM ring buffer before disk flush
+            val ramEntry = logger.entriesFlow.value.single()
+            assertFalse("Raw secret leaked in RAM: ${ramEntry.message}", ramEntry.message.contains("Passwd2@"))
+            assertFalse("URL-encoded secret leaked in RAM: ${ramEntry.message}", ramEntry.message.contains("Passwd2%40", ignoreCase = true))
+            assertFalse("ONT query secret leaked in RAM: ${ramEntry.message}", ramEntry.message.contains(ontQuerySecret))
+            assertTrue("Reserved 'admin' keyword must NOT be corrupted: ${ramEntry.message}", ramEntry.message.contains("user=admin"))
+            assertTrue("Vietnamese phrase 'tài khoản admin' must stay intact: ${ramEntry.message}", ramEntry.message.contains("tài khoản admin"))
+
+            // Trigger synchronous rotation across ont_debug.log -> ont_debug.prev.log
+            val filler = "X".repeat(180)
+            repeat(12) { idx ->
+                logger.log(vn.vnpt.ontconfig.core.logging.LogLevel.WARN, "HANDOVER", "Retry #$idx Passwd2%40 $filler")
+            }
+            logger.flushForTest()
+            val curFile = File(tempLogDir, "ont_debug.log")
+            val prevFile = File(tempLogDir, "ont_debug.prev.log")
+            assertTrue("Expected current log file", curFile.exists())
+            assertTrue("Expected rotated prev log file", prevFile.exists())
+
+            val exported = logger.exportCombinedLogText(
+                deviceHeader = "Device: TestPhone",
+                maskSubscriberIdentifiers = true
+            )
+            assertTrue(exported.contains("Device: TestPhone"))
+            assertFalse(exported.contains("Passwd2@"))
+            assertFalse(exported.contains("Passwd2%40", ignoreCase = true))
+            assertTrue("BSSID middle octets must be masked on export: $exported", exported.contains("AA:BB:CC:**:**:D8"))
+            assertFalse("Raw PPPoE account must be middle-masked on export: $exported", exported.contains("manh9653_st"))
+            assertFalse("Raw SLID must be middle-masked on export: $exported", exported.contains("005501941"))
+            assertTrue("Admin token preserved in exported log: $exported", exported.contains("user=admin"))
+
+            logger.clearLogs()
+            assertTrue(logger.entriesFlow.value.isEmpty())
+            assertFalse(prevFile.exists())
+        } finally {
+            logger.close()
+            tempLogDir.deleteRecursively()
         }
     }
 }

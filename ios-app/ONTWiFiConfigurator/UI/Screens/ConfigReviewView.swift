@@ -49,6 +49,16 @@ public struct ConfigReviewView: View {
         }
         .navigationTitle("Kiểm tra & Đổ cấu hình")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button {
+                    viewModel.openDiagnosticLogSheet()
+                } label: {
+                    Image(systemName: "ladybug")
+                }
+                .accessibilityLabel("Nhật ký Debug")
+            }
+        }
         .fileImporter(
             isPresented: $showFirmwareImporter,
             allowedContentTypes: [.data, .item],

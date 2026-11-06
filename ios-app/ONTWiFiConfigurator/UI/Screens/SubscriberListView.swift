@@ -42,6 +42,16 @@ public struct SubscriberListView: View {
             }
             .navigationTitle("Cấu Hình ONT VNPT")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        viewModel.openDiagnosticLogSheet()
+                    } label: {
+                        Image(systemName: "ladybug")
+                    }
+                    .accessibilityLabel("Nhật ký Debug")
+                }
+            }
             .fileImporter(
                 isPresented: $isShowingFileImporter,
                 allowedContentTypes: [
@@ -59,6 +69,9 @@ public struct SubscriberListView: View {
                     viewModel: viewModel,
                     onShareExcelReport: { shareExcelReport() }
                 )
+            }
+            .sheet(isPresented: $viewModel.showDiagnosticLogSheet) {
+                DiagnosticLogSheet(viewModel: viewModel)
             }
             .navigationDestination(
                 isPresented: Binding(
@@ -322,7 +335,16 @@ public struct SubscriberListView: View {
                 while let presented = topVC.presentedViewController {
                     topVC = presented
                 }
-                activityVC.popoverPresentationController?.sourceView = topVC.view
+                if let popover = activityVC.popoverPresentationController {
+                    popover.sourceView = topVC.view
+                    popover.sourceRect = CGRect(
+                        x: topVC.view.bounds.midX,
+                        y: topVC.view.bounds.midY,
+                        width: 1,
+                        height: 1
+                    )
+                    popover.permittedArrowDirections = []
+                }
                 topVC.present(activityVC, animated: true)
             }
         } catch {

@@ -18,4 +18,7 @@ class OntAuthenticationError(message: String) : OntDriverException(message)
 class OntValidationError(message: String) : OntDriverException(message)
 
 /** Raised when physical or HTTP network request fails. */
-class OntNetworkError(message: String, cause: Throwable? = null) : OntDriverException(message, cause)
+open class OntNetworkError(message: String, cause: Throwable? = null) : OntDriverException(message, cause)
+
+/** Raised on Connection 2 when live wlAssociatedDevice confirms phone is still associated with primary Band A. */
+class StillOnPrimaryBandException(message: String) : OntNetworkError(message)

@@ -20,6 +20,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.PlayLesson
 import androidx.compose.material.icons.filled.Search
@@ -76,6 +77,7 @@ fun SubscriberListScreen(
     onLoadDemoExcel: () -> Unit,
     onExportReport: () -> Unit,
     onOpenWifiScanner: () -> Unit,
+    onOpenDiagnosticLogs: () -> Unit = {},
     onSelectSubscriber: (SubscriberRecord) -> Unit
 ) {
     val totalRecordsCount = allRecords.size
@@ -97,9 +99,18 @@ fun SubscriberListScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "iGate GW040-NSv2 • Đổi Wi-Fi 2.4G ở bước cuối",
+                            text = "iGate GW040-NSv2 • Tự động đổi 2 Wi-Fi & Firmware",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.88f)
+                        )
+                    }
+                },
+                actions = {
+                    IconButton(onClick = onOpenDiagnosticLogs) {
+                        Icon(
+                            imageVector = Icons.Default.BugReport,
+                            contentDescription = "Nhật ký Debug",
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer
                         )
                     }
                 },

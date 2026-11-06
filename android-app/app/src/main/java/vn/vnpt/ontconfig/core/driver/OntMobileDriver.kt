@@ -15,7 +15,9 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.FileInputStream
 import org.json.JSONArray
 import org.json.JSONObject
+import vn.vnpt.ontconfig.core.logging.LogLevel
 import vn.vnpt.ontconfig.core.validation.OntInputValidator
+import vn.vnpt.ontconfig.core.wifi.OntWifiConnector
 import vn.vnpt.ontconfig.core.wifi.WifiBand
 import vn.vnpt.ontconfig.data.model.GlobalSettings
 import vn.vnpt.ontconfig.data.model.SubscriberRecord
@@ -86,11 +88,18 @@ class OntMobileDriver(
     private val wlRestartPollIntervalMs: Long = 1000L,
     private val maxWlRestartPolls: Int = 30,
     private val userExistPollIntervalMs: Long = 3000L,
+    private val postDhcpGatewaySettleMs: Long = 2_500L,
+    private val handoverRetryInitialBackoffMs: Long = 5_000L,
+    private val handoverRetryMaxBackoffMs: Long = 20_000L,
+    private val bandVerifyPollTimeoutMs: Long = 15_000L,
+    private val bandVerifyPollIntervalMs: Long = 2_000L,
     private val allowSingleBand24gFallback: Boolean = false,
     private val probePauseMutex: Mutex? = null,
     private val onUnbindNetwork: (() -> Unit)? = null,
     private val onAdminPasswordChanged: (suspend (String) -> Unit)? = null,
     private val onRebindWifiNetwork: (suspend () -> SocketFactory?)? = null,
+    private val isNetworkTransportAlive: (() -> Boolean)? = null,
+    private val onLog: ((LogLevel, String, String) -> Unit)? = null,
     private val onSwitchToSecondaryWifi: (suspend (
         ssid: String,
         password: String,
@@ -98,9 +107,23 @@ class OntMobileDriver(
         secMode: String,
         bssidHint: String?,
         timeoutMs: Long,
+        minScanTimestampMicros: Long,
+        outerAttempt: Int,
+        lockToBssidHint: Boolean,
         onDetail: (String) -> Unit
     ) -> WifiHandoverContext)? = null
 ) {
+
+    private class MissingDeviceInfoException(message: String) : OntNetworkError(message)
+
+    private fun logDiag(level: LogLevel, tag: String, message: String) {
+        onLog?.invoke(level, tag, message)
+    }
+
+    private fun currentScanEpochMicros(): Long {
+        val bootMicros = runCatching { android.os.SystemClock.elapsedRealtimeNanos() / 1_000L }.getOrDefault(0L)
+        return if (bootMicros > 0L) bootMicros else (System.nanoTime() / 1_000L).coerceAtLeast(1L)
+    }
 
     internal class FlushTrackedIOException(
         override val cause: IOException,
@@ -181,9 +204,7 @@ class OntMobileDriver(
             allowedHostOverride = hostOverride,
             pinnedCertSha256 = pinnedPeerCertSha256,
             onPeerCertSha256 = { sha ->
-                if (observedPeerCertSha256 == null) {
-                    observedPeerCertSha256 = sha
-                }
+                observedPeerCertSha256 = sha
             }
         )
     }
@@ -735,7 +756,13 @@ class OntMobileDriver(
             }
         } catch (ce: CancellationException) {
             throw ce
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            if (hasTlsCertMismatchCause(e)) {
+                throw OntDriverException(
+                    "Chứng chỉ bảo mật TLS của ONT ở Lần kết nối 2 không khớp với chứng chỉ đã ghim ở Lần kết nối 1 khi đọc $path — nghi ngờ bắt nhầm Wi-Fi khác.",
+                    e
+                )
+            }
             null
         }
     }
@@ -777,36 +804,38 @@ class OntMobileDriver(
         if (hasValidSubnetIp) {
             postOptionalSessionJson("/cgi-bin/luci/dhcpclient.json")?.let { dhcpJson ->
                 var clientMac = ""
-                var leaseIfc = ""
                 dhcpJson.optJSONArray("dhcpInfoList")?.let { dhcpArr ->
                     for (i in 0 until dhcpArr.length()) {
                         val parts = optPipeRow(dhcpArr, i).split("|")
                         if (parts.getOrNull(0)?.trim() == cleanIp) {
                             clientMac = parts.getOrNull(3)?.trim().orEmpty()
-                            leaseIfc = normalizeWlInterface(parts.getOrNull(7).orEmpty())
                             break
                         }
                     }
                 }
 
-                var liveAssocIfc = ""
+                var exactIpIfc = ""
+                var macFallbackIfc = ""
                 dhcpJson.optJSONArray("wlAssociatedDevice")?.let { assocArr ->
                     for (i in 0 until assocArr.length()) {
                         val assocParts = optPipeRow(assocArr, i).split("|")
                         val assocMac = assocParts.getOrNull(0)?.trim().orEmpty()
                         val assocIp = assocParts.getOrNull(1)?.trim().orEmpty()
-                        val macMatches = clientMac.isNotEmpty() && assocMac.equals(clientMac, ignoreCase = true)
-                        if (macMatches || assocIp == cleanIp) {
-                            liveAssocIfc = normalizeWlInterface(assocParts.getOrNull(3).orEmpty()).ifEmpty {
-                                assocParts.firstNotNullOfOrNull { token ->
-                                    normalizeWlInterface(token).takeIf { it.isNotEmpty() }
-                                }.orEmpty()
-                            }
-                            if (liveAssocIfc.isNotEmpty()) break
+                        val rowIfc = normalizeWlInterface(assocParts.getOrNull(3).orEmpty()).ifEmpty {
+                            assocParts.firstNotNullOfOrNull { token ->
+                                normalizeWlInterface(token).takeIf { it.isNotEmpty() }
+                            }.orEmpty()
+                        }
+                        if (rowIfc.isEmpty()) continue
+                        if (cleanIp.isNotEmpty() && assocIp == cleanIp && exactIpIfc.isEmpty()) {
+                            exactIpIfc = rowIfc
+                        }
+                        if (clientMac.isNotEmpty() && assocMac.equals(clientMac, ignoreCase = true) && macFallbackIfc.isEmpty()) {
+                            macFallbackIfc = rowIfc
                         }
                     }
                 }
-                matchedWlIfc = liveAssocIfc.ifEmpty { leaseIfc }
+                matchedWlIfc = exactIpIfc.ifEmpty { macFallbackIfc }
             }
         }
 
@@ -815,7 +844,20 @@ class OntMobileDriver(
         var wl1Bssid: String? = null
         var resolvedFromDeviceInfo: WifiBand? = null
 
-        postOptionalSessionJson("/cgi-bin/luci/deviceinfo2.json")?.let { devJson ->
+        var devJson: JSONObject? = null
+        for (attempt in 1..3) {
+            devJson = postOptionalSessionJson("/cgi-bin/luci/deviceinfo2.json")
+            if (devJson != null) break
+            if (attempt < 3) {
+                try {
+                    Thread.sleep(minOf(settlingDelayMs.coerceAtLeast(5L), 150L))
+                } catch (_: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    break
+                }
+            }
+        }
+        devJson?.let { devJson ->
             val baseMac = devJson.optString("baseMacAddress", "").trim().ifEmpty { null }
             ontBaseMac = baseMac
             if (baseMac != null && bssid.isNullOrBlank() && currentPass.isNotEmpty()) {
@@ -848,7 +890,19 @@ class OntMobileDriver(
             }
         }
 
-        val finalBand = resolvedFromDeviceInfo ?: when (matchedWlIfc) {
+        val b24 = wl0Bssid
+        val b5 = wl1Bssid
+        val bssidResolvedBand = if (!bssid.isNullOrBlank()) {
+            when {
+                b24 != null && OntWifiConnector.isSameOntBssid(bssid, b24) -> WifiBand.BAND_2_4_GHZ
+                b5 != null && OntWifiConnector.isSameOntBssid(bssid, b5) -> WifiBand.BAND_5_GHZ
+                else -> null
+            }
+        } else {
+            null
+        }
+
+        val finalBand = bssidResolvedBand ?: resolvedFromDeviceInfo ?: when (matchedWlIfc) {
             "wl1" -> WifiBand.BAND_5_GHZ
             "wl0" -> WifiBand.BAND_2_4_GHZ
             else -> fallbackBand
@@ -870,7 +924,14 @@ class OntMobileDriver(
         previousSessionKey: String,
         userExistWaitBudgetMs: Long = 65_000L
     ): String {
+        fun ensureTransportAlive(stage: String) {
+            if (isNetworkTransportAlive?.invoke() == false) {
+                throw OntNetworkError("Mất liên kết Wi-Fi (onLost) trong giai đoạn $stage ở Lần kết nối 2.")
+            }
+        }
+
         fun attemptNewPassLoginOnce(): String {
+            ensureTransportAlive("gửi login.cmd")
             val loginData = login("admin", newAdminPass)
             val status = loginData.optString("status", "").trim()
             val firstLog = loginData.optString("firstlog", "").trim()
@@ -891,11 +952,21 @@ class OntMobileDriver(
             throw e
         } catch (e: OntAuthenticationError) {
             throw e
+        } catch (ne: OntNetworkError) {
+            if (hasTlsCertMismatchCause(ne)) {
+                throw OntDriverException("Chứng chỉ TLS không khớp với ONT ở Lần kết nối 1.", ne)
+            }
+            throw ne
         } catch (_: OntUserExistError) {
+            ensureTransportAlive("xử lý user exist")
+            logDiag(LogLevel.WARN, "AUTH", "Phát hiện 'user exist' ở Lần 2 — thử giải phóng phiên cũ và chờ TTL.")
+            var lastNetworkError: OntNetworkError? = null
+            var sawLiveUserExist = true
             val keyToRelease = previousSessionKey.ifEmpty { lastActiveSessionKey }
             if (isValidSessionToken(keyToRelease)) {
                 sessionKey = keyToRelease
                 logout()
+                ensureTransportAlive("sau logout phiên cũ")
                 try {
                     return attemptNewPassLoginOnce()
                 } catch (e2: OntAccountLockoutError) {
@@ -905,32 +976,45 @@ class OntMobileDriver(
                 } catch (e2: OntAuthenticationError) {
                     throw e2
                 } catch (_: OntUserExistError) {
-                    // Fall through to TTL polling loop below
+                    sawLiveUserExist = true
+                    lastNetworkError = null
                 } catch (ne: OntNetworkError) {
                     if (hasTlsCertMismatchCause(ne)) {
                         throw OntDriverException("Chứng chỉ TLS không khớp với ONT ở Lần kết nối 1.", ne)
                     }
-                    // Transient socket drop right after logout -> fall through to polling loop
+                    ensureTransportAlive("lỗi mạng sau logout phiên cũ")
+                    lastNetworkError = ne
+                    sawLiveUserExist = false
                 }
             }
 
             val deadlineMs = monotonicMillis() + userExistWaitBudgetMs.coerceAtLeast(userExistPollIntervalMs)
             while (monotonicMillis() < deadlineMs) {
+                ensureTransportAlive("chờ giải phóng phiên user exist")
                 val sleepMs = minOf(
                     userExistPollIntervalMs.coerceAtLeast(10L),
                     (deadlineMs - monotonicMillis()).coerceAtLeast(10L)
                 )
                 delay(sleepMs)
+                ensureTransportAlive("trước khi thử lại login.cmd")
                 try {
                     return attemptNewPassLoginOnce()
                 } catch (_: OntUserExistError) {
+                    sawLiveUserExist = true
+                    lastNetworkError = null
                     continue
                 } catch (ne: OntNetworkError) {
                     if (hasTlsCertMismatchCause(ne)) {
                         throw OntDriverException("Chứng chỉ TLS không khớp với ONT ở Lần kết nối 1.", ne)
                     }
+                    ensureTransportAlive("rớt mạng khi chờ user exist")
+                    lastNetworkError = ne
+                    sawLiveUserExist = false
                     continue
                 }
+            }
+            if (lastNetworkError != null && !sawLiveUserExist) {
+                throw lastNetworkError
             }
             throw OntUserExistError(
                 "Tài khoản admin ONT vẫn bận phiên cũ (user exist) sau khi chờ ${userExistWaitBudgetMs / 1000}s ở Lần kết nối 2."
@@ -1067,18 +1151,99 @@ class OntMobileDriver(
      * [Red Team RT-02] Verify ground-truth ONT identity (`baseMacAddress`) and live wireless interface
      * (`wlAssociatedDevice` == `expectedBand`, never falling back to stale `dhcpInfoList`) on Connection 2.
      */
+    private suspend fun verifySecondConnectionBandAndMacWithRetry(
+        localIpv4: String?,
+        expectedBand: WifiBand,
+        expectedOntBaseMac: String?,
+        isSameSsidBothBands: Boolean = false
+    ) {
+        val pollBudget = bandVerifyPollTimeoutMs.coerceAtLeast(20L)
+        val pollInterval = bandVerifyPollIntervalMs.coerceAtLeast(10L)
+        val deadlineMs = monotonicMillis() + pollBudget
+        var consecutiveWrongBandCount = 0
+        var lastConvergenceError: OntNetworkError? = null
+        var attempt = 0
+
+        while (true) {
+            attempt++
+            if (isNetworkTransportAlive?.invoke() == false) {
+                throw OntNetworkError("Mất liên kết Wi-Fi trong lúc xác thực bảng trạm Lần kết nối 2.")
+            }
+            try {
+                verifySecondConnectionBandAndMac(
+                    localIpv4 = localIpv4,
+                    expectedBand = expectedBand,
+                    expectedOntBaseMac = expectedOntBaseMac,
+                    isSameSsidBothBands = isSameSsidBothBands
+                )
+                logDiag(
+                    LogLevel.INFO,
+                    "VERIFY",
+                    "Xác thực thành công băng tần ${expectedBand.label} & MAC=${expectedOntBaseMac ?: "N/A"} (lượt poll #$attempt)."
+                )
+                return
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (wrongBand: StillOnPrimaryBandException) {
+                consecutiveWrongBandCount++
+                lastConvergenceError = wrongBand
+                logDiag(
+                    LogLevel.WARN,
+                    "VERIFY",
+                    "Lượt poll #$attempt thấy vẫn ở băng tần cũ (${consecutiveWrongBandCount}/2): ${wrongBand.message}"
+                )
+                if (consecutiveWrongBandCount >= 2 || monotonicMillis() >= deadlineMs) {
+                    throw wrongBand
+                }
+            } catch (ne: OntNetworkError) {
+                consecutiveWrongBandCount = 0
+                lastConvergenceError = ne
+                logDiag(
+                    LogLevel.INFO,
+                    "VERIFY",
+                    "Bảng trạm / thông tin ONT đang cập nhật ở lượt poll #$attempt: ${ne.message}"
+                )
+                if (monotonicMillis() >= deadlineMs) {
+                    if (!isSameSsidBothBands) {
+                        logDiag(
+                            LogLevel.INFO,
+                            "VERIFY",
+                            "2 Wi-Fi khác tên và ONT phản hồi đúng MAC $expectedOntBaseMac — xác nhận đã chuyển sang ${expectedBand.label} thành công sau khi hết thời gian chờ bảng trạm."
+                        )
+                        return
+                    }
+                    throw ne
+                }
+            }
+
+            val remainingMs = deadlineMs - monotonicMillis()
+            if (remainingMs <= 0L) break
+            delay(minOf(pollInterval, remainingMs))
+        }
+
+        throw lastConvergenceError ?: OntNetworkError(
+            "Chưa xác thực được bảng kết nối wlAssociatedDevice của băng tần ${expectedBand.label} sau ${pollBudget}ms."
+        )
+    }
+
     private fun verifySecondConnectionBandAndMac(
         localIpv4: String?,
         expectedBand: WifiBand,
-        expectedOntBaseMac: String?
+        expectedOntBaseMac: String?,
+        isSameSsidBothBands: Boolean = false
     ) {
         val ifcBandMap = mutableMapOf<String, WifiBand>()
         val devJson = postOptionalSessionJson("/cgi-bin/luci/deviceinfo2.json")
         val actualBaseMac = devJson?.optString("baseMacAddress", "")?.trim()?.ifEmpty { null }
         if (!expectedOntBaseMac.isNullOrBlank()) {
-            if (actualBaseMac == null || !actualBaseMac.equals(expectedOntBaseMac.trim(), ignoreCase = true)) {
+            if (!actualBaseMac.isNullOrBlank() && !actualBaseMac.equals(expectedOntBaseMac.trim(), ignoreCase = true)) {
                 throw OntDriverException(
-                    "Địa chỉ MAC của ONT ở Lần kết nối 2 (${actualBaseMac ?: "không xác định"}) không khớp với ONT ban đầu ($expectedOntBaseMac) — nghi ngờ bắt nhầm ONT khác."
+                    "Địa chỉ MAC của ONT ở Lần kết nối 2 ($actualBaseMac) không khớp với ONT ban đầu ($expectedOntBaseMac) — nghi ngờ bắt nhầm ONT khác."
+                )
+            }
+            if (actualBaseMac == null) {
+                throw MissingDeviceInfoException(
+                    "Chưa đọc được baseMacAddress từ deviceinfo2.json ở Lần kết nối 2 để đối chiếu với ONT ban đầu ($expectedOntBaseMac)."
                 )
             }
         }
@@ -1108,8 +1273,8 @@ class OntMobileDriver(
             ?: throw OntNetworkError("Không đọc được bảng kết nối Wi-Fi (dhcpclient.json) ở Lần kết nối 2.")
 
         val assocArr = dhcpJson.optJSONArray("wlAssociatedDevice")
-            ?: throw OntDriverException(
-                "Không xác thực được giao diện wlAssociatedDevice ở Lần kết nối 2 để đảm bảo đã đứng trên Wi-Fi ${expectedBand.label}."
+            ?: throw OntNetworkError(
+                "Bảng wlAssociatedDevice chưa sẵn sàng ở Lần kết nối 2 để xác thực Wi-Fi ${expectedBand.label}."
             )
 
         val cleanIp = localIpv4?.trim().orEmpty()
@@ -1127,29 +1292,74 @@ class OntMobileDriver(
         }
 
         var matchedAssocIfc = ""
-        for (i in 0 until assocArr.length()) {
-            val assocParts = optPipeRow(assocArr, i).split("|")
-            val assocMac = assocParts.getOrNull(0)?.trim().orEmpty()
-            val assocIp = assocParts.getOrNull(1)?.trim().orEmpty()
-            val rowIfc = normalizeWlInterface(assocParts.getOrNull(3).orEmpty()).ifEmpty {
+        // Pass 1: exact active IP match (eliminates stale association rows from previous connections)
+        if (cleanIp.isNotEmpty()) {
+            for (i in 0 until assocArr.length()) {
+                val assocParts = optPipeRow(assocArr, i).split("|")
+                val assocIp = assocParts.getOrNull(1)?.trim().orEmpty()
+                val rowIfc = normalizeWlInterface(assocParts.getOrNull(3).orEmpty()).ifEmpty {
+                    assocParts.firstNotNullOfOrNull { token ->
+                        normalizeWlInterface(token).takeIf { it.isNotEmpty() }
+                    }.orEmpty()
+                }
+                if (rowIfc.isNotEmpty() && assocIp == cleanIp) {
+                    matchedAssocIfc = rowIfc
+                    break
+                }
+            }
+        }
+        // Pass 2: MAC match, preferring expectedBand if multiple entries exist
+        if (matchedAssocIfc.isEmpty() && clientMac.isNotEmpty()) {
+            var preferredIfc = ""
+            var fallbackIfc = ""
+            for (i in 0 until assocArr.length()) {
+                val assocParts = optPipeRow(assocArr, i).split("|")
+                val assocMac = assocParts.getOrNull(0)?.trim().orEmpty()
+                val rowIfc = normalizeWlInterface(assocParts.getOrNull(3).orEmpty()).ifEmpty {
+                    assocParts.firstNotNullOfOrNull { token ->
+                        normalizeWlInterface(token).takeIf { it.isNotEmpty() }
+                    }.orEmpty()
+                }
+                if (rowIfc.isNotEmpty() && assocMac.equals(clientMac, ignoreCase = true)) {
+                    val band = ifcBandMap[rowIfc] ?: when (rowIfc) {
+                        "wl1" -> WifiBand.BAND_5_GHZ
+                        else -> WifiBand.BAND_2_4_GHZ
+                    }
+                    if (band == expectedBand) {
+                        preferredIfc = rowIfc
+                        break
+                    }
+                    if (fallbackIfc.isEmpty()) {
+                        fallbackIfc = rowIfc
+                    }
+                }
+            }
+            if (preferredIfc.isNotEmpty()) {
+                matchedAssocIfc = preferredIfc
+            } else if (isSameSsidBothBands && fallbackIfc.isNotEmpty()) {
+                matchedAssocIfc = fallbackIfc
+            }
+        }
+        // Pass 3: single entry fallback
+        if (matchedAssocIfc.isEmpty() && assocArr.length() == 1) {
+            val assocParts = optPipeRow(assocArr, 0).split("|")
+            val singleIfc = normalizeWlInterface(assocParts.getOrNull(3).orEmpty()).ifEmpty {
                 assocParts.firstNotNullOfOrNull { token ->
                     normalizeWlInterface(token).takeIf { it.isNotEmpty() }
                 }.orEmpty()
             }
-            if (rowIfc.isEmpty()) continue
-            val ipMatches = cleanIp.isNotEmpty() && assocIp == cleanIp
-            val macMatches = clientMac.isNotEmpty() && assocMac.equals(clientMac, ignoreCase = true)
-            if (ipMatches || macMatches || (cleanIp.isEmpty() && assocArr.length() == 1)) {
-                matchedAssocIfc = rowIfc
-                break
-            }
-            if (matchedAssocIfc.isEmpty() && assocIp.isEmpty() && assocArr.length() == 1) {
-                matchedAssocIfc = rowIfc
+            if (singleIfc.isNotEmpty()) {
+                val band = ifcBandMap[singleIfc] ?: when (singleIfc) {
+                    "wl1" -> WifiBand.BAND_5_GHZ
+                    else -> WifiBand.BAND_2_4_GHZ
+                }
+                if (band == expectedBand || isSameSsidBothBands) {
+                    matchedAssocIfc = singleIfc
+                }
             }
         }
-
         if (matchedAssocIfc.isEmpty()) {
-            throw OntDriverException(
+            throw OntNetworkError(
                 "Chưa thấy thiết bị trong bảng kết nối trực tiếp wlAssociatedDevice của băng tần ${expectedBand.label}."
             )
         }
@@ -1159,10 +1369,16 @@ class OntMobileDriver(
             else -> WifiBand.BAND_2_4_GHZ
         }
         if (liveBand != expectedBand) {
-            throw OntDriverException(
-                "Thiết bị vẫn đang kết nối trên băng tần ${liveBand.label} ($matchedAssocIfc) thay vì băng tần ${expectedBand.label}. " +
-                    "Hãy kiểm tra lại Wi-Fi vừa ghép nối (đặc biệt khi 2 băng tần đặt trùng tên)."
-            )
+            if (isSameSsidBothBands) {
+                throw StillOnPrimaryBandException(
+                    "Thiết bị vẫn đang kết nối trên băng tần ${liveBand.label} ($matchedAssocIfc) thay vì băng tần ${expectedBand.label}. " +
+                        "Hãy kiểm tra lại Wi-Fi vừa ghép nối (đặc biệt khi 2 băng tần đặt trùng tên)."
+                )
+            } else {
+                throw OntNetworkError(
+                    "Bảng kết nối trực tiếp wlAssociatedDevice chưa cập nhật sang băng tần ${expectedBand.label} ($matchedAssocIfc)."
+                )
+            }
         }
     }
 
@@ -1481,6 +1697,8 @@ class OntMobileDriver(
         val wifi5Pass = record.effectiveWifi5Pass(secMode.formValue)
 
         fun emit(step: Int, title: String, status: StepStatus, detail: String) {
+            val level = if (status == StepStatus.FAILED) LogLevel.ERROR else LogLevel.INFO
+            logDiag(level, "STEP$step", "[$status] $title — $detail")
             onProgress?.invoke(
                 StepProgress(
                     stepNumber = step,
@@ -1645,87 +1863,209 @@ class OntMobileDriver(
                 emit(6, step6Title, StepStatus.SUCCESS, "Đã lưu Wi-Fi phụ $secondaryBandLabel ('$secondarySsid') & đóng phiên Lần 1")
             }
 
-            // Step 7: Wait for ONT Radio Startup & Auto-Switch to Newly Configured Wi-Fi (Connection 2)
+            // Step 7: Outer Spaced-Backoff Reconnect & ONT Readiness Loop (Connection 2)
             val step7Title = "Bước 7/$totalSteps: Đợi ONT phát sóng mới & Chuyển sang Wi-Fi $handoverBandLabel"
             val switchHandler = onSwitchToSecondaryWifi
                 ?: throw OntDriverException(
                     "Chưa cấu hình hàm chuyển sóng tự động (onSwitchToSecondaryWifi) cho quy trình 2 lần kết nối."
                 )
-            emit(
-                7,
-                step7Title,
-                StepStatus.RUNNING,
-                "Đang chờ ONT khởi động lại sóng '$handoverSsid' ($handoverBandLabel) và chuyển kết nối..."
+            val step6CompletedMicros = currentScanEpochMicros()
+            val totalHandoverBudgetMs = settings.wifiHandoverTimeoutMs.coerceAtLeast(100L)
+            val handoverDeadlineMs = monotonicMillis() + totalHandoverBudgetMs
+            var outerAttempt = 0
+            var preferBssidLock = false
+            var missingDeviceInfoOuterCount = 0
+            var lastHandoverError: OntDriverException? = null
+            var step7Verified = false
+
+            logDiag(
+                LogLevel.INFO,
+                "STEP7",
+                "Bắt đầu Bước 7: target='$handoverSsid' ($handoverBandLabel), bssidHint=${handoverBssidHint ?: "none"}, budget=${totalHandoverBudgetMs}ms, step6Micros=$step6CompletedMicros."
             )
-            val handoverCtx = try {
-                switchHandler.invoke(
-                    handoverSsid,
-                    handoverPass,
-                    handoverBand,
-                    secMode.formValue,
-                    handoverBssidHint,
-                    settings.wifiHandoverTimeoutMs
-                ) { statusDetail ->
-                    emit(7, step7Title, StepStatus.RUNNING, statusDetail)
+
+            while (!step7Verified && monotonicMillis() < handoverDeadlineMs) {
+                outerAttempt++
+                val remainingBudgetMs = (handoverDeadlineMs - monotonicMillis()).coerceAtLeast(50L)
+                emit(
+                    7,
+                    step7Title,
+                    StepStatus.RUNNING,
+                    if (outerAttempt == 1) {
+                        "Đang chờ ONT khởi động lại sóng '$handoverSsid' ($handoverBandLabel) và chuyển kết nối..."
+                    } else {
+                        "Thử kết nối lại lượt $outerAttempt sang Wi-Fi '$handoverSsid' ($handoverBandLabel)..."
+                    }
+                )
+
+                try {
+                    val handoverCtx = try {
+                        switchHandler.invoke(
+                            handoverSsid,
+                            handoverPass,
+                            handoverBand,
+                            secMode.formValue,
+                            handoverBssidHint,
+                            remainingBudgetMs,
+                            step6CompletedMicros,
+                            outerAttempt,
+                            preferBssidLock
+                        ) { statusDetail ->
+                            emit(7, step7Title, StepStatus.RUNNING, statusDetail)
+                        }
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (de: OntDriverException) {
+                        throw de
+                    } catch (e: Exception) {
+                        throw OntNetworkError(
+                            "Không thể chuyển kết nối sang Wi-Fi mới '$handoverSsid' ($handoverBandLabel): ${e.message}",
+                            e
+                        )
+                    }
+
+                    rebuildHttpClients(handoverCtx.socketFactory)
+
+                    val settleAfterDhcpMs = minOf(
+                        postDhcpGatewaySettleMs.coerceAtLeast(0L),
+                        ((handoverDeadlineMs - monotonicMillis()) / 3L).coerceAtLeast(0L)
+                    )
+                    if (settleAfterDhcpMs > 0L) {
+                        delay(settleAfterDhcpMs)
+                    }
+
+                    if (isNetworkTransportAlive?.invoke() == false) {
+                        throw OntNetworkError("Liên kết Wi-Fi '$handoverSsid' vừa rớt ngay sau khi cấp DHCP.")
+                    }
+
+                    emit(
+                        7,
+                        step7Title,
+                        StepStatus.RUNNING,
+                        "Đã ghép nối '$handoverSsid' (lượt $outerAttempt), đang kiểm tra ONT Gateway 192.168.1.1..."
+                    )
+                    val postHandoverBudgetMs = minOf(
+                        settings.gatewayPostHandoverTimeoutMs.coerceAtLeast(50L),
+                        (handoverDeadlineMs - monotonicMillis()).coerceAtLeast(50L)
+                    )
+                    val probeDeadlineMs = monotonicMillis() + postHandoverBudgetMs
+                    var gatewayReachableOnConn2 = false
+                    while (monotonicMillis() < probeDeadlineMs) {
+                        if (isNetworkTransportAlive?.invoke() == false) {
+                            throw OntNetworkError(
+                                "Mất kết nối Wi-Fi '$handoverSsid' (onLost) khi đang thăm dò ONT Gateway."
+                            )
+                        }
+                        if (probeGateway(failOnCertMismatch = true)) {
+                            gatewayReachableOnConn2 = true
+                            break
+                        }
+                        val sleepProbe = minOf(
+                            recoveryRetryDelayMs.coerceAtLeast(15L),
+                            (probeDeadlineMs - monotonicMillis()).coerceAtLeast(10L)
+                        )
+                        delay(sleepProbe)
+                    }
+                    if (!gatewayReachableOnConn2 && !probeGateway(failOnCertMismatch = true)) {
+                        throw OntNetworkError(
+                            "Đã chuyển sang Wi-Fi '$handoverSsid' nhưng không truy cập được ONT Gateway tại $cleanBaseUrl sau ${postHandoverBudgetMs / 1000}s."
+                        )
+                    }
+                    logDiag(
+                        LogLevel.INFO,
+                        "STEP7",
+                        "Gateway 192.168.1.1 phản hồi hợp lệ ở lượt $outerAttempt (certSha256=${observedPeerCertSha256?.take(12) ?: "none"}...)."
+                    )
+
+                    emit(7, step7Title, StepStatus.RUNNING, "Đang đăng nhập lại ONT bằng mật khẩu Admin mới...")
+                    val userExistBudgetMs = if (settings.gatewayPostHandoverTimeoutMs >= 45_000L) {
+                        65_000L
+                    } else {
+                        settings.gatewayPostHandoverTimeoutMs.coerceAtLeast(userExistPollIntervalMs * 2)
+                    }
+                    authenticateSecondConnection(
+                        newAdminPass = settings.adminNewPass,
+                        previousSessionKey = conn1SessionKey,
+                        userExistWaitBudgetMs = userExistBudgetMs
+                    )
+
+                    verifySecondConnectionBandAndMacWithRetry(
+                        localIpv4 = handoverCtx.localWifiIpv4,
+                        expectedBand = handoverBand,
+                        expectedOntBaseMac = resolvedOntBaseMac,
+                        isSameSsidBothBands = wifi24Ssid.equals(wifi5Ssid, ignoreCase = true)
+                    )
+                    step7Verified = true
+                } catch (ce: CancellationException) {
+                    throw ce
+                } catch (ne: OntNetworkError) {
+                    lastHandoverError = ne
+                    if (ne is StillOnPrimaryBandException && !handoverBssidHint.isNullOrBlank()) {
+                        preferBssidLock = true
+                    }
+                    if (ne is MissingDeviceInfoException) {
+                        missingDeviceInfoOuterCount++
+                        if (missingDeviceInfoOuterCount >= 2) {
+                            throw OntDriverException(
+                                "Địa chỉ MAC của ONT ở Lần kết nối 2 (không xác định) không thể đối chiếu với ONT ban đầu ($resolvedOntBaseMac) sau 2 lượt đọc deviceinfo2.json.",
+                                ne
+                            )
+                        }
+                    }
+                    logDiag(
+                        LogLevel.WARN,
+                        "STEP7",
+                        "Lượt Bước 7 #$outerAttempt gặp sự cố tạm thời (${ne.javaClass.simpleName}): ${ne.message}"
+                    )
+                    if (isValidSessionToken(sessionKey)) {
+                        runCatching { logout() }
+                    }
+                    runCatching { onUnbindNetwork?.invoke() }
+
+                    val afterFailRemainingMs = handoverDeadlineMs - monotonicMillis()
+                    val targetBackoffMs = OntWifiConnector.computeReconnectBackoffMs(
+                        attemptNumber = outerAttempt,
+                        initialBackoffMs = handoverRetryInitialBackoffMs,
+                        maxBackoffMs = handoverRetryMaxBackoffMs
+                    )
+                    if (afterFailRemainingMs <= handoverRetryInitialBackoffMs.coerceAtLeast(10L)) {
+                        break
+                    }
+                    val sleepBackoffMs = minOf(targetBackoffMs, afterFailRemainingMs - 10L).coerceAtLeast(10L)
+                    emit(
+                        7,
+                        step7Title,
+                        StepStatus.RUNNING,
+                        "Kết nối Wi-Fi '$handoverSsid' chưa ổn định, tự động thử lại sau ${(sleepBackoffMs + 999L) / 1000L}s (lượt ${outerAttempt + 1})..."
+                    )
+                    logDiag(
+                        LogLevel.INFO,
+                        "STEP7",
+                        "Nghỉ giãn cách ${sleepBackoffMs}ms trước lượt Bước 7 #${outerAttempt + 1} (lockBssid=$preferBssidLock)."
+                    )
+                    delay(sleepBackoffMs)
+                } catch (de: OntDriverException) {
+                    logDiag(
+                        LogLevel.ERROR,
+                        "STEP7",
+                        "Dừng ngay Bước 7 ở lượt #$outerAttempt do lỗi xác thực/bảo mật không được phép retry: ${de.message}"
+                    )
+                    throw de
                 }
-            } catch (ce: CancellationException) {
-                throw ce
-            } catch (de: OntDriverException) {
-                throw de
-            } catch (e: Exception) {
-                throw OntNetworkError(
-                    "Không thể chuyển kết nối sang Wi-Fi mới '$handoverSsid' ($handoverBandLabel): ${e.message}",
-                    e
+            }
+
+            if (!step7Verified) {
+                throw lastHandoverError ?: OntNetworkError(
+                    "Hết thời gian chờ (${totalHandoverBudgetMs / 1000}s) chuyển kết nối sang Wi-Fi '$handoverSsid' ($handoverBandLabel)."
                 )
             }
 
-            rebuildHttpClients(handoverCtx.socketFactory)
-
-            emit(7, step7Title, StepStatus.RUNNING, "Đã ghép nối '$handoverSsid', đang kiểm tra ONT Gateway 192.168.1.1...")
-            val postHandoverBudgetMs = settings.gatewayPostHandoverTimeoutMs.coerceAtLeast(50L)
-            val probeDeadlineMs = monotonicMillis() + postHandoverBudgetMs
-            var gatewayReachableOnConn2 = false
-            while (monotonicMillis() < probeDeadlineMs) {
-                if (probeGateway(failOnCertMismatch = true)) {
-                    gatewayReachableOnConn2 = true
-                    break
-                }
-                val sleepProbe = minOf(
-                    recoveryRetryDelayMs.coerceAtLeast(15L),
-                    (probeDeadlineMs - monotonicMillis()).coerceAtLeast(10L)
-                )
-                delay(sleepProbe)
-            }
-            if (!gatewayReachableOnConn2 && !probeGateway(failOnCertMismatch = true)) {
-                throw OntNetworkError(
-                    "Đã chuyển sang Wi-Fi '$handoverSsid' nhưng không truy cập được ONT Gateway tại $cleanBaseUrl sau ${postHandoverBudgetMs / 1000}s."
-                )
-            }
-
-            emit(7, step7Title, StepStatus.RUNNING, "Đang đăng nhập lại ONT bằng mật khẩu Admin mới...")
-            val userExistBudgetMs = if (settings.gatewayPostHandoverTimeoutMs >= 45_000L) {
-                65_000L
-            } else {
-                settings.gatewayPostHandoverTimeoutMs.coerceAtLeast(userExistPollIntervalMs * 2)
-            }
-            authenticateSecondConnection(
-                newAdminPass = settings.adminNewPass,
-                previousSessionKey = conn1SessionKey,
-                userExistWaitBudgetMs = userExistBudgetMs
-            )
-
-            verifySecondConnectionBandAndMac(
-                localIpv4 = handoverCtx.localWifiIpv4,
-                expectedBand = handoverBand,
-                expectedOntBaseMac = resolvedOntBaseMac
-            )
             emit(
                 7,
                 step7Title,
                 StepStatus.SUCCESS,
                 "Đã đứng trên Wi-Fi '$handoverSsid' ($handoverBandLabel) & xác thực ONT thành công"
             )
-
             // Step 8: Configure Remaining Primary Wi-Fi Band (or verify NVRAM on 2.4GHz-only fallback)
             if (allowSingleBand24gFallback) {
                 val step8Title = "Bước 8/$totalSteps: Xác nhận lưu NVRAM cả 2 băng tần Wi-Fi"

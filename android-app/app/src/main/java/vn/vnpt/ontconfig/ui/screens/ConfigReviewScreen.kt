@@ -19,6 +19,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Save
@@ -94,6 +95,7 @@ fun ConfigReviewScreen(
     onPrependZeroWifiPass: () -> Unit,
     onSaveChanges: () -> Unit,
     onRunConfiguration: () -> Unit,
+    onOpenDiagnosticLogs: () -> Unit = {},
     onBack: () -> Unit
 ) {
     val validation = OntInputValidator.validateBeforeRun(record, settings)
@@ -141,6 +143,15 @@ fun ConfigReviewScreen(
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                             contentDescription = "Quay lại",
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                },
+                actions = {
+                    IconButton(onClick = onOpenDiagnosticLogs) {
+                        Icon(
+                            imageVector = Icons.Default.BugReport,
+                            contentDescription = "Nhật ký Debug",
                             tint = MaterialTheme.colorScheme.onPrimaryContainer
                         )
                     }

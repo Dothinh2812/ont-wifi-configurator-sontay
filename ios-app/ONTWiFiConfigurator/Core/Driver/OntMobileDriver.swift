@@ -111,6 +111,16 @@ public final class OntMobileDriver: @unchecked Sendable {
         recordPasswordCache.removeAll()
         cacheLock.unlock()
     }
+    public static func computeReconnectBackoffMs(
+        attempt: Int,
+        initialBackoffMs: Int = 5_000,
+        maxBackoffMs: Int = 20_000
+    ) -> Int {
+        let safeInitial = max(0, initialBackoffMs)
+        let safeMax = max(safeInitial, maxBackoffMs)
+        let step = max(1, attempt)
+        return min(max(safeInitial * step, safeInitial), safeMax)
+    }
 
     private let cleanBaseUrl: String
     private let timeoutMs: Int
@@ -119,9 +129,16 @@ public final class OntMobileDriver: @unchecked Sendable {
     private let wlRestartPollIntervalMs: Int
     private let maxWlRestartPolls: Int
     private let userExistPollIntervalMs: Int
+    private let postDhcpGatewaySettleMs: Int
+    private let handoverRetryInitialBackoffMs: Int
+    private let handoverRetryMaxBackoffMs: Int
+    private let bandVerifyPollTimeoutMs: Int
+    private let bandVerifyPollIntervalMs: Int
     private let probePauseMutex: AsyncMutex?
     private let onAdminPasswordChanged: (@Sendable (String) async -> Void)?
     private let isAppInBackground: @Sendable () -> Bool
+    private let isNetworkTransportAlive: (@Sendable () -> Bool)?
+    private let onLog: (@Sendable (LogLevel, String, String) -> Void)?
     private let onSwitchToSecondaryWifi: (@Sendable (
         _ ssid: String,
         _ pass: String,
@@ -131,7 +148,6 @@ public final class OntMobileDriver: @unchecked Sendable {
         _ timeoutMs: Int,
         _ onDetail: @Sendable (String) -> Void
     ) async throws -> String?)?
-
     private let session: UnsafeSslSession
     private let logoutSession: UnsafeSslSession
 
@@ -148,10 +164,17 @@ public final class OntMobileDriver: @unchecked Sendable {
         wlRestartPollIntervalMs: Int = 1000,
         maxWlRestartPolls: Int = 30,
         userExistPollIntervalMs: Int = 3000,
+        postDhcpGatewaySettleMs: Int = 2500,
+        handoverRetryInitialBackoffMs: Int = 5000,
+        handoverRetryMaxBackoffMs: Int = 20000,
+        bandVerifyPollTimeoutMs: Int = 15000,
+        bandVerifyPollIntervalMs: Int = 2000,
         probePauseMutex: AsyncMutex? = nil,
         protocolClasses: [AnyClass] = [],
         onAdminPasswordChanged: (@Sendable (String) async -> Void)? = nil,
         isAppInBackground: @escaping @Sendable () -> Bool = { false },
+        isNetworkTransportAlive: (@Sendable () -> Bool)? = nil,
+        onLog: (@Sendable (LogLevel, String, String) -> Void)? = nil,
         onSwitchToSecondaryWifi: (@Sendable (
             _ ssid: String,
             _ pass: String,
@@ -170,11 +193,17 @@ public final class OntMobileDriver: @unchecked Sendable {
         self.wlRestartPollIntervalMs = wlRestartPollIntervalMs
         self.maxWlRestartPolls = maxWlRestartPolls
         self.userExistPollIntervalMs = userExistPollIntervalMs
+        self.postDhcpGatewaySettleMs = postDhcpGatewaySettleMs
+        self.handoverRetryInitialBackoffMs = handoverRetryInitialBackoffMs
+        self.handoverRetryMaxBackoffMs = handoverRetryMaxBackoffMs
+        self.bandVerifyPollTimeoutMs = bandVerifyPollTimeoutMs
+        self.bandVerifyPollIntervalMs = bandVerifyPollIntervalMs
         self.probePauseMutex = probePauseMutex
         self.onAdminPasswordChanged = onAdminPasswordChanged
         self.isAppInBackground = isAppInBackground
+        self.isNetworkTransportAlive = isNetworkTransportAlive
+        self.onLog = onLog
         self.onSwitchToSecondaryWifi = onSwitchToSecondaryWifi
-
         let hostOverride = URL(string: trimmed)?.host
         self.session = UnsafeSslSession(
             timeoutMs: timeoutMs,
@@ -186,6 +215,10 @@ public final class OntMobileDriver: @unchecked Sendable {
             allowedHostOverride: hostOverride,
             protocolClasses: protocolClasses
         )
+    }
+
+    private func logDiag(_ level: LogLevel, _ tag: String, _ message: String) {
+        onLog?(level, tag, message)
     }
 
     private var currentSessionKey: String {
@@ -778,13 +811,24 @@ public final class OntMobileDriver: @unchecked Sendable {
         (item as? [Any])?.first as? String ?? (item as? String) ?? ""
     }
 
-    private func postOptionalSessionJson(path: String) async -> [String: Any]? {
+    private func postOptionalSessionJson(path: String) async throws -> [String: Any]? {
         let encKey = OntInputValidator.urlEncodeFormValue(currentSessionKey)
-        guard let resp = try? await postForm(
-            path: path,
-            rawPayload: "undefined&sessionKey=\(encKey)",
-            useShortLogoutTimeout: false
-        ) else {
+        let resp: HttpResponsePayload
+        do {
+            resp = try await postForm(
+                path: path,
+                rawPayload: "undefined&sessionKey=\(encKey)",
+                useShortLogoutTimeout: false
+            )
+        } catch let ce as CancellationError {
+            throw ce
+        } catch {
+            if isTlsPinMismatch(error) {
+                throw OntDriverException(
+                    "Chứng chỉ bảo mật TLS của ONT ở Lần kết nối 2 không khớp với chứng chỉ đã ghim ở Lần 1 khi đọc \(path) — nghi ngờ bắt nhầm Wi-Fi khác.",
+                    underlyingError: error
+                )
+            }
             return nil
         }
         let trimmed = resp.body.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -806,6 +850,9 @@ public final class OntMobileDriver: @unchecked Sendable {
         let message: String
     }
 
+    private struct MissingDeviceInfoError: Error {
+        let message: String
+    }
     /// [Red Team RT-02] Server-side connected band & ONT identity ground-truth resolution immediately after Step 2:
     /// Queries `dhcpclient.json` when `localIpv4` is valid (`wlAssociatedDevice` prioritized over `dhcpInfoList`)
     /// and UNCONDITIONALLY queries `deviceinfo2.json` to capture trimmed `baseMacAddress`.
@@ -820,9 +867,8 @@ public final class OntMobileDriver: @unchecked Sendable {
         let hasValidSubnetIp = !cleanIp.isEmpty && cleanIp.hasPrefix("192.168.1.") && cleanIp != "192.168.1.1"
 
         var matchedWlIfc = ""
-        if hasValidSubnetIp, let dhcpJson = await postOptionalSessionJson(path: "/cgi-bin/luci/dhcpclient.json") {
+        if hasValidSubnetIp, let dhcpJson = try? await postOptionalSessionJson(path: "/cgi-bin/luci/dhcpclient.json") {
             var clientMac = ""
-            var leaseIfc = ""
             if let dhcpArr = dhcpJson["dhcpInfoList"] as? [Any] {
                 for item in dhcpArr {
                     let parts = pipeRowString(item).components(separatedBy: "|")
@@ -830,15 +876,13 @@ public final class OntMobileDriver: @unchecked Sendable {
                         if parts.count > 3 {
                             clientMac = parts[3].trimmingCharacters(in: .whitespacesAndNewlines)
                         }
-                        if parts.count > 7 {
-                            leaseIfc = normalizeWlInterface(parts[7])
-                        }
                         break
                     }
                 }
             }
 
-            var liveAssocIfc = ""
+            var exactIpIfc = ""
+            var macFallbackIfc = ""
             if let assocArr = dhcpJson["wlAssociatedDevice"] as? [Any] {
                 for item in assocArr {
                     let assocParts = pipeRowString(item).components(separatedBy: "|")
@@ -846,26 +890,36 @@ public final class OntMobileDriver: @unchecked Sendable {
                     let assocIp = assocParts.count > 1
                         ? assocParts[1].trimmingCharacters(in: .whitespacesAndNewlines)
                         : ""
-                    let macMatches = !clientMac.isEmpty && assocMac.caseInsensitiveCompare(clientMac) == .orderedSame
-                    if macMatches || assocIp == cleanIp {
-                        let ifcAt3 = assocParts.count > 3 ? normalizeWlInterface(assocParts[3]) : ""
-                        if !ifcAt3.isEmpty {
-                            liveAssocIfc = ifcAt3
-                        } else if let found = assocParts.map({ normalizeWlInterface($0) }).first(where: { !$0.isEmpty }) {
-                            liveAssocIfc = found
-                        }
-                        if !liveAssocIfc.isEmpty {
-                            break
-                        }
+                    let ifcAt3 = assocParts.count > 3 ? normalizeWlInterface(assocParts[3]) : ""
+                    let rowIfc = !ifcAt3.isEmpty
+                        ? ifcAt3
+                        : (assocParts.map { normalizeWlInterface($0) }.first(where: { !$0.isEmpty }) ?? "")
+                    guard !rowIfc.isEmpty else { continue }
+                    if !cleanIp.isEmpty && assocIp == cleanIp && exactIpIfc.isEmpty {
+                        exactIpIfc = rowIfc
+                    }
+                    if !clientMac.isEmpty && assocMac.caseInsensitiveCompare(clientMac) == .orderedSame && macFallbackIfc.isEmpty {
+                        macFallbackIfc = rowIfc
                     }
                 }
             }
-            matchedWlIfc = liveAssocIfc.isEmpty ? leaseIfc : liveAssocIfc
+            matchedWlIfc = !exactIpIfc.isEmpty ? exactIpIfc : macFallbackIfc
         }
 
         var ontBaseMac: String?
         var resolvedFromDeviceInfo: WifiBand?
-        if let devJson = await postOptionalSessionJson(path: "/cgi-bin/luci/deviceinfo2.json") {
+        var fetchedDevJson: [String: Any]?
+        for attempt in 1...3 {
+            if let json = try? await postOptionalSessionJson(path: "/cgi-bin/luci/deviceinfo2.json") {
+                fetchedDevJson = json
+                break
+            }
+            if attempt < 3 {
+                let retryMs = min(max(settlingDelayMs, 5), 150)
+                try? await Task.sleep(nanoseconds: UInt64(retryMs) * 1_000_000)
+            }
+        }
+        if let devJson = fetchedDevJson {
             let rawMac = stringValue(devJson, "baseMacAddress").trimmingCharacters(in: .whitespacesAndNewlines)
             if !rawMac.isEmpty {
                 ontBaseMac = rawMac
@@ -914,7 +968,14 @@ public final class OntMobileDriver: @unchecked Sendable {
         previousSessionKey: String,
         userExistWaitBudgetMs: Int = 65_000
     ) async throws -> String {
+        func ensureTransportAlive(_ stage: String) throws {
+            if isNetworkTransportAlive?() == false {
+                throw OntNetworkError("Mất liên kết Wi-Fi en0 trong giai đoạn \(stage) ở Lần kết nối 2.")
+            }
+        }
+
         func attemptNewPassLoginOnce() async throws -> String {
+            try ensureTransportAlive("gửi login.cmd")
             let loginData = try await login(user: "admin", password: newAdminPass)
             let status = stringValue(loginData, "status").trimmingCharacters(in: .whitespacesAndNewlines)
             let firstLog = stringValue(loginData, "firstlog").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -936,10 +997,15 @@ public final class OntMobileDriver: @unchecked Sendable {
         } catch let e as OntAuthenticationError {
             throw e
         } catch is OntUserExistError {
+            try ensureTransportAlive("xử lý user exist")
+            logDiag(.warn, "AUTH", "Phát hiện 'user exist' ở Lần 2 — thử giải phóng phiên cũ và chờ TTL.")
+            var lastNetworkError: OntNetworkError?
+            var sawLiveUserExist = true
             let keyToRelease = previousSessionKey.isEmpty ? lastActiveSessionKey : previousSessionKey
             if isValidSessionToken(keyToRelease) {
                 currentSessionKey = keyToRelease
                 await logout()
+                try ensureTransportAlive("sau logout phiên cũ")
                 do {
                     return try await attemptNewPassLoginOnce()
                 } catch let e2 as OntAccountLockoutError {
@@ -949,12 +1015,15 @@ public final class OntMobileDriver: @unchecked Sendable {
                 } catch let e2 as OntAuthenticationError {
                     throw e2
                 } catch is OntUserExistError {
-                    // Fall through to TTL polling loop below
+                    sawLiveUserExist = true
+                    lastNetworkError = nil
                 } catch let ne as OntNetworkError {
                     if isTlsPinMismatch(ne) {
                         throw OntDriverException("Chứng chỉ TLS của ONT ở Lần kết nối 2 không khớp với Lần 1.", underlyingError: ne)
                     }
-                    // Transient socket drop right after logout -> fall through to polling loop
+                    try ensureTransportAlive("lỗi mạng sau logout phiên cũ")
+                    lastNetworkError = ne
+                    sawLiveUserExist = false
                 }
             }
 
@@ -962,19 +1031,29 @@ public final class OntMobileDriver: @unchecked Sendable {
             let deadline = Date().addingTimeInterval(budgetSec)
             while Date() < deadline {
                 try Task.checkCancellation()
+                try ensureTransportAlive("chờ giải phóng phiên user exist")
                 let remMs = max(10, Int(deadline.timeIntervalSinceNow * 1000.0))
                 let sleepMs = min(max(userExistPollIntervalMs, 10), remMs)
                 try await Task.sleep(nanoseconds: UInt64(sleepMs) * 1_000_000)
+                try ensureTransportAlive("trước khi thử lại login.cmd")
                 do {
                     return try await attemptNewPassLoginOnce()
                 } catch is OntUserExistError {
+                    sawLiveUserExist = true
+                    lastNetworkError = nil
                     continue
                 } catch let ne as OntNetworkError {
                     if isTlsPinMismatch(ne) {
                         throw OntDriverException("Chứng chỉ TLS của ONT ở Lần kết nối 2 không khớp với Lần 1.", underlyingError: ne)
                     }
+                    try ensureTransportAlive("rớt mạng khi chờ user exist")
+                    lastNetworkError = ne
+                    sawLiveUserExist = false
                     continue
                 }
+            }
+            if let netErr = lastNetworkError, !sawLiveUserExist {
+                throw netErr
             }
             throw OntUserExistError(
                 "Tài khoản admin ONT vẫn bận phiên cũ (user exist) sau khi chờ \(userExistWaitBudgetMs / 1000)s ở Lần kết nối 2."
@@ -1083,15 +1162,99 @@ public final class OntMobileDriver: @unchecked Sendable {
     private func verifySecondConnectionBandAndMac(
         localIpv4: String?,
         expectedBand: WifiBand,
-        expectedOntBaseMac: String?
+        expectedOntBaseMac: String?,
+        isSameSsidBothBands: Bool = false
+    ) async throws {
+        let pollBudgetMs = max(20, bandVerifyPollTimeoutMs)
+        let pollIntervalMs = max(10, bandVerifyPollIntervalMs)
+        let deadline = Date().addingTimeInterval(Double(pollBudgetMs) / 1000.0)
+        var consecutiveWrongBandCount = 0
+        var lastStillPrimary: StillOnPrimaryBandError?
+        var lastMissingDevInfo: MissingDeviceInfoError?
+        var lastNetworkErr: OntNetworkError?
+        var pollAttempt = 0
+
+        while true {
+            try Task.checkCancellation()
+            pollAttempt += 1
+            if isNetworkTransportAlive?() == false {
+                throw OntNetworkError("Mất liên kết Wi-Fi en0 trong lúc xác thực bảng trạm Lần kết nối 2.")
+            }
+
+            do {
+                try await verifySecondConnectionBandAndMacOnce(
+                    localIpv4: localIpv4,
+                    expectedBand: expectedBand,
+                    expectedOntBaseMac: expectedOntBaseMac,
+                    isSameSsidBothBands: isSameSsidBothBands
+                )
+                logDiag(.info, "VERIFY", "Xác thực thành công băng tần \(expectedBand.label) & MAC=\(expectedOntBaseMac ?? "N/A") (poll #\(pollAttempt)).")
+                return
+            } catch let ce as CancellationError {
+                throw ce
+            } catch let wrongBand as StillOnPrimaryBandError {
+                consecutiveWrongBandCount += 1
+                lastStillPrimary = wrongBand
+                logDiag(.warn, "VERIFY", "Poll #\(pollAttempt) thấy vẫn ở băng tần cũ (\(consecutiveWrongBandCount)/2): \(wrongBand.message)")
+                if consecutiveWrongBandCount >= 2 || Date() >= deadline {
+                    throw wrongBand
+                }
+            } catch let missingInfo as MissingDeviceInfoError {
+                consecutiveWrongBandCount = 0
+                lastMissingDevInfo = missingInfo
+                logDiag(.info, "VERIFY", "Poll #\(pollAttempt) đang đợi deviceinfo2.json phản hồi: \(missingInfo.message)")
+                if Date() >= deadline {
+                    throw missingInfo
+                }
+            } catch let ne as OntNetworkError {
+                if isTlsPinMismatch(ne) {
+                    throw OntDriverException("Chứng chỉ TLS của ONT ở Lần kết nối 2 không khớp với Lần 1.", underlyingError: ne)
+                }
+                consecutiveWrongBandCount = 0
+                lastNetworkErr = ne
+                logDiag(.info, "VERIFY", "Poll #\(pollAttempt) đang đợi bảng wlAssociatedDevice hội tụ: \(ne.localizedDescription)")
+                if Date() >= deadline {
+                    if !isSameSsidBothBands {
+                        logDiag(.info, "VERIFY", "2 Wi-Fi khác tên và ONT phản hồi đúng MAC \(expectedOntBaseMac ?? "") — xác nhận đã chuyển sang \(expectedBand.label) thành công sau khi hết thời gian chờ bảng trạm.")
+                        return
+                    }
+                    throw ne
+                }
+
+            let remainingMs = Int(deadline.timeIntervalSinceNow * 1000.0)
+            if remainingMs <= 0 { break }
+            try await Task.sleep(nanoseconds: UInt64(min(pollIntervalMs, remainingMs)) * 1_000_000)
+        }
+
+        if let wrongBand = lastStillPrimary {
+            throw wrongBand
+        }
+        if let missingInfo = lastMissingDevInfo {
+            throw missingInfo
+        }
+        throw lastNetworkErr ?? OntNetworkError(
+            "Chưa xác thực được bảng kết nối wlAssociatedDevice của băng tần \(expectedBand.label) sau \(pollBudgetMs)ms."
+        )
+    }
+
+    private func verifySecondConnectionBandAndMacOnce(
+        localIpv4: String?,
+        expectedBand: WifiBand,
+        expectedOntBaseMac: String?,
+        isSameSsidBothBands: Bool = false
     ) async throws {
         var ifcBandMap: [String: WifiBand] = [:]
-        let devJson = await postOptionalSessionJson(path: "/cgi-bin/luci/deviceinfo2.json")
+        let devJson = try await postOptionalSessionJson(path: "/cgi-bin/luci/deviceinfo2.json")
         let actualBaseMac = devJson.map { stringValue($0, "baseMacAddress").trimmingCharacters(in: .whitespacesAndNewlines) } ?? ""
         if let expectedMac = expectedOntBaseMac?.trimmingCharacters(in: .whitespacesAndNewlines), !expectedMac.isEmpty {
-            if actualBaseMac.isEmpty || actualBaseMac.caseInsensitiveCompare(expectedMac) != .orderedSame {
+            if !actualBaseMac.isEmpty && actualBaseMac.caseInsensitiveCompare(expectedMac) != .orderedSame {
                 throw OntDriverException(
-                    "Địa chỉ MAC của ONT ở Lần kết nối 2 (\(actualBaseMac.isEmpty ? "không xác định" : actualBaseMac)) không khớp với ONT ban đầu (\(expectedMac)) — nghi ngờ bắt nhầm ONT khác."
+                    "Địa chỉ MAC của ONT ở Lần kết nối 2 (\(actualBaseMac)) không khớp với ONT ban đầu (\(expectedMac)) — nghi ngờ bắt nhầm ONT khác."
+                )
+            }
+            if actualBaseMac.isEmpty {
+                throw MissingDeviceInfoError(
+                    message: "Chưa đọc được baseMacAddress từ deviceinfo2.json ở Lần kết nối 2 để đối chiếu với ONT ban đầu (\(expectedMac))."
                 )
             }
         }
@@ -1117,12 +1280,12 @@ public final class OntMobileDriver: @unchecked Sendable {
             }
         }
 
-        guard let dhcpJson = await postOptionalSessionJson(path: "/cgi-bin/luci/dhcpclient.json") else {
+        guard let dhcpJson = try await postOptionalSessionJson(path: "/cgi-bin/luci/dhcpclient.json") else {
             throw OntNetworkError("Không đọc được bảng kết nối Wi-Fi (dhcpclient.json) ở Lần kết nối 2.")
         }
         guard let assocArr = dhcpJson["wlAssociatedDevice"] as? [Any] else {
-            throw StillOnPrimaryBandError(
-                message: "Không xác thực được giao diện wlAssociatedDevice ở Lần kết nối 2 cho băng tần \(expectedBand.label)."
+            throw OntNetworkError(
+                "Bảng wlAssociatedDevice chưa sẵn sàng ở Lần kết nối 2 cho băng tần \(expectedBand.label)."
             )
         }
 
@@ -1131,45 +1294,90 @@ public final class OntMobileDriver: @unchecked Sendable {
         if !cleanIp.isEmpty, let dhcpArr = dhcpJson["dhcpInfoList"] as? [Any] {
             for item in dhcpArr {
                 let parts = pipeRowString(item).components(separatedBy: "|")
-                if parts.first?.trimmingCharacters(in: .whitespacesAndNewlines) == cleanIp, parts.count > 3 {
-                    clientMac = parts[3].trimmingCharacters(in: .whitespacesAndNewlines)
+                if parts.first?.trimmingCharacters(in: .whitespacesAndNewlines) == cleanIp {
+                    if parts.count > 3 {
+                        clientMac = parts[3].trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
                     break
                 }
             }
         }
 
         var matchedAssocIfc = ""
-        for item in assocArr {
-            let assocParts = pipeRowString(item).components(separatedBy: "|")
-            let assocMac = assocParts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let assocIp = assocParts.count > 1 ? assocParts[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
-            let ifcAt3 = assocParts.count > 3 ? normalizeWlInterface(assocParts[3]) : ""
-            let rowIfc = !ifcAt3.isEmpty
-                ? ifcAt3
-                : (assocParts.map { normalizeWlInterface($0) }.first { !$0.isEmpty } ?? "")
-            guard !rowIfc.isEmpty else { continue }
-            let ipMatches = !cleanIp.isEmpty && assocIp == cleanIp
-            let macMatches = !clientMac.isEmpty && assocMac.caseInsensitiveCompare(clientMac) == .orderedSame
-            if ipMatches || macMatches || (cleanIp.isEmpty && assocArr.count == 1) {
-                matchedAssocIfc = rowIfc
-                break
-            }
-            if matchedAssocIfc.isEmpty && assocIp.isEmpty && assocArr.count == 1 {
-                matchedAssocIfc = rowIfc
+        // Pass 1: exact active IP match (eliminates stale association rows from previous connections)
+        if !cleanIp.isEmpty {
+            for item in assocArr {
+                let assocParts = pipeRowString(item).components(separatedBy: "|")
+                let assocIp = assocParts.count > 1 ? assocParts[1].trimmingCharacters(in: .whitespacesAndNewlines) : ""
+                let ifcAt3 = assocParts.count > 3 ? normalizeWlInterface(assocParts[3]) : ""
+                let rowIfc = !ifcAt3.isEmpty
+                    ? ifcAt3
+                    : (assocParts.map { normalizeWlInterface($0) }.first { !$0.isEmpty } ?? "")
+                if !rowIfc.isEmpty && assocIp == cleanIp {
+                    matchedAssocIfc = rowIfc
+                    break
+                }
             }
         }
-
+        // Pass 2: MAC match, preferring expectedBand if multiple entries exist
+        if matchedAssocIfc.isEmpty && !clientMac.isEmpty {
+            var preferredIfc = ""
+            var fallbackIfc = ""
+            for item in assocArr {
+                let assocParts = pipeRowString(item).components(separatedBy: "|")
+                let assocMac = assocParts.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let ifcAt3 = assocParts.count > 3 ? normalizeWlInterface(assocParts[3]) : ""
+                let rowIfc = !ifcAt3.isEmpty
+                    ? ifcAt3
+                    : (assocParts.map { normalizeWlInterface($0) }.first { !$0.isEmpty } ?? "")
+                if !rowIfc.isEmpty && assocMac.caseInsensitiveCompare(clientMac) == .orderedSame {
+                    let band = ifcBandMap[rowIfc] ?? ((rowIfc == "wl1") ? .band5GHz : .band24GHz)
+                    if band == expectedBand {
+                        preferredIfc = rowIfc
+                        break
+                    }
+                    if fallbackIfc.isEmpty {
+                        fallbackIfc = rowIfc
+                    }
+                }
+            }
+            if !preferredIfc.isEmpty {
+                matchedAssocIfc = preferredIfc
+            } else if isSameSsidBothBands && !fallbackIfc.isEmpty {
+                matchedAssocIfc = fallbackIfc
+            }
+        }
+        // Pass 3: single entry fallback
+        if matchedAssocIfc.isEmpty && assocArr.count == 1 {
+            let assocParts = pipeRowString(assocArr[0]).components(separatedBy: "|")
+            let ifcAt3 = assocParts.count > 3 ? normalizeWlInterface(assocParts[3]) : ""
+            let singleIfc = !ifcAt3.isEmpty
+                ? ifcAt3
+                : (assocParts.map { normalizeWlInterface($0) }.first { !$0.isEmpty } ?? "")
+            if !singleIfc.isEmpty {
+                let band = ifcBandMap[singleIfc] ?? ((singleIfc == "wl1") ? .band5GHz : .band24GHz)
+                if band == expectedBand || isSameSsidBothBands {
+                    matchedAssocIfc = singleIfc
+                }
+            }
+        }
         guard !matchedAssocIfc.isEmpty else {
-            throw StillOnPrimaryBandError(
-                message: "Chưa thấy iPhone trong bảng wlAssociatedDevice của băng tần \(expectedBand.label)."
+            throw OntNetworkError(
+                "Chưa thấy iPhone trong bảng kết nối trực tiếp wlAssociatedDevice của băng tần \(expectedBand.label)."
             )
         }
 
         let liveBand = ifcBandMap[matchedAssocIfc] ?? ((matchedAssocIfc == "wl1") ? .band5GHz : .band24GHz)
         if liveBand != expectedBand {
-            throw StillOnPrimaryBandError(
-                message: "Thiết bị vẫn đang kết nối trên băng tần \(liveBand.label) (\(matchedAssocIfc)) thay vì băng tần phụ \(expectedBand.label)."
-            )
+            if isSameSsidBothBands {
+                throw StillOnPrimaryBandError(
+                    message: "Thiết bị vẫn đang kết nối trên băng tần \(liveBand.label) (\(matchedAssocIfc)) thay vì băng tần phụ \(expectedBand.label)."
+                )
+            } else {
+                throw OntNetworkError(
+                    "Bảng kết nối trực tiếp wlAssociatedDevice chưa cập nhật sang băng tần \(expectedBand.label) (\(matchedAssocIfc))."
+                )
+            }
         }
     }
 
@@ -1498,6 +1706,8 @@ public final class OntMobileDriver: @unchecked Sendable {
         let recordKey = Self.recordCacheKey(rowIndex: record.rowIndex, soMay: record.slid)
 
         @Sendable func emit(_ step: Int, _ title: String, _ status: StepStatus, _ detail: String) {
+            let level: LogLevel = (status == .failed) ? .error : .info
+            logDiag(level, "STEP\(step)", "[\(status.rawValue)] \(title) — \(detail)")
             onProgress?(StepProgress(stepNumber: step, totalSteps: totalSteps, title: title, status: status, detail: detail))
         }
 
@@ -1623,12 +1833,21 @@ public final class OntMobileDriver: @unchecked Sendable {
                 "Đang chờ ONT khởi động lại sóng '\(secondarySsid)' (\(secondaryBandLabel)) và kết nối sang sóng mới..."
             )
 
-            let handoverBudgetSec = Double(max(settings.wifiHandoverTimeoutMs, 50)) / 1000.0
+            let handoverBudgetSec = Double(max(settings.wifiHandoverTimeoutMs, 100)) / 1000.0
             let handoverDeadline = Date().addingTimeInterval(handoverBudgetSec)
             var handoverVerified = false
+            var outerAttempt = 0
+            var missingDeviceInfoOuterCount = 0
+
+            logDiag(
+                .info,
+                "STEP7",
+                "Bắt đầu Bước 7: target='\(secondarySsid)' (\(secondaryBandLabel)), budget=\(settings.wifiHandoverTimeoutMs)ms."
+            )
 
             while !handoverVerified {
                 try Task.checkCancellation()
+                outerAttempt += 1
                 let remainingHandoverMs = max(50, Int(handoverDeadline.timeIntervalSinceNow * 1000.0))
                 let candidateEn0Ip: String?
                 do {
@@ -1645,7 +1864,25 @@ public final class OntMobileDriver: @unchecked Sendable {
                 } catch let ce as CancellationError {
                     throw ce
                 } catch let de as OntDriverException {
-                    throw de
+                    if !(de is OntNetworkError) {
+                        throw de
+                    }
+                    logDiag(.warn, "STEP7", "Lượt chuyển sóng #\(outerAttempt) chưa sẵn sàng: \(de.localizedDescription)")
+                    let remAfterSwitchMs = Int(handoverDeadline.timeIntervalSinceNow * 1000.0)
+                    let minInitial = max(10, handoverRetryInitialBackoffMs)
+                    if remAfterSwitchMs <= minInitial {
+                        throw de
+                    }
+                    let backoffMs = min(
+                        Self.computeReconnectBackoffMs(
+                            attempt: outerAttempt,
+                            initialBackoffMs: handoverRetryInitialBackoffMs,
+                            maxBackoffMs: handoverRetryMaxBackoffMs
+                        ),
+                        remAfterSwitchMs - 10
+                    )
+                    try await Task.sleep(nanoseconds: UInt64(max(10, backoffMs)) * 1_000_000)
+                    continue
                 } catch {
                     throw OntNetworkError(
                         "Không thể chuyển kết nối sang Wi-Fi mới '\(secondarySsid)' (\(secondaryBandLabel)): \(error.localizedDescription)",
@@ -1654,11 +1891,27 @@ public final class OntMobileDriver: @unchecked Sendable {
                 }
 
                 do {
-                    let probeBudgetMs = max(settings.gatewayPostHandoverTimeoutMs, 50)
+                    let remPostDhcpMs = max(0, Int(handoverDeadline.timeIntervalSinceNow * 1000.0))
+                    let settleAfterDhcpMs = min(max(0, postDhcpGatewaySettleMs), remPostDhcpMs / 3)
+                    if settleAfterDhcpMs > 0 {
+                        try await Task.sleep(nanoseconds: UInt64(settleAfterDhcpMs) * 1_000_000)
+                    }
+
+                    if isNetworkTransportAlive?() == false {
+                        throw OntNetworkError("Liên kết Wi-Fi en0 vừa rớt ngay sau khi cấp DHCP cho '\(secondarySsid)'.")
+                    }
+
+                    let probeBudgetMs = min(
+                        max(settings.gatewayPostHandoverTimeoutMs, 50),
+                        max(50, Int(handoverDeadline.timeIntervalSinceNow * 1000.0))
+                    )
                     let probeDeadline = Date().addingTimeInterval(Double(probeBudgetMs) / 1000.0)
                     var reachableOnConn2 = false
                     while Date() < probeDeadline {
                         try Task.checkCancellation()
+                        if isNetworkTransportAlive?() == false {
+                            throw OntNetworkError("Mất liên kết Wi-Fi en0 khi đang kiểm tra ONT Gateway.")
+                        }
                         if try await probeGatewayCheckingCertPin(failOnCertMismatch: true) {
                             reachableOnConn2 = true
                             break
@@ -1672,6 +1925,11 @@ public final class OntMobileDriver: @unchecked Sendable {
                             "Đã chuyển sang Wi-Fi '\(secondarySsid)' nhưng không truy cập được ONT Gateway tại \(cleanBaseUrl)."
                         )
                     }
+                    logDiag(
+                        .info,
+                        "STEP7",
+                        "ONT Gateway phản hồi hợp lệ ở lượt #\(outerAttempt) (certSha256=\(String((session.lastPeerCertSha256 ?? "none").prefix(12)))...)."
+                    )
 
                     let userExistBudgetMs = settings.gatewayPostHandoverTimeoutMs >= 45_000
                         ? 65_000
@@ -1685,11 +1943,13 @@ public final class OntMobileDriver: @unchecked Sendable {
                     try await verifySecondConnectionBandAndMac(
                         localIpv4: candidateEn0Ip,
                         expectedBand: secondaryBand,
-                        expectedOntBaseMac: resolvedOntBaseMac
+                        expectedOntBaseMac: resolvedOntBaseMac,
+                        isSameSsidBothBands: wifi24Ssid.caseInsensitiveCompare(wifi5Ssid) == .orderedSame
                     )
                     handoverVerified = true
                 } catch let stillPrimary as StillOnPrimaryBandError {
                     // Release session immediately so Band A never holds a "user exist" lock while KTV switches in iOS Settings
+                    logDiag(.warn, "STEP7", "Lượt #\(outerAttempt) phát hiện vẫn ở băng tần cũ: \(stillPrimary.message)")
                     await logout()
                     if Date() < handoverDeadline {
                         emit(
@@ -1698,33 +1958,64 @@ public final class OntMobileDriver: @unchecked Sendable {
                             .running,
                             "iPhone vẫn đang ở Wi-Fi cũ — hãy chọn '\(secondarySsid)' trong Cài đặt Wi-Fi iOS rồi quay lại ứng dụng..."
                         )
-                        let retrySleepMs = min(max(recoveryRetryDelayMs, 25), max(15, Int(handoverDeadline.timeIntervalSinceNow * 1000.0)))
+                        let remMs = max(15, Int(handoverDeadline.timeIntervalSinceNow * 1000.0))
+                        let retrySleepMs = min(min(max(recoveryRetryDelayMs, 25), 1500), remMs)
                         try await Task.sleep(nanoseconds: UInt64(retrySleepMs) * 1_000_000)
                         continue
                     } else {
                         throw OntDriverException(stillPrimary.message)
                     }
+                } catch let missingInfo as MissingDeviceInfoError {
+                    missingDeviceInfoOuterCount += 1
+                    logDiag(.warn, "STEP7", "Không đọc được deviceinfo2.json ở lượt #\(outerAttempt) (\(missingDeviceInfoOuterCount)/2): \(missingInfo.message)")
+                    await logout()
+                    if missingDeviceInfoOuterCount >= 2 || Date() >= handoverDeadline {
+                        throw OntDriverException(
+                            "Địa chỉ MAC của ONT ở Lần kết nối 2 (không xác định) không khớp hoặc không thể đối chiếu với ONT ban đầu (\(resolvedOntBaseMac ?? ""))."
+                        )
+                    }
+                    let remMs = max(15, Int(handoverDeadline.timeIntervalSinceNow * 1000.0))
+                    let backoffMs = min(
+                        Self.computeReconnectBackoffMs(
+                            attempt: outerAttempt,
+                            initialBackoffMs: handoverRetryInitialBackoffMs,
+                            maxBackoffMs: handoverRetryMaxBackoffMs
+                        ),
+                        remMs
+                    )
+                    try await Task.sleep(nanoseconds: UInt64(max(15, backoffMs)) * 1_000_000)
+                    continue
                 } catch let netErr as OntNetworkError {
                     if isTlsPinMismatch(netErr) {
                         throw OntDriverException("Chứng chỉ TLS của ONT ở Lần kết nối 2 không khớp với Lần 1.", underlyingError: netErr)
                     }
+                    logDiag(.warn, "STEP7", "Lượt #\(outerAttempt) gặp lỗi mạng tạm thời: \(netErr.localizedDescription)")
                     await logout()
-                    if Date() < handoverDeadline {
+                    let remMs = Int(handoverDeadline.timeIntervalSinceNow * 1000.0)
+                    let minInitial = max(15, handoverRetryInitialBackoffMs)
+                    if remMs > minInitial {
+                        let backoffMs = min(
+                            Self.computeReconnectBackoffMs(
+                                attempt: outerAttempt,
+                                initialBackoffMs: handoverRetryInitialBackoffMs,
+                                maxBackoffMs: handoverRetryMaxBackoffMs
+                            ),
+                            remMs - 10
+                        )
                         emit(
                             7,
                             step7Title,
                             .running,
-                            "Đang chuyển mạng sang '\(secondarySsid)' (\(secondaryBandLabel)), tự động thử kết nối lại..."
+                            "Kết nối '\(secondarySsid)' (\(secondaryBandLabel)) chưa ổn định, tự động thử lại sau \((backoffMs + 999) / 1000)s (lượt \(outerAttempt + 1))..."
                         )
-                        let retrySleepMs = min(max(recoveryRetryDelayMs, 25), max(15, Int(handoverDeadline.timeIntervalSinceNow * 1000.0)))
-                        try await Task.sleep(nanoseconds: UInt64(retrySleepMs) * 1_000_000)
+                        logDiag(.info, "STEP7", "Nghỉ giãn cách \(backoffMs)ms trước lượt Bước 7 #\(outerAttempt + 1).")
+                        try await Task.sleep(nanoseconds: UInt64(max(15, backoffMs)) * 1_000_000)
                         continue
                     } else {
                         throw netErr
                     }
                 }
             }
-
             emit(
                 7,
                 step7Title,

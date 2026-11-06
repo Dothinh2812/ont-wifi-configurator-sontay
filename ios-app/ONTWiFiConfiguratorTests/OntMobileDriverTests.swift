@@ -184,8 +184,8 @@ final class OntMobileDriverTests: XCTestCase {
             firmwareFilePath: firmwareURL?.path ?? "",
             firmwareFileName: firmwareURL?.lastPathComponent ?? "",
             firmwareFileSize: fwSize,
-            wifiHandoverTimeoutMs: 150,
-            gatewayPostHandoverTimeoutMs: 150,
+            wifiHandoverTimeoutMs: 400,
+            gatewayPostHandoverTimeoutMs: 200,
             postSecondWifiSettleTimeoutMs: 150,
             firmwareUploadTimeoutMs: 5_000
         )
@@ -227,6 +227,11 @@ final class OntMobileDriverTests: XCTestCase {
             wlRestartPollIntervalMs: 10,
             maxWlRestartPolls: 3,
             userExistPollIntervalMs: 20,
+            postDhcpGatewaySettleMs: 5,
+            handoverRetryInitialBackoffMs: 15,
+            handoverRetryMaxBackoffMs: 40,
+            bandVerifyPollTimeoutMs: 60,
+            bandVerifyPollIntervalMs: 15,
             probePauseMutex: probeMutex,
             protocolClasses: [MockLuciURLProtocol.self],
             isAppInBackground: isAppInBackground,
@@ -679,6 +684,11 @@ final class OntMobileDriverTests: XCTestCase {
             wlRestartPollIntervalMs: 10,
             maxWlRestartPolls: 3,
             userExistPollIntervalMs: 20,
+            postDhcpGatewaySettleMs: 5,
+            handoverRetryInitialBackoffMs: 15,
+            handoverRetryMaxBackoffMs: 40,
+            bandVerifyPollTimeoutMs: 60,
+            bandVerifyPollIntervalMs: 15,
             protocolClasses: [MockLuciURLProtocol.self],
             onSwitchToSecondaryWifi: { _, _, targetBand, _, _, _, _ in
                 XCTAssertEqual(targetBand, .band24GHz)
@@ -803,6 +813,11 @@ final class OntMobileDriverTests: XCTestCase {
             wlRestartPollIntervalMs: 10,
             maxWlRestartPolls: 3,
             userExistPollIntervalMs: 20,
+            postDhcpGatewaySettleMs: 5,
+            handoverRetryInitialBackoffMs: 15,
+            handoverRetryMaxBackoffMs: 40,
+            bandVerifyPollTimeoutMs: 60,
+            bandVerifyPollIntervalMs: 15,
             protocolClasses: [MockLuciURLProtocol.self],
             onSwitchToSecondaryWifi: { ssid, _, targetBand, _, expectedMac, _, _ in
                 XCTAssertEqual(ssid, "Manh Ngoc 5G")
@@ -903,6 +918,11 @@ final class OntMobileDriverTests: XCTestCase {
             wlRestartPollIntervalMs: 10,
             maxWlRestartPolls: 2,
             userExistPollIntervalMs: 20,
+            postDhcpGatewaySettleMs: 5,
+            handoverRetryInitialBackoffMs: 15,
+            handoverRetryMaxBackoffMs: 40,
+            bandVerifyPollTimeoutMs: 60,
+            bandVerifyPollIntervalMs: 15,
             protocolClasses: [MockLuciURLProtocol.self],
             onSwitchToSecondaryWifi: { _, _, _, _, _, _, _ in "192.168.1.2" }
         )
@@ -962,6 +982,11 @@ final class OntMobileDriverTests: XCTestCase {
             wlRestartPollIntervalMs: 10,
             maxWlRestartPolls: 2,
             userExistPollIntervalMs: 20,
+            postDhcpGatewaySettleMs: 5,
+            handoverRetryInitialBackoffMs: 15,
+            handoverRetryMaxBackoffMs: 40,
+            bandVerifyPollTimeoutMs: 60,
+            bandVerifyPollIntervalMs: 15,
             protocolClasses: [MockLuciURLProtocol.self],
             onSwitchToSecondaryWifi: { _, _, _, _, _, _, _ in
                 onSecond.withValue { $0 = true }
@@ -1164,6 +1189,11 @@ final class OntMobileDriverTests: XCTestCase {
             wlRestartPollIntervalMs: 10,
             maxWlRestartPolls: 2,
             userExistPollIntervalMs: 20,
+            postDhcpGatewaySettleMs: 5,
+            handoverRetryInitialBackoffMs: 15,
+            handoverRetryMaxBackoffMs: 40,
+            bandVerifyPollTimeoutMs: 60,
+            bandVerifyPollIntervalMs: 15,
             protocolClasses: [MockLuciURLProtocol.self],
             onSwitchToSecondaryWifi: { _, _, targetBand, _, _, _, _ in
                 let attempt = handoverAttempt.withValue { val -> Int in
@@ -1187,5 +1217,259 @@ final class OntMobileDriverTests: XCTestCase {
 
         XCTAssertTrue(result.success)
         XCTAssertGreaterThanOrEqual(handoverAttempt.value, 2)
+    }
+
+    // 12. Step 7 Transport Liveness Fast-Exit, wlAssociatedDevice Convergence Polling & TLS Pin Rethrow in postOptionalSessionJson
+    func testStep7ConvergencePollingAndTlsPinRethrowInPostOptionalSessionJson() async throws {
+        let transportAlive = TestLockedBox<Bool>(true)
+        let switchCalls = TestLockedBox<Int>(0)
+        let dhcpPollsOnConn2 = TestLockedBox<Int>(0)
+        let onSecondConn = TestLockedBox<Bool>(false)
+        let loggedLines = TestLockedBox<[String]>([])
+
+        MockLuciURLProtocol.requestHandler = { req, _ in
+            let url = req.url ?? URL(string: "https://192.168.1.1/")!
+            let path = url.path.isEmpty ? "/" : url.path
+            switch path {
+            case "/":
+                return self.makeHTTPResponse(url: url, body: "<html>VNPT iGate GW040-NSv2</html>")
+            case "/cgi-bin/luci/login.cmd":
+                if !onSecondConn.value {
+                    return self.makeHTTPResponse(url: url, body: """
+                    {"status":"OK","firstlog":"0","sessionKey":"sess_c1"}
+                    """)
+                }
+                if switchCalls.value == 1 {
+                    transportAlive.withValue { $0 = false }
+                    return self.makeHTTPResponse(url: url, body: """
+                    {"status":"user exist"}
+                    """)
+                }
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK","firstlog":"0","sessionKey":"sess_c2"}
+                """)
+            case "/cgi-bin/luci/deviceinfo2.json":
+                return self.makeHTTPResponse(url: url, body: """
+                {"baseMacAddress":"C4:2C:7B:60:BC:D8"}
+                """)
+            case "/cgi-bin/luci/dhcpclient.json":
+                if !onSecondConn.value {
+                    return self.makeHTTPResponse(url: url, body: self.makeAssocDhcpJson(band: .band24GHz, ip: "192.168.1.2"))
+                }
+                let pollIdx = dhcpPollsOnConn2.withValue { count -> Int in
+                    count += 1
+                    return count
+                }
+                if pollIdx == 1 {
+                    return self.makeHTTPResponse(url: url, body: """
+                    {"dhcpInfoList":[],"wlAssociatedDevice":[]}
+                    """)
+                }
+                return self.makeHTTPResponse(url: url, body: self.makeAssocDhcpJson(band: .band5GHz, ip: "192.168.1.3"))
+            case "/cgi-bin/luci/wancfg.json":
+                return self.makeHTTPResponse(url: url, body: """
+                {"wanCfg":[]}
+                """)
+            default:
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK","_wlrestart_":"0"}
+                """)
+            }
+        }
+
+        let driver = OntMobileDriver(
+            baseUrl: baseUrl,
+            timeoutMs: 1500,
+            settlingDelayMs: 5,
+            recoveryRetryDelayMs: 15,
+            wlRestartPollIntervalMs: 10,
+            maxWlRestartPolls: 2,
+            userExistPollIntervalMs: 20,
+            postDhcpGatewaySettleMs: 5,
+            handoverRetryInitialBackoffMs: 15,
+            handoverRetryMaxBackoffMs: 40,
+            bandVerifyPollTimeoutMs: 60,
+            bandVerifyPollIntervalMs: 15,
+            protocolClasses: [MockLuciURLProtocol.self],
+            isNetworkTransportAlive: { transportAlive.value },
+            onLog: { level, tag, msg in
+                loggedLines.withValue { $0.append("[\(level.rawValue)][\(tag)] \(msg)") }
+            },
+            onSwitchToSecondaryWifi: { _, _, _, _, _, _, _ in
+                onSecondConn.withValue { $0 = true }
+                transportAlive.withValue { $0 = true }
+                switchCalls.withValue { $0 += 1 }
+                return "192.168.1.3"
+            }
+        )
+
+        var rec = sampleRecord
+        rec.lastKnownAdminPass = "Passwd2@"
+        let res = try await driver.executeMobileSetup(
+            record: rec,
+            settings: makeTestSettings(),
+            connectedBand: .band24GHz,
+            localWifiIpv4: "192.168.1.2"
+        )
+        XCTAssertTrue(res.success)
+        XCTAssertEqual(switchCalls.value, 2)
+        XCTAssertGreaterThanOrEqual(dhcpPollsOnConn2.value, 2)
+        XCTAssertFalse(loggedLines.value.isEmpty)
+
+        // Case B: TLS pin mismatch inside postOptionalSessionJson (deviceinfo2.json) aborts immediately on attempt 1
+        let tlsSwitchCalls = TestLockedBox<Int>(0)
+        let onSecondTls = TestLockedBox<Bool>(false)
+        MockLuciURLProtocol.requestHandler = { req, _ in
+            let url = req.url ?? URL(string: "https://192.168.1.1/")!
+            let path = url.path.isEmpty ? "/" : url.path
+            switch path {
+            case "/":
+                return self.makeHTTPResponse(url: url, body: "<html>VNPT iGate GW040-NSv2</html>")
+            case "/cgi-bin/luci/login.cmd":
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK","firstlog":"0","sessionKey":"sess_tls"}
+                """)
+            case "/cgi-bin/luci/deviceinfo2.json":
+                if onSecondTls.value {
+                    throw NSError(
+                        domain: UnsafeSslSession.tlsPinErrorDomain,
+                        code: -999,
+                        userInfo: [NSLocalizedDescriptionKey: "Pinned TLS SHA-256 mismatch"]
+                    )
+                }
+                return self.makeHTTPResponse(url: url, body: """
+                {"baseMacAddress":"C4:2C:7B:60:BC:D8"}
+                """)
+            case "/cgi-bin/luci/dhcpclient.json":
+                return self.makeHTTPResponse(url: url, body: self.makeAssocDhcpJson(band: .band5GHz))
+            case "/cgi-bin/luci/wancfg.json":
+                return self.makeHTTPResponse(url: url, body: """
+                {"wanCfg":[]}
+                """)
+            default:
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK","_wlrestart_":"0"}
+                """)
+            }
+        }
+
+        let tlsDriver = OntMobileDriver(
+            baseUrl: baseUrl,
+            timeoutMs: 1500,
+            settlingDelayMs: 5,
+            recoveryRetryDelayMs: 15,
+            wlRestartPollIntervalMs: 10,
+            maxWlRestartPolls: 2,
+            userExistPollIntervalMs: 20,
+            postDhcpGatewaySettleMs: 5,
+            handoverRetryInitialBackoffMs: 15,
+            handoverRetryMaxBackoffMs: 40,
+            bandVerifyPollTimeoutMs: 60,
+            bandVerifyPollIntervalMs: 15,
+            protocolClasses: [MockLuciURLProtocol.self],
+            onSwitchToSecondaryWifi: { _, _, _, _, _, _, _ in
+                onSecondTls.withValue { $0 = true }
+                tlsSwitchCalls.withValue { $0 += 1 }
+                return "192.168.1.3"
+            }
+        )
+
+        do {
+            _ = try await tlsDriver.executeMobileSetup(
+                record: rec,
+                settings: makeTestSettings(),
+                connectedBand: .band24GHz,
+                localWifiIpv4: "192.168.1.2"
+            )
+            XCTFail("Expected immediate TLS pin mismatch abort inside postOptionalSessionJson")
+        } catch let err as OntDriverException {
+            XCTAssertFalse(err is OntNetworkError)
+            XCTAssertTrue(err.localizedDescription.contains("TLS"))
+        }
+        XCTAssertEqual(tlsSwitchCalls.value, 1)
+    }
+
+    // 13. Step 7 Distinct SSIDs Succeeds Even When dhcpInfoList Reports wl0 and wlAssociatedDevice is Delayed or Has Stale wl0
+    func testStep7DistinctSsidsSucceedsEvenWhenDhcpInfoListReportsWl0AndWlAssociatedDeviceIsDelayed() async throws {
+        let onSecondConn = TestLockedBox<Bool>(false)
+        let conn2DhcpPolls = TestLockedBox<Int>(0)
+
+        MockLuciURLProtocol.requestHandler = { req, _ in
+            let url = req.url ?? URL(string: "https://192.168.1.1/")!
+            let path = url.path.isEmpty ? "/" : url.path
+            switch path {
+            case "/":
+                return self.makeHTTPResponse(url: url, body: "<html>VNPT iGate GW040-NSv2</html>")
+            case "/cgi-bin/luci/login.cmd":
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK","firstlog":"0","sessionKey":"sess_distinct"}
+                """)
+            case "/cgi-bin/luci/deviceinfo2.json":
+                return self.makeHTTPResponse(url: url, body: """
+                {"baseMacAddress":"C4:2C:7B:60:BC:D8","wirelessInfoList":["wl0|VNPT|1|6|20MHz|C4:2C:7B:60:BC:D9","wl1|VNPT 5G|1|36|80MHz|C4:2C:7B:60:BC:DA"]}
+                """)
+            case "/cgi-bin/luci/dhcpclient.json":
+                if !onSecondConn.value {
+                    return self.makeHTTPResponse(url: url, body: self.makeAssocDhcpJson(band: .band24GHz, ip: "192.168.1.2"))
+                } else {
+                    let count = conn2DhcpPolls.withValue { count -> Int in
+                        count += 1
+                        return count
+                    }
+                    if count == 1 {
+                        return self.makeHTTPResponse(url: url, body: """
+                        {"dhcpInfoList":["192.168.1.176|DHCP||aa:bb:cc:dd:ee:ff|iPhone|WiFi|1|wl0"],"wlAssociatedDevice":["aa:bb:cc:dd:ee:ff|192.168.1.2|1|wl0|-40"]}
+                        """)
+                    } else {
+                        return self.makeHTTPResponse(url: url, body: """
+                        {"dhcpInfoList":["192.168.1.176|DHCP||aa:bb:cc:dd:ee:ff|iPhone|WiFi|1|wl0"],"wlAssociatedDevice":["aa:bb:cc:dd:ee:ff|192.168.1.176|1|wl1|-42"]}
+                        """)
+                    }
+                }
+            case "/cgi-bin/luci/wancfg.json":
+                return self.makeHTTPResponse(url: url, body: """
+                {"wanCfg":[]}
+                """)
+            default:
+                return self.makeHTTPResponse(url: url, body: """
+                {"status":"OK","_wlrestart_":"0"}
+                """)
+            }
+        }
+
+        let driver = OntMobileDriver(
+            baseUrl: baseUrl,
+            timeoutMs: 1500,
+            settlingDelayMs: 5,
+            recoveryRetryDelayMs: 15,
+            wlRestartPollIntervalMs: 10,
+            maxWlRestartPolls: 2,
+            userExistPollIntervalMs: 20,
+            postDhcpGatewaySettleMs: 5,
+            handoverRetryInitialBackoffMs: 15,
+            handoverRetryMaxBackoffMs: 40,
+            bandVerifyPollTimeoutMs: 60,
+            bandVerifyPollIntervalMs: 15,
+            protocolClasses: [MockLuciURLProtocol.self],
+            onSwitchToSecondaryWifi: { _, _, _, _, _, _, _ in
+                onSecondConn.withValue { $0 = true }
+                return "192.168.1.176"
+            }
+        )
+
+        var rec = sampleRecord
+        rec.ssid24g = "VNPT"
+        rec.ssid5g = "VNPT 5G"
+        rec.lastKnownAdminPass = "Passwd2@"
+
+        let res = try await driver.executeMobileSetup(
+            record: rec,
+            settings: makeTestSettings(),
+            connectedBand: .band24GHz,
+            localWifiIpv4: "192.168.1.2"
+        )
+
+        XCTAssertTrue(res.success)
+        XCTAssertGreaterThanOrEqual(conn2DhcpPolls.value, 2)
     }
 }

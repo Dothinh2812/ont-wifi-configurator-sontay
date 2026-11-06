@@ -1,7 +1,10 @@
 package vn.vnpt.ontconfig.ui.components
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -13,10 +16,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.HourglassEmpty
+import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Sync
@@ -46,9 +55,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -56,6 +67,8 @@ import androidx.compose.ui.unit.sp
 import vn.vnpt.ontconfig.core.driver.MobileSetupResult
 import vn.vnpt.ontconfig.core.driver.StepProgress
 import vn.vnpt.ontconfig.core.driver.StepStatus
+import vn.vnpt.ontconfig.core.logging.DiagnosticLogEntry
+import vn.vnpt.ontconfig.core.logging.LogLevel
 import vn.vnpt.ontconfig.data.model.WifiSecurityMode
 import vn.vnpt.ontconfig.core.wifi.WifiBand
 
@@ -70,9 +83,19 @@ fun ExecutionProgressSheet(
     onExportAndShareReport: () -> Unit,
     onOpenWifiScanner: () -> Unit = {},
     onRetryRun: () -> Unit = {},
+    logEntriesFlow: StateFlow<List<DiagnosticLogEntry>>? = null,
+    onOpenFullLogDialog: () -> Unit = {},
+    onCopyDiagnosticLog: () -> Unit = {},
+    onShareDiagnosticLog: () -> Unit = {},
     onDismiss: () -> Unit
 ) {
     var showAdminPass by remember { mutableStateOf(false) }
+    var logPanelExpanded by remember { mutableStateOf(!errorMessage.isNullOrBlank()) }
+    LaunchedEffect(errorMessage) {
+        if (!errorMessage.isNullOrBlank()) {
+            logPanelExpanded = true
+        }
+    }
     var rebootCountdownSec by remember(setupResult) {
         mutableIntStateOf(if (setupResult?.firmwareUpdated == true) 150 else 0)
     }
@@ -147,7 +170,7 @@ fun ExecutionProgressSheet(
                             color = Color(0xFF0D47A1)
                         )
                         Text(
-                            text = "Đang đợi ONT khởi động lại sóng và cập nhật tên Wi-Fi mới sau Lần 1 (tối đa 120s, kể cả kênh 5GHz DFS). Khi hộp thoại ghép nối hệ thống của Android hiện lên, hãy bấm 'Kết nối / Connect'!",
+                            text = "Đang đợi ONT khởi động lại sóng, ổn định dịch vụ WPA/DHCP sau khi phát tên Wi-Fi mới và tự động kết nối lại có giãn cách (5s → 10s → 15s → 20s, tối đa 180s). Khi hộp thoại ghép nối của Android hiện lên, hãy bấm 'Kết nối / Connect'!",
                             style = MaterialTheme.typography.bodySmall,
                             color = Color(0xFF1565C0)
                         )
@@ -300,6 +323,132 @@ fun ExecutionProgressSheet(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
+                    }
+                }
+            }
+
+            if (logEntriesFlow != null) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { logPanelExpanded = !logPanelExpanded },
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "📋 Nhật ký tiến trình & Debug",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Icon(
+                                imageVector = if (logPanelExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                contentDescription = if (logPanelExpanded) "Thu gọn nhật ký" else "Mở nhật ký"
+                            )
+                        }
+
+                        if (logPanelExpanded) {
+                            // [Red Team RT-08] Collect entriesFlow ONLY while expanded (last 200 lines)
+                            val coalescedEntries by collectCoalescedLogEntries(
+                                logEntriesFlow = logEntriesFlow,
+                                flushImmediately = !isRunning
+                            )
+                            val recentEntries = remember(coalescedEntries) {
+                                coalescedEntries.takeLast(200)
+                            }
+                            val miniLogListState = rememberLazyListState()
+                            LaunchedEffect(recentEntries.lastOrNull()?.seq, isRunning) {
+                                if (recentEntries.isNotEmpty()) {
+                                    miniLogListState.scrollToItem(recentEntries.lastIndex)
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(145.dp)
+                                    .background(Color(0xFF0F172A), RoundedCornerShape(6.dp))
+                                    .padding(6.dp)
+                            ) {
+                                if (recentEntries.isEmpty()) {
+                                    Text(
+                                        text = "Chưa có dòng nhật ký nào trong phiên hiện tại.",
+                                        color = Color(0xFF94A3B8),
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.sp,
+                                        modifier = Modifier.align(Alignment.Center)
+                                    )
+                                } else {
+                                    LazyColumn(
+                                        state = miniLogListState,
+                                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        items(recentEntries, key = { it.seq }) { entry ->
+                                            val color = when (entry.level) {
+                                                LogLevel.ERROR -> Color(0xFFFF8A80)
+                                                LogLevel.WARN -> Color(0xFFFFD54F)
+                                                LogLevel.INFO -> Color(0xFFE2E8F0)
+                                            }
+                                            Text(
+                                                text = entry.formatLine(),
+                                                color = color,
+                                                fontFamily = FontFamily.Monospace,
+                                                fontSize = 10.sp,
+                                                lineHeight = 13.sp
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = onOpenFullLogDialog,
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(Icons.Default.OpenInFull, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text("Mở rộng", fontSize = 11.sp, maxLines = 1)
+                                }
+                                OutlinedButton(
+                                    onClick = onCopyDiagnosticLog,
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text("Chép Log", fontSize = 11.sp, maxLines = 1)
+                                }
+                                OutlinedButton(
+                                    onClick = onShareDiagnosticLog,
+                                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 6.dp),
+                                    modifier = Modifier.weight(1.25f)
+                                ) {
+                                    Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(modifier = Modifier.width(3.dp))
+                                    Text("Chia sẻ Log (.txt)", fontSize = 11.sp, maxLines = 1)
+                                }
+                            }
+                        }
                     }
                 }
             }
