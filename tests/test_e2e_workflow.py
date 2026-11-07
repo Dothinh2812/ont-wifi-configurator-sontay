@@ -61,7 +61,7 @@ class TestE2EWorkflow(unittest.TestCase):
         )
 
     def test_e2e_successful_device_setup(self):
-        # Test with Row 2 (index 1): 005501941, manh9653, 6l6s8z2a
+        # Test with Row 2 (index 1): 005501941, mock_pppoe_02, 6l6s8z2a
         row2 = self.records[1]
         self.assertTrue(row2.is_valid)
 
@@ -93,7 +93,7 @@ class TestE2EWorkflow(unittest.TestCase):
         # Invariant 4: VLAN 11 was added with correct credentials
         vlan11 = next((w for w in self.server.wan_entries if str(w.get("vlanId")) == "11"), None)
         self.assertIsNotNone(vlan11)
-        self.assertEqual(vlan11.get("pppUserName"), "manh9653")
+        self.assertEqual(vlan11.get("pppUserName"), "mock_pppoe_02")
 
         # Invariant 5: GPON SLID was set to 005501941
         self.assertEqual(self.server.gpon_password, "005501941")

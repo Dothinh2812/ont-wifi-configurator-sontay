@@ -44,11 +44,11 @@ class TestExcelManager(unittest.TestCase):
 
     def test_valid_row_passes_validation(self):
         records = self.manager.load_file(self.sample_excel_path)
-        # Row 2 (index 1): SO_MAY=005501941, Account=manh9653, Pass=6l6s8z2a
+        # Row 2 (index 1): SO_MAY=005501941, Account=mock_pppoe_02, Pass=6l6s8z2a
         row2 = records[1]
         self.assertTrue(row2.is_valid)
         self.assertEqual(row2.status, DeviceStatus.PENDING)
-        self.assertEqual(row2.account_pppoe, "manh9653")
+        self.assertEqual(row2.account_pppoe, "mock_pppoe_02")
         self.assertEqual(row2.pass_pppoe, "6l6s8z2a")
 
     def test_slid_priority_ma_men_over_so_may(self):

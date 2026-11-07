@@ -46,3 +46,6 @@ android-app/build/
 android-app/app/build/
 ios-app/build/
 android-app/local.properties
+
+# Plans & Project Management
+plans/
