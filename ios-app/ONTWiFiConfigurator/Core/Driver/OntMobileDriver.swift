@@ -1920,10 +1920,13 @@ public final class OntMobileDriver: @unchecked Sendable {
                         let sleepProbeMs = min(max(recoveryRetryDelayMs, 15), remProbeMs)
                         try await Task.sleep(nanoseconds: UInt64(sleepProbeMs) * 1_000_000)
                     }
-                    if !reachableOnConn2 && !(try await probeGatewayCheckingCertPin(failOnCertMismatch: true)) {
-                        throw OntNetworkError(
-                            "Đã chuyển sang Wi-Fi '\(secondarySsid)' nhưng không truy cập được ONT Gateway tại \(cleanBaseUrl)."
-                        )
+                    if !reachableOnConn2 {
+                        let isGatewayReachable = try await probeGatewayCheckingCertPin(failOnCertMismatch: true)
+                        if !isGatewayReachable {
+                            throw OntNetworkError(
+                                "Đã chuyển sang Wi-Fi '\(secondarySsid)' nhưng không truy cập được ONT Gateway tại \(cleanBaseUrl)."
+                            )
+                        }
                     }
                     logDiag(
                         .info,
