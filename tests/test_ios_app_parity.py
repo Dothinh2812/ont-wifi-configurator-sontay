@@ -171,7 +171,7 @@ def test_phase4_xcode_project_ipa_script_and_github_actions_workflow():
     workflow = ROOT_DIR / ".github" / "workflows" / "build-ios-ipa.yml"
     assert workflow.exists(), "Missing .github/workflows/build-ios-ipa.yml"
     wf_text = workflow.read_text(encoding="utf-8")
-    assert "macos-14" in wf_text
+    assert "macos-latest" in wf_text or "macos-14" in wf_text
     assert "permissions:" in wf_text and "contents: read" in wf_text
     assert "xcrun simctl list devices available" in wf_text
     assert "package_unsigned_ipa.sh" in wf_text

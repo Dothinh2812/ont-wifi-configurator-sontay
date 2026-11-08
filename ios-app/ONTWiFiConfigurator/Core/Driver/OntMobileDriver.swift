@@ -1220,7 +1220,7 @@ public final class OntMobileDriver: @unchecked Sendable {
                     }
                     throw ne
                 }
-
+            }
             let remainingMs = Int(deadline.timeIntervalSinceNow * 1000.0)
             if remainingMs <= 0 { break }
             try await Task.sleep(nanoseconds: UInt64(min(pollIntervalMs, remainingMs)) * 1_000_000)

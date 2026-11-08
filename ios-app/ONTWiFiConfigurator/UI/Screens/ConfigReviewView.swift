@@ -652,3 +652,4 @@ public struct ConfigReviewView: View {
         .background(Color(UIColor.systemBackground))
         .ignoresSafeArea(.keyboard, edges: .bottom)
     }
+}
