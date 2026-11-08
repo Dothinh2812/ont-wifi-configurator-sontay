@@ -1369,15 +1369,9 @@ public final class OntMobileDriver: @unchecked Sendable {
 
         let liveBand = ifcBandMap[matchedAssocIfc] ?? ((matchedAssocIfc == "wl1") ? .band5GHz : .band24GHz)
         if liveBand != expectedBand {
-            if isSameSsidBothBands {
-                throw StillOnPrimaryBandError(
-                    message: "Thiết bị vẫn đang kết nối trên băng tần \(liveBand.label) (\(matchedAssocIfc)) thay vì băng tần phụ \(expectedBand.label)."
-                )
-            } else {
-                throw OntNetworkError(
-                    "Bảng kết nối trực tiếp wlAssociatedDevice chưa cập nhật sang băng tần \(expectedBand.label) (\(matchedAssocIfc))."
-                )
-            }
+            throw StillOnPrimaryBandError(
+                message: "Thiết bị vẫn đang kết nối trên băng tần \(liveBand.label) (\(matchedAssocIfc)) thay vì băng tần phụ \(expectedBand.label)."
+            )
         }
     }
 
