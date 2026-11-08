@@ -833,9 +833,9 @@ public final class MainViewModel: ObservableObject {
                         let initialSettleMs = min(8_000, max(500, timeoutMs / 4))
                         try await Task.sleep(nanoseconds: UInt64(initialSettleMs) * 1_000_000)
                     }
-                    if let lastSsid = self.lastQuickConnectedFactorySsid {
-                        self.wifiMonitor.removeTemporaryOpenWifiIfNeeded(ssid: lastSsid)
-                        self.lastQuickConnectedFactorySsid = nil
+                    if let lastSsid = self?.lastQuickConnectedFactorySsid {
+                        self?.wifiMonitor.removeTemporaryOpenWifiIfNeeded(ssid: lastSsid)
+                        self?.lastQuickConnectedFactorySsid = nil
                     }
 
 
