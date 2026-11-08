@@ -117,7 +117,7 @@ public struct WifiGuideSheet: View {
                     let normResult = IosWifiMonitor.normalizeQuickOntSsid(ontSsidInput, band: selectedQuickBand)
                     switch normResult {
                     case .failure(let err):
-                        quickConnectError = err
+                        quickConnectError = err.message
                     case .success(let targetSsid):
                         let res = await viewModel.quickConnectOntWifi(ssid: targetSsid)
                         switch res {

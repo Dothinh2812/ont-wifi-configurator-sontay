@@ -178,8 +178,15 @@ public final class IosWifiMonitor: @unchecked Sendable {
         return nil
     }
 
+    public struct QuickOntSsidError: LocalizedError, Equatable, ExpressibleByStringLiteral, Sendable {
+        public let message: String
+        public init(_ message: String) { self.message = message }
+        public init(stringLiteral value: String) { self.message = value }
+        public var errorDescription: String? { message }
+    }
+
     /// [Red Team RT-10] Normalize and validate factory-default ONT SSID or 6-character MAC suffix from label.
-    public static func normalizeQuickOntSsid(_ rawInput: String, band: WifiBand = .band24GHz) -> Result<String, String> {
+    public static func normalizeQuickOntSsid(_ rawInput: String, band: WifiBand = .band24GHz) -> Result<String, QuickOntSsidError> {
         let trimmed = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return .failure("Vui lòng nhập 6 ký tự MAC hoặc tên sóng Wi-Fi xuất xưởng ONT.")
