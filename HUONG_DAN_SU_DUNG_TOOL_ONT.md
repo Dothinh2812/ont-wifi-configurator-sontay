@@ -204,6 +204,22 @@ Dành cho kỹ thuật viên sử dụng iPhone (iOS 16.0 trở lên):
    - **Bước 7 (Chuyển sang Wi-Fi phụ mới — Ngân sách chờ 240s & Retry giãn cách `5s -> 10s -> 15s -> 20s`):** Ứng dụng chờ lắng đầu `8s` để ONT ổn định sóng mới và chờ cấp DHCP `192.168.1.x` tới `15s`. Với bản cài qua **Sideloadly**, ứng dụng tự chép sẵn mật khẩu Wi-Fi mới vào bộ nhớ tạm bảo mật (`.localOnly`, tự xóa sau `120s`) và hiện nút **"Mở Cài Đặt Wi-Fi iOS"** (không đăng nhập nhầm trên sóng cũ gây khóa phiên): KTV bấm sang Cài đặt Wi-Fi chọn tên Wi-Fi phụ mới vừa đổi rồi quay lại ứng dụng — ứng dụng tự động nhận diện, retry giãn cách nếu mạng đang hội tụ, đăng nhập lại bằng mật khẩu Admin mới và chạy tiếp!
    - **Bước 8 & Bước 9/9 (Lần kết nối 2):** Tự động đổi nốt Wi-Fi còn lại (Bước 8), đồng bộ kết nối (`90s`) và tải lên Firmware mới ở **Bước 9/9** (nếu bật). Khi hoàn tất, bấm **"Xuất & Chia Sẻ Báo Cáo Excel (.xlsx)"** để gửi kết quả qua Zalo ngay trong lúc ONT tự ghi flash & khởi động lại (~2 phút 20 giây).
    - **Xem & Chia Sẻ Nhật Ký Debug Trên iPhone:** Bấm biểu tượng **Nhật ký Debug** ở góc phải thanh tiêu đề (hoặc ngay trong khung **`📋 Nhật ký tiến trình & Debug`** tự mở khi gặp lỗi) rồi chọn **"Chia sẻ (.txt) qua Zalo"** để gửi file `ONT_Debug_Log_<thời_gian>.txt` đã ẩn mật khẩu phục vụ chẩn đoán nhanh ngoài hiện trường.
+
+### C. Bộ Tính Năng Tiện Ích Đồng Bộ Parity Trên iPhone (Mới Nhất):
+1. **Kết Nối Nhanh Sóng Xuất Xưởng ONT Bằng 6 Ký Tự MAC (`WifiGuideSheet`):**
+   - Sóng xuất xưởng của ONT iGate GW040-NSv2 luôn là **mạng Open (không có mật khẩu)** có dạng `GW040-NSv2_2.4G_{6_KÝ_TỰ_MAC}`.
+   - Khi bấm nút **"Bắt Wi-Fi ONT"** trên màn hình Review hoặc Danh sách, KTV chỉ cần nhập 6 ký tự MAC từ tem dán thiết bị (VD: `A1B2C3` hoặc `A1:B2:C3`), chọn băng tần 2.4G hoặc 5G rồi bấm **"Kết nối sóng xuất xưởng (Mạng Open - Không pass)"**. iPhone sẽ tự động ghép nối vào sóng ONT mà không cần vào Cài đặt thủ công.
+2. **Thanh Trạng Thái Wi-Fi & Bắt Sóng Trực Tiếp (`topWifiStatusBanner`):**
+   - Ghim cố định ở đỉnh màn hình Review: hiển thị tên SSID đang bắt, IP card mạng `en0`, trạng thái Gateway `192.168.1.1` (Sẵn sàng / Chưa kết nối), bộ chọn băng tần `2.4GHz / 5GHz`, và nút **"Bắt Wi-Fi ONT"** để mở nhanh bộ kết nối sóng mà không cần quay lại danh sách thuê bao.
+3. **Thanh Nút Bấm Lưu / RUN Cố Định Công Thái Học (Sticky Bottom Action Bar):**
+   - 2 nút **"Lưu lại"** và **"RUN • ĐỔ CẤU HÌNH"** được ghim cố định ở đáy màn hình ngay trên thanh Footer, giúp KTV thao tác nhanh bằng 1 tay ở mọi vị trí cuộn trang. Khi gõ phím, thanh đáy tự động tương thích và có nút **"Xong"** trên bàn phím để ẩn phím nhanh.
+4. **1-Chạm Kết Nối Wi-Fi Mới Của Khách Hàng Sau Khi Hoàn Tất (`joinNewlyConfiguredWifi`):**
+   - Sau khi hoàn tất 8 bước hoặc 9 bước (kèm Firmware), màn hình tiến trình hiển thị nút nổi bật: **"Kết nối vào Wi-Fi mới ('{SSID}') để kiểm tra mạng"** (ưu tiên sóng 5GHz hoặc 2.4GHz). Bấm nút để iPhone tự động ghép nối vào sóng mới qua NetworkExtension (`joinOnce = false`), giúp KTV mở trình duyệt hoặc ứng dụng test tốc độ Internet thực tế trước khi bàn giao cho khách hàng.
+   - *Lưu ý:* Nếu có nạp Firmware, hệ thống sẽ tạm khóa nút kèm đồng hồ đếm ngược chờ ONT khởi động lại xong mới cho phép kết nối.
+5. **Cảnh Báo Tương Thích Bảo Mật & Nhận Diện Wi-Fi Mặc Định:**
+   - Ứng dụng tự động kiểm tra chế độ bảo mật: khóa nút RUN và cảnh báo nếu chọn WPA3-SAE hoặc WPA-PSK thuần không tương thích với iOS; hiển thị khung cam thông báo khi file Excel để trống tên Wi-Fi và đang điền mặc định `VNPT_{slid}`.
+6. **Ẩn / Hiện Mật Khẩu Admin Web ONT & Wi-Fi:**
+   - Thẻ nạp Firmware hiển thị thông tin tài khoản Web Admin mới (`admin / [adminNewPass]`) kèm nút con mắt bật/tắt hiển thị mật khẩu; các ô mật khẩu trên form đều hỗ trợ nút con mắt bảo vệ.
 ---
 
 ## 7. Thông Tin Đơn Vị Phát Triển & Hỗ Trợ Kỹ Thuật

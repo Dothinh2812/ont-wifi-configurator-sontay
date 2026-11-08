@@ -12,6 +12,8 @@ public struct ExecutionProgressSheet: View {
     @State private var rebootCountdownSec: Int = 150
     @State private var isLogPanelExpanded: Bool = false
     @State private var showFullLogSheet: Bool = false
+    @State private var showAdminPass: Bool = false
+    @State private var showNestedWifiGuideSheet: Bool = false
 
     public init(
         viewModel: MainViewModel,
@@ -71,6 +73,9 @@ public struct ExecutionProgressSheet: View {
             }
             .sheet(isPresented: $showFullLogSheet) {
                 DiagnosticLogSheet(viewModel: viewModel)
+            }
+            .sheet(isPresented: $showNestedWifiGuideSheet) {
+                WifiGuideSheet(viewModel: viewModel)
             }
             .task(id: viewModel.setupResult?.firmwareUpdated == true && viewModel.setupResult?.success == true) {
                 guard let res = viewModel.setupResult, res.success, res.firmwareUpdated else { return }
@@ -227,6 +232,19 @@ public struct ExecutionProgressSheet: View {
             }
             Text("• Cả 2 băng tần Wi-Fi (\(result.newSsid24g) / \(result.newSsid5g)) và Firmware (\(result.firmwareFileName)) đã hoàn tất 100%. Bạn có thể xuất báo cáo Excel ngay bên dưới.")
                 .font(.caption)
+            HStack(spacing: 6) {
+                let displayedAdminPass = showAdminPass ? result.updatedAdminPass : "••••••••"
+                Text("• Web Admin (192.168.1.1): admin / \(displayedAdminPass)")
+                    .font(.caption.monospaced())
+                Button {
+                    showAdminPass.toggle()
+                } label: {
+                    Image(systemName: showAdminPass ? "eye.slash" : "eye")
+                        .font(.caption)
+                        .foregroundColor(.primary)
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -236,6 +254,12 @@ public struct ExecutionProgressSheet: View {
     private func successSummaryCard(_ result: MobileSetupResult) -> some View {
         let secMode = WifiSecurityMode(rawValue: result.wifiSecurityMode) ?? .wpa2Wpa3Psk
         let isOpenWifi = secMode == .open
+
+        let prefer5gJoin = result.resolvedConnectedBand == .band5GHz && !result.newSsid5g.isEmpty
+        let joinSsid = prefer5gJoin ? result.newSsid5g : result.newSsid24g
+        let joinPass = prefer5gJoin ? result.newPass5g : result.newPass24g
+        let isRebootingFirmware = result.firmwareUpdated && rebootCountdownSec > 0
+
         return VStack(alignment: .leading, spacing: 8) {
             Text("Thông tin Wi-Fi mới của khách hàng:")
                 .font(.subheadline.weight(.bold))
@@ -243,20 +267,30 @@ public struct ExecutionProgressSheet: View {
                 .font(.subheadline)
             Text("• Wi-Fi 2.4GHz: \(result.newSsid24g)")
                 .font(.subheadline)
+            if !isOpenWifi && !result.newPass24g.isEmpty {
+                Text("  Mật khẩu 2.4G: \(result.newPass24g)")
+                    .font(.caption.monospaced())
+            }
             Text("• Wi-Fi 5GHz: \(result.newSsid5g)")
                 .font(.subheadline)
-            Text("• Mật khẩu Wi-Fi: \(isOpenWifi ? "Không mật khẩu (Open)" : result.newPass24g)")
-                .font(.subheadline.monospaced())
+            if !isOpenWifi && !result.newPass5g.isEmpty {
+                Text("  Mật khẩu 5G: \(result.newPass5g)")
+                    .font(.caption.monospaced())
+            }
+            if isOpenWifi {
+                Text("• Mật khẩu Wi-Fi: Không mật khẩu (Open)")
+                    .font(.subheadline.monospaced())
+            }
 
-            if !isOpenWifi && !result.newPass24g.isEmpty {
+            if !isOpenWifi && !joinPass.isEmpty {
                 Button {
-                    copyPasswordLocalExpiring(result.newPass24g)
+                    copyPasswordLocalExpiring(joinPass)
                     copiedWifiPassToast = true
                 } label: {
                     Label(
                         copiedWifiPassToast
-                            ? "Đã sao chép mật khẩu Wi-Fi (tự xóa sau 120s)"
-                            : "Sao chép mật khẩu Wi-Fi mới",
+                            ? "Đã sao chép mật khẩu Wi-Fi (\(prefer5gJoin ? "5G" : "2.4G"))"
+                            : "Sao chép mật khẩu Wi-Fi (\(prefer5gJoin ? "5G" : "2.4G"))",
                         systemImage: "doc.on.doc.fill"
                     )
                     .font(.subheadline.weight(.semibold))
@@ -264,6 +298,52 @@ public struct ExecutionProgressSheet: View {
                     .padding(.vertical, 8)
                 }
                 .buttonStyle(.borderedProminent)
+            }
+
+            Divider()
+
+            if isRebootingFirmware {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "clock.arrow.2.circlepath")
+                        .foregroundColor(.orange)
+                    Text("⏳ ONT đang tự ghi flash & khởi động lại (còn \(rebootCountdownSec)s) — Vui lòng đợi sóng Wi-Fi phát lại trước khi kết nối")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.orange)
+                }
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
+            }
+
+            let joinLabel = "Kết nối vào Wi-Fi mới ('\(joinSsid)') để kiểm tra mạng"
+            Button {
+                viewModel.joinNewlyConfiguredWifi(ssid: joinSsid, pass: joinPass)
+            } label: {
+                HStack(spacing: 8) {
+                    if viewModel.isJoiningCustomerWifi {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "wifi")
+                    }
+                    Text(joinLabel)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.bordered)
+            .disabled(viewModel.isJoiningCustomerWifi || isRebootingFirmware)
+
+            if let joinStatus = viewModel.customerWifiJoinStatus {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "info.circle.fill")
+                        .foregroundColor(.blue)
+                    Text(joinStatus)
+                        .font(.caption)
+                        .foregroundColor(.primary)
+                }
+                .padding(6)
             }
         }
         .padding()
@@ -380,17 +460,28 @@ public struct ExecutionProgressSheet: View {
     private var actionButtons: some View {
         VStack(spacing: 10) {
             if viewModel.executionError != nil {
-                Button {
-                    viewModel.runOntConfiguration()
-                } label: {
-                    Label("Thử chạy lại (Smart Retry)", systemImage: "arrow.clockwise")
-                        .font(.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
-                }
-                .buttonStyle(.borderedProminent)
-            }
+                HStack(spacing: 10) {
+                    Button {
+                        showNestedWifiGuideSheet = true
+                    } label: {
+                        Label("Bắt Wi-Fi ONT", systemImage: "wifi.badge.plus")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.bordered)
 
+                    Button {
+                        viewModel.runOntConfiguration()
+                    } label: {
+                        Label("Thử chạy lại (Smart Retry)", systemImage: "arrow.clockwise")
+                            .font(.subheadline.weight(.bold))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
             Button {
                 onShareExcelReport()
             } label: {

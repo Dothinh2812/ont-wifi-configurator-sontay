@@ -163,6 +163,60 @@ public final class IosWifiMonitor: @unchecked Sendable {
         return min(max(safeInitial * step, safeInitial), safeMax)
     }
 
+    /// [Red Team RT-03] Validate Wi-Fi security capability for iOS handover before Step 1 mutates the ONT.
+    /// Returns non-nil user-facing error message if the mode is unsupported or invalid.
+    public static func validateHandoverSecurityCapability(secMode: String) -> String? {
+        guard let mode = WifiSecurityMode(rawValue: secMode) else {
+            return "Chế độ bảo mật Wi-Fi '\(secMode)' không hợp lệ."
+        }
+        if mode == .wpa3Psk {
+            return "Hệ điều hành iOS và phần cứng máy không đảm bảo tự động ghép nối Wi-Fi WPA3-PSK thuần ở Bước 7. Vui lòng chọn 'WPA2-PSK / WPA3-PSK' hoặc 'WPA2-PSK'."
+        }
+        if mode == .wpaPsk {
+            return "iOS không hỗ trợ tự động ghép nối chuẩn bảo mật cũ WPA-PSK (TKIP) thuần ở Bước 7. Vui lòng chọn 'WPA-PSK / WPA2-PSK' hoặc 'WPA2-PSK'."
+        }
+        return nil
+    }
+
+    /// [Red Team RT-10] Normalize and validate factory-default ONT SSID or 6-character MAC suffix from label.
+    public static func normalizeQuickOntSsid(_ rawInput: String, band: WifiBand = .band24GHz) -> Result<String, String> {
+        let trimmed = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return .failure("Vui lòng nhập 6 ký tự MAC hoặc tên sóng Wi-Fi xuất xưởng ONT.")
+        }
+
+        let bandPrefix = (band == .band5GHz) ? "GW040-NSv2_5G_" : "GW040-NSv2_2.4G_"
+        if trimmed.uppercased().hasPrefix("GW040-NSV2_") {
+            let range = NSRange(location: 0, length: trimmed.utf16.count)
+            let regex = try? NSRegularExpression(pattern: "^GW040-NSv2_(?:2\\.4G|5G)_[0-9A-Fa-f]{6}$", options: .caseInsensitive)
+            if regex?.firstMatch(in: trimmed, options: [], range: range) != nil {
+                if trimmed.utf8.count <= 32 {
+                    return .success(trimmed)
+                }
+            }
+            return .failure("Tên sóng ONT không đúng định dạng 'GW040-NSv2_2.4G_XXXXXX' hoặc 'GW040-NSv2_5G_XXXXXX'.")
+        }
+
+        let cleanedMac = trimmed
+            .replacingOccurrences(of: ":", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: " ", with: "")
+            .uppercased()
+
+        let hexRegex = try? NSRegularExpression(pattern: "^[0-9A-F]{6}$")
+        let hexRange = NSRange(location: 0, length: cleanedMac.utf16.count)
+        guard hexRegex?.firstMatch(in: cleanedMac, options: [], range: hexRange) != nil else {
+            return .failure("6 ký tự MAC từ tem dán phải gồm 6 chữ số thập lục phân (0-9, A-F). Ví dụ: A1B2C3 hoặc A1:B2:C3.")
+        }
+
+        let fullSsid = bandPrefix + cleanedMac
+        guard fullSsid.utf8.count <= 32 else {
+            return .failure("Tên SSID vượt quá 32 ký tự.")
+        }
+
+        return .success(fullSsid)
+    }
+
     /// Detailed programmatic Wi-Fi association via `NEHotspotConfigurationManager` (`[Red Team RT-01]`):
     /// - Treats `error == nil` or `alreadyAssociated` (`code == 13`) as L2-associated and immediately
     ///   records `onOpenProfileApplied` BEFORE DHCP wait so temporary Open profiles never leak.
@@ -176,24 +230,29 @@ public final class IosWifiMonitor: @unchecked Sendable {
         securityMode: String,
         dhcpWaitMs: Int = 15_000,
         stabilityHoldMs: Int = 1_200,
+        joinOnce: Bool? = nil,
         onOpenProfileApplied: (@Sendable () -> Void)? = nil
     ) async -> HotspotJoinResult {
         let cleanSsid = ssid.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanSsid.isEmpty else {
             return .transientFailure("Tên Wi-Fi đích rỗng.")
         }
+        guard (1...32).contains(cleanSsid.utf8.count),
+              !cleanSsid.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) else {
+            return .transientFailure("Tên Wi-Fi đích không hợp lệ (yêu cầu 1..32 byte UTF-8 và không chứa ký tự điều khiển).")
+        }
         #if canImport(NetworkExtension)
         let isOpen = securityMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == WifiSecurityMode.open.rawValue
         let config: NEHotspotConfiguration
         if isOpen {
             config = NEHotspotConfiguration(ssid: cleanSsid)
-            config.joinOnce = true
+            config.joinOnce = joinOnce ?? true
         } else {
             guard passphrase.count >= 8 else {
                 return .transientFailure("Mật khẩu Wi-Fi WPA ngắn hơn 8 ký tự.")
             }
             config = NEHotspotConfiguration(ssid: cleanSsid, passphrase: passphrase, isWEP: false)
-            config.joinOnce = false
+            config.joinOnce = joinOnce ?? false
         }
 
         let preApplyIp = inspectInterfaces().en0IpAddress

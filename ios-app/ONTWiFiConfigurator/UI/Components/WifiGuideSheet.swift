@@ -3,6 +3,11 @@ import SwiftUI
 public struct WifiGuideSheet: View {
     @ObservedObject var viewModel: MainViewModel
     @Environment(\.dismiss) private var dismiss
+    @State private var ontSsidInput: String = ""
+    @State private var selectedQuickBand: WifiBand = .band24GHz
+    @State private var isConnectingQuickOnt: Bool = false
+    @State private var quickConnectError: String? = nil
+
 
     public init(viewModel: MainViewModel) {
         self.viewModel = viewModel
@@ -17,6 +22,8 @@ public struct WifiGuideSheet: View {
                     if viewModel.hasActiveVpn {
                         vpnWarningCard
                     }
+                    quickConnectCard
+
 
                     bandSelectorCard
 
@@ -62,6 +69,88 @@ public struct WifiGuideSheet: View {
                 }
             }
         }
+    }
+
+    private var quickConnectCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "bolt.badge.automatic.fill")
+                    .foregroundColor(.blue)
+                    .font(.title3)
+                Text("Bắt nhanh sóng xuất xưởng ONT")
+                    .font(.subheadline.weight(.bold))
+            }
+
+            Text("Sóng xuất xưởng của ONT iGate GW040-NSv2 luôn là mạng Open (không mật khẩu) có định dạng 'GW040-NSv2_2.4G_XXXXXX' (hoặc 5G_...). Nhập 6 ký tự MAC cuối trên tem dán thiết bị (VD: A1B2C3 hoặc A1:B2:C3):")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            TextField("Nhập 6 ký tự MAC từ tem dán (VD: A1B2C3)", text: $ontSsidInput)
+                .textFieldStyle(.roundedBorder)
+                .autocorrectionDisabled(true)
+                .textInputAutocapitalization(.characters)
+
+            Picker("Băng tần xuất xưởng", selection: $selectedQuickBand) {
+                Text("2.4GHz").tag(WifiBand.band24GHz)
+                Text("5GHz").tag(WifiBand.band5GHz)
+            }
+            .pickerStyle(.segmented)
+
+            if let err = quickConnectError {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                    Text(err)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+                .padding(6)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.red.opacity(0.12)))
+            }
+
+            Button {
+                Task {
+                    isConnectingQuickOnt = true
+                    quickConnectError = nil
+                    defer { isConnectingQuickOnt = false }
+
+                    let normResult = IosWifiMonitor.normalizeQuickOntSsid(ontSsidInput, band: selectedQuickBand)
+                    switch normResult {
+                    case .failure(let err):
+                        quickConnectError = err
+                    case .success(let targetSsid):
+                        let res = await viewModel.quickConnectOntWifi(ssid: targetSsid)
+                        switch res {
+                        case .joined:
+                            dismiss()
+                        case .entitlementUnavailable(let reason):
+                            quickConnectError = reason
+                        case .transientFailure(let reason):
+                            quickConnectError = reason
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    if isConnectingQuickOnt {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Đang kết nối sóng xuất xưởng ONT...")
+                    } else {
+                        Image(systemName: "link.badge.plus")
+                        Text("Kết nối sóng xuất xưởng (Mạng Open - Không pass)")
+                    }
+                }
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(isConnectingQuickOnt || ontSsidInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.08)))
     }
 
     private var statusCard: some View {

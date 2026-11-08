@@ -104,6 +104,14 @@ public final class MainViewModel: ObservableObject {
     @Published public var isInBackground: Bool = false
     @Published public var diagnosticLogs: [DiagnosticLogEntry] = []
     @Published public var showDiagnosticLogSheet: Bool = false
+    @Published public var isJoiningCustomerWifi: Bool = false
+    @Published public var customerWifiJoinStatus: String? = nil
+    @Published public var connectedWifiSsid: String = ""
+    public var lastQuickConnectedFactorySsid: String? = nil
+
+    public var securityCapabilityWarning: String? {
+        IosWifiMonitor.validateHandoverSecurityCapability(secMode: globalSettings.wifiSecurityMode)
+    }
     public let database: AppDatabase
     public let wifiMonitor: IosWifiMonitor
     public let diagnosticLogger: AppDiagnosticLogger
@@ -169,6 +177,9 @@ public final class MainViewModel: ObservableObject {
         en0IpAddress = snapshot.en0IpAddress
         isOnOntSubnet = snapshot.isOnOntSubnet
         hasActiveVpn = snapshot.hasActiveVpnInterface
+        if !snapshot.isOnOntSubnet {
+            connectedWifiSsid = ""
+        }
     }
 
     /// Single serialized gateway probe entry point guarded by `!isRunningSetup && probePauseMutex.tryLock()`.
@@ -680,6 +691,10 @@ public final class MainViewModel: ObservableObject {
         guard !isRunningSetup && !isImportingFirmware else { return }
         guard let record = selectedRecord else { return }
         let settings = globalSettings
+        if let secErr = IosWifiMonitor.validateHandoverSecurityCapability(secMode: settings.wifiSecurityMode) {
+            statusMessage = "Chưa thể RUN: \(secErr)"
+            return
+        }
         let preRun = OntInputValidator.validateBeforeRun(record, settings: settings)
         guard preRun.isValid else {
             statusMessage = "Chưa thể RUN: \(preRun.errors.first ?? "Dữ liệu chưa hợp lệ")"
@@ -732,6 +747,10 @@ public final class MainViewModel: ObservableObject {
             defer {
                 diagLogger.flushUiSnapshotImmediately()
                 diagLogger.clearActiveSecrets()
+                if let lastSsid = self.lastQuickConnectedFactorySsid {
+                    self.wifiMonitor.removeTemporaryOpenWifiIfNeeded(ssid: lastSsid)
+                    self.lastQuickConnectedFactorySsid = nil
+                }
             }
             diagLogger.log(
                 .info,
@@ -814,6 +833,11 @@ public final class MainViewModel: ObservableObject {
                         let initialSettleMs = min(8_000, max(500, timeoutMs / 4))
                         try await Task.sleep(nanoseconds: UInt64(initialSettleMs) * 1_000_000)
                     }
+                    if let lastSsid = self.lastQuickConnectedFactorySsid {
+                        self.wifiMonitor.removeTemporaryOpenWifiIfNeeded(ssid: lastSsid)
+                        self.lastQuickConnectedFactorySsid = nil
+                    }
+
 
                     // [Red Team RT-01] Entitled auto-join branch (6s -> 12s -> 18s spaced retries) vs Sideloadly manual flow
                     if entitlementModeBox.value != false {
@@ -1027,6 +1051,94 @@ public final class MainViewModel: ObservableObject {
     public func dismissExecutionSheet() {
         guard !isRunningSetup else { return }
         showExecutionSheet = false
+    }
+
+    // MARK: - Post-Setup Customer Wi-Fi & Quick Factory ONT Connection
+
+    @MainActor
+    public func joinNewlyConfiguredWifi(ssid: String, pass: String) {
+        guard !isJoiningCustomerWifi && !isRunningSetup else { return }
+        isJoiningCustomerWifi = true
+        suppressProbeAfterCompletion = false
+        customerWifiJoinStatus = "Đang kết nối vào Wi-Fi mới '\(ssid)'..."
+
+        let res = setupResult
+        let secMode = res?.wifiSecurityMode ?? globalSettings.wifiSecurityMode
+        let diagLogger = self.diagnosticLogger
+        diagLogger.registerActiveSecrets(
+            [pass, res?.newPass24g ?? "", res?.newPass5g ?? ""],
+            subscriberIdentifiers: [res?.accountPppoe ?? "", res?.slid ?? ""]
+        )
+
+        Task {
+            defer {
+                self.isJoiningCustomerWifi = false
+                if !self.isRunningSetup {
+                    diagLogger.clearActiveSecrets()
+                }
+            }
+
+            let joinResult = await self.wifiMonitor.tryJoinWifiDetailed(
+                ssid: ssid,
+                passphrase: pass,
+                securityMode: secMode,
+                dhcpWaitMs: 15_000,
+                stabilityHoldMs: 1_200,
+                joinOnce: false
+            )
+
+            switch joinResult {
+            case .joined(let snap):
+                self.applyWifiSnapshot(snap)
+                self.connectedWifiSsid = ssid
+                self.customerWifiJoinStatus = "Đã kết nối thành công vào '\(ssid)'!"
+                self.statusMessage = "Đã kết nối thành công vào Wi-Fi mới '\(ssid)'."
+                _ = await self.performGatewayProbeOnce()
+
+            case .entitlementUnavailable(let reason):
+                self.customerWifiJoinStatus = reason
+                self.statusMessage = reason
+                #if canImport(UIKit)
+                if !pass.isEmpty {
+                    UIPasteboard.general.setItems(
+                        [[UIPasteboard.typeAutomatic: pass]],
+                        options: [
+                            .localOnly: true,
+                            .expirationDate: Date().addingTimeInterval(120)
+                        ]
+                    )
+                }
+                #endif
+
+            case .transientFailure(let reason):
+                self.customerWifiJoinStatus = "Chưa thể kết nối: \(reason)"
+                self.statusMessage = "Chưa thể kết nối vào '\(ssid)': \(reason)"
+            }
+        }
+    }
+
+    @MainActor
+    public func quickConnectOntWifi(ssid: String) async -> HotspotJoinResult {
+        suppressProbeAfterCompletion = false
+        connectedBand = IosWifiMonitor.detectBandFromSsidHint(ssid)
+        lastQuickConnectedFactorySsid = ssid
+
+        let result = await wifiMonitor.tryJoinWifiDetailed(
+            ssid: ssid,
+            passphrase: "",
+            securityMode: WifiSecurityMode.open.rawValue,
+            dhcpWaitMs: 15_000,
+            stabilityHoldMs: 1_200,
+            joinOnce: true
+        )
+
+        if case .joined(let snap) = result {
+            applyWifiSnapshot(snap)
+            connectedWifiSsid = ssid
+            _ = await performGatewayProbeOnce()
+        }
+
+        return result
     }
 
     private func notifyCompletionFeedback(success: Bool) {

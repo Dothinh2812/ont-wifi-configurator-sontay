@@ -314,6 +314,16 @@ Workflow `.github/workflows/build-ios-ipa.yml` tự động kích hoạt trên m
 2. **Qua AltStore / TrollStore / ESign:**
    - Mở file `ONT_WiFi_Configurator_Unsigned.ipa` trực tiếp bằng AltStore hoặc TrollStore trên thiết bị để cài đặt.
 
+
+### Tính Năng Đồng Bộ Toàn Diện Từ Android (iOS Feature Parity)
+Phiên bản iOS Native được nâng cấp đạt chuẩn đồng bộ tính năng 100% với Android:
+1. **1-Chạm Kết Nối Wi-Fi Mới Của Khách Hàng (`joinNewlyConfiguredWifi`):** Sau khi hoàn tất 8/9 bước, kỹ thuật viên bấm nút *"Kết nối vào Wi-Fi mới ('{SSID}') để kiểm tra mạng"* (ưu tiên sóng 5GHz hoặc 2.4GHz) để iPhone tự động ghép nối vào sóng mới qua `NEHotspotConfiguration` (`joinOnce = false`), hỗ trợ đo kiểm Internet thực tế trước khi bàn giao.
+2. **Thanh Trạng Thái Wi-Fi & Bắt Sóng ONT Trực Tiếp (`topWifiStatusBanner`):** Ghim cố định ở đầu màn hình Kiểm tra & Sửa cấu hình: hiển thị tên SSID đang kết nối, IP card mạng `en0`, trạng thái Gateway `192.168.1.1` (Sẵn sàng / Chưa kết nối), bộ chọn băng tần `2.4GHz / 5GHz`, và nút *"Bắt Wi-Fi ONT"* mở trực tiếp bộ kết nối nhanh sóng ONT mà không cần bấm Back.
+3. **Bộ Kết Nối Nhanh Sóng Xuất Xưởng ONT (`WifiGuideSheet`):** Hỗ trợ nhập 6 ký tự MAC từ tem dán (VD: `A1B2C3` hoặc `A1:B2:C3`) để kết nối 1-chạm vào sóng xuất xưởng dạng Open (không mật khẩu) qua `normalizeQuickOntSsid` và `quickConnectOntWifi`.
+4. **Thanh Nút Bấm Lưu / RUN Cố Định Công Thái Học (Sticky Bottom Action Bar):** Ghim cố định 2 nút *"Lưu lại"* và *"RUN • ĐỔ CẤU HÌNH"* ở đáy màn hình trên `FooterSignatureBar`, tối ưu thao tác bằng 1 tay, tự động tương thích bàn phím ảo (`.ignoresSafeArea(.keyboard, edges: .bottom)`).
+5. **Cảnh Báo Tương Thích Chuẩn Bảo Mật Wi-Fi (`validateHandoverSecurityCapability`):** Tự động phát hiện và khóa cứng nút RUN khi chọn chuẩn WPA3-SAE hoặc WPA-PSK thuần không tương thích với iOS để tránh đứt gãy kết nối tại Bước 7.
+6. **Nhận Diện & Hướng Dẫn Tên Wi-Fi Mặc Định Mã MEN (`isUsingDefaultMenSsid`):** Hiển thị khung thông báo màu cam khi file Excel để trống tên Wi-Fi và đang điền mặc định `VNPT_{slid}`.
+7. **Ẩn / Hiện Mật Khẩu Admin Web ONT & Wi-Fi (`showAdminPass`):** Hiển thị tài khoản/mật khẩu quản trị Web ONT mới (`admin / [adminNewPass]`) kèm nút con mắt bật/tắt trong thẻ nạp Firmware và form cấu hình.
 ---
 
 ## 7. Hướng Dẫn Xử Lý Sự Cố Thường Gặp

@@ -638,3 +638,88 @@ def test_phase7_reconnect_readiness_spaced_backoff_and_diagnostic_logger_parity(
     for debug_doc_phrase in ["180s", "240s", "5s", "ONT_Debug_Log_"]:
         assert debug_doc_phrase in readme, f"Missing '{debug_doc_phrase}' in README.md"
         assert debug_doc_phrase in huong_dan, f"Missing '{debug_doc_phrase}' in HUONG_DAN_SU_DUNG_TOOL_ONT.md"
+
+
+def test_phase8_android_to_ios_feature_parity():
+    """Verify Android to iOS feature parity: post-setup Wi-Fi connection, top status banner,
+    security capability validation, default MEN SSID alert, sticky bottom action bar,
+    admin pass toggle, and quick factory ONT connector.
+    """
+    android_connector = (
+        ROOT_DIR / "android-app" / "app" / "src" / "main" / "java" / "vn" / "vnpt" / "ontconfig" / "core" / "wifi" / "OntWifiConnector.kt"
+    ).read_text(encoding="utf-8")
+    android_vm = (
+        ROOT_DIR / "android-app" / "app" / "src" / "main" / "java" / "vn" / "vnpt" / "ontconfig" / "ui" / "MainViewModel.kt"
+    ).read_text(encoding="utf-8")
+    android_review = (
+        ROOT_DIR / "android-app" / "app" / "src" / "main" / "java" / "vn" / "vnpt" / "ontconfig" / "ui" / "screens" / "ConfigReviewScreen.kt"
+    ).read_text(encoding="utf-8")
+    android_sheet = (
+        ROOT_DIR / "android-app" / "app" / "src" / "main" / "java" / "vn" / "vnpt" / "ontconfig" / "ui" / "components" / "ExecutionProgressSheet.kt"
+    ).read_text(encoding="utf-8")
+
+    ios_monitor = (IOS_APP_DIR / "Core" / "Wifi" / "IosWifiMonitor.swift").read_text(encoding="utf-8")
+    ios_vm = (IOS_APP_DIR / "UI" / "MainViewModel.swift").read_text(encoding="utf-8")
+    ios_review = (IOS_APP_DIR / "UI" / "Screens" / "ConfigReviewView.swift").read_text(encoding="utf-8")
+    ios_progress_sheet = (IOS_APP_DIR / "UI" / "Components" / "ExecutionProgressSheet.swift").read_text(encoding="utf-8")
+    ios_guide_sheet = (IOS_APP_DIR / "UI" / "Components" / "WifiGuideSheet.swift").read_text(encoding="utf-8")
+    ios_tests = (IOS_TESTS_DIR / "ExcelAndValidatorTests.swift").read_text(encoding="utf-8")
+
+    # 1. validateHandoverSecurityCapability parity
+    assert "validateHandoverSecurityCapability" in android_connector
+    assert "validateHandoverSecurityCapability" in ios_monitor
+    assert "wpa3Psk" in ios_monitor or "wpa3_psk" in ios_monitor
+    assert "wpaPsk" in ios_monitor or "wpa_psk" in ios_monitor
+    assert "validateHandoverSecurityCapability" in android_vm
+    assert "validateHandoverSecurityCapability" in ios_vm
+
+    # 2. Pre-flight check in runOntConfiguration
+    assert "validateHandoverSecurityCapability" in ios_vm
+    assert "Chưa thể RUN" in ios_vm
+
+    # 3. joinNewlyConfiguredWifi contracts
+    assert "joinNewlyConfiguredWifi" in android_vm
+    assert "joinNewlyConfiguredWifi" in ios_vm
+    assert "isJoiningCustomerWifi" in ios_vm
+    assert "customerWifiJoinStatus" in ios_vm
+    assert "connectedWifiSsid" in ios_vm
+    assert "joinOnce: false" in ios_vm or "joinOnce = false" in ios_vm
+    assert "registerActiveSecrets" in ios_vm
+
+    # 4. quickConnectOntWifi and normalizeQuickOntSsid
+    assert "quickConnectOntWifi" in ios_vm
+    assert "normalizeQuickOntSsid" in ios_monitor
+    assert "lastQuickConnectedFactorySsid" in ios_vm
+    assert "removeTemporaryOpenWifiIfNeeded" in ios_vm
+
+    # 5. ConfigReviewView parity: top banner, default MEN SSID alert, eye toggles, sticky bottom bar
+    assert "topWifiStatusBanner" in ios_review
+    assert "isUsingDefaultMenSsid" in android_review
+    assert "isUsingDefaultMenSsid" in ios_review
+    assert "securityCapabilityWarning" in ios_review
+    assert "showWifi24Pass" in ios_review
+    assert "showWifi5Pass" in ios_review
+    assert "showAdminPass" in ios_review
+    assert "StickyBottomBar" in ios_review or "stickyBottomActionBar" in ios_review
+    assert "ignoresSafeArea(.keyboard" in ios_review
+
+    # 6. ExecutionProgressSheet parity: customer Wi-Fi join button, firmware reboot window, admin pass reveal, nested guide sheet
+    assert "Kết nối vào Wi-Fi mới" in android_sheet
+    assert "Kết nối vào Wi-Fi mới" in ios_progress_sheet
+    assert "joinNewlyConfiguredWifi" in ios_progress_sheet
+    assert "showAdminPass" in android_sheet
+    assert "showAdminPass" in ios_progress_sheet
+    assert "rebootCountdownSec" in ios_progress_sheet
+    assert "showNestedWifiGuideSheet" in ios_progress_sheet
+
+    # 7. WifiGuideSheet quick ONT connector
+    assert "quickConnectCard" in ios_guide_sheet
+    assert "ontSsidInput" in ios_guide_sheet
+    assert "selectedQuickBand" in ios_guide_sheet
+    assert "normalizeQuickOntSsid" in ios_guide_sheet
+    assert "quickConnectOntWifi" in ios_guide_sheet
+
+    # 8. Swift Unit Tests
+    assert "testValidateHandoverSecurityCapabilityParity" in ios_tests
+    assert "testNormalizeQuickOntSsid" in ios_tests
+    assert "testDefaultMenSsidDetectionLogic" in ios_tests

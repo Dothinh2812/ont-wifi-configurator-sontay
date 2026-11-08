@@ -6,6 +6,9 @@ public struct ConfigReviewView: View {
     let onShareExcelReport: () -> Void
 
     @State private var showPppoePass = false
+    @State private var showWifi24Pass = false
+    @State private var showWifi5Pass = false
+    @State private var showAdminPass = false
     @State private var showFirmwareImporter = false
 
     public init(
@@ -24,6 +27,8 @@ public struct ConfigReviewView: View {
                     settings: viewModel.globalSettings
                 )
 
+                topWifiStatusBanner
+
                 Form {
                     subscriberInfoSection(record)
 
@@ -36,9 +41,10 @@ public struct ConfigReviewView: View {
                     firmwareUpdateSection
 
                     validationSummarySection(preRunValidation)
-
-                    connectedBandAndActionSection(preRunValidation: preRunValidation)
                 }
+                .scrollDismissesKeyboard(.interactively)
+
+                stickyBottomActionBar(preRunValidation: preRunValidation)
             } else {
                 Text("Chưa chọn thuê bao.")
                     .foregroundColor(.secondary)
@@ -50,6 +56,14 @@ public struct ConfigReviewView: View {
         .navigationTitle("Kiểm tra & Đổ cấu hình")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("Xong") {
+                    #if canImport(UIKit)
+                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    #endif
+                }
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
                     viewModel.openDiagnosticLogSheet()
@@ -73,6 +87,59 @@ public struct ConfigReviewView: View {
                 viewModel.statusMessage = "Lỗi chọn file Firmware: \(error.localizedDescription)"
             }
         }
+        .sheet(isPresented: $viewModel.showWifiGuideSheet) {
+            WifiGuideSheet(viewModel: viewModel)
+        }
+    }
+
+    private var topWifiStatusBanner: some View {
+        VStack(spacing: 6) {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: viewModel.isOntGatewayOnline ? "wifi" : "wifi.slash")
+                    .foregroundColor(viewModel.isOntGatewayOnline ? Color(red: 0.18, green: 0.49, blue: 0.20) : .orange)
+                    .font(.title3)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    let ssidText = viewModel.connectedWifiSsid.isEmpty ? "Wi-Fi en0" : viewModel.connectedWifiSsid
+                    let ipText = viewModel.en0IpAddress.isEmpty ? "Chưa có IP" : viewModel.en0IpAddress
+                    Text("Sóng: \(ssidText) (\(viewModel.connectedBand.label)) • IP: \(ipText)")
+                        .font(.caption.weight(.bold))
+                        .foregroundColor(viewModel.isOntGatewayOnline ? Color(red: 0.11, green: 0.37, blue: 0.13) : .primary)
+                        .lineLimit(1)
+
+                    Text(
+                        viewModel.isOntGatewayOnline
+                            ? "ONT 192.168.1.1: Sẵn sàng đổ cấu hình"
+                            : "ONT 192.168.1.1: Chưa kết nối sóng ONT"
+                    )
+                    .font(.caption2)
+                    .foregroundColor(viewModel.isOntGatewayOnline ? Color(red: 0.18, green: 0.49, blue: 0.20) : .orange)
+                    .lineLimit(1)
+                }
+
+                Spacer()
+
+                Button {
+                    viewModel.showWifiGuideSheet = true
+                } label: {
+                    Label("Bắt Wi-Fi ONT", systemImage: "wifi.badge.plus")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+
+            Picker("Băng tần kết nối", selection: $viewModel.connectedBand) {
+                Text("Đang bắt 2.4GHz").tag(WifiBand.band24GHz)
+                Text("Đang bắt 5GHz").tag(WifiBand.band5GHz)
+            }
+            .pickerStyle(.segmented)
+        }
+        .padding(10)
+        .background(Color(UIColor.secondarySystemBackground))
+        .cornerRadius(10)
+        .padding(.horizontal, 12)
+        .padding(.top, 6)
     }
 
     private func subscriberInfoSection(_ record: SubscriberRecord) -> some View {
@@ -197,7 +264,22 @@ public struct ConfigReviewView: View {
         validation: ValidationResult
     ) -> some View {
         let selectedSecMode = WifiSecurityMode(rawValue: viewModel.globalSettings.wifiSecurityMode) ?? .wpa2Wpa3Psk
+        let isUsingDefaultMenSsid = !record.slid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            record.ssid24g == "VNPT_\(record.slid.trimmingCharacters(in: .whitespacesAndNewlines))"
         return Section("Cấu hình Wi-Fi 2.4GHz & 5GHz") {
+            if isUsingDefaultMenSsid {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "info.circle.fill")
+                        .foregroundColor(.orange)
+                    Text("ℹ️ File Excel để trống tên Wi-Fi nên đang điền mặc định '\(record.ssid24g)'. Bạn có thể đổi theo yêu cầu khách hàng:")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
+            }
+
             Picker(
                 "Chuẩn bảo mật Wi-Fi",
                 selection: Binding(
@@ -252,22 +334,50 @@ public struct ConfigReviewView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 HStack {
-                    TextField(
-                        "Mật khẩu Wi-Fi 2.4G",
-                        text: Binding(
-                            get: { record.pass24g },
-                            set: { newVal in
-                                var updated = record
-                                updated.pass24g = newVal
-                                if viewModel.autoSyncWifi5g {
-                                    updated.pass5g = newVal
+                    if showWifi24Pass || !selectedSecMode.requiresPassword {
+                        TextField(
+                            "Mật khẩu Wi-Fi 2.4G",
+                            text: Binding(
+                                get: { record.pass24g },
+                                set: { newVal in
+                                    var updated = record
+                                    updated.pass24g = newVal
+                                    if viewModel.autoSyncWifi5g {
+                                        updated.pass5g = newVal
+                                    }
+                                    viewModel.updateSelectedRecord(updated)
                                 }
-                                viewModel.updateSelectedRecord(updated)
-                            }
+                            )
                         )
-                    )
-                    .autocorrectionDisabled(true)
-                    .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled(true)
+                        .textInputAutocapitalization(.never)
+                    } else {
+                        SecureField(
+                            "Mật khẩu Wi-Fi 2.4G",
+                            text: Binding(
+                                get: { record.pass24g },
+                                set: { newVal in
+                                    var updated = record
+                                    updated.pass24g = newVal
+                                    if viewModel.autoSyncWifi5g {
+                                        updated.pass5g = newVal
+                                    }
+                                    viewModel.updateSelectedRecord(updated)
+                                }
+                            )
+                        )
+                        .autocorrectionDisabled(true)
+                        .textInputAutocapitalization(.never)
+                    }
+
+                    if selectedSecMode.requiresPassword {
+                        Button {
+                            showWifi24Pass.toggle()
+                        } label: {
+                            Image(systemName: showWifi24Pass ? "eye.slash" : "eye")
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
 
                 if validation.canPrependZero24g || validation.canPrependZero5g {
@@ -285,7 +395,6 @@ public struct ConfigReviewView: View {
                     .padding(.top, 4)
                 }
             }
-
             VStack(alignment: .leading, spacing: 4) {
                 Text("Tên Wi-Fi 5GHz (SSID 1..32 ký tự ASCII)")
                     .font(.caption)
@@ -310,20 +419,49 @@ public struct ConfigReviewView: View {
                 Text(selectedSecMode.requiresPassword ? "Mật khẩu Wi-Fi 5GHz (8..63 ký tự ASCII)" : "Mật khẩu Wi-Fi 5GHz (Open - Không mật khẩu)")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                TextField(
-                    "Mật khẩu Wi-Fi 5G",
-                    text: Binding(
-                        get: { record.pass5g },
-                        set: { newVal in
-                            var updated = record
-                            updated.pass5g = newVal
-                            viewModel.updateSelectedRecord(updated)
+                HStack {
+                    if showWifi5Pass || !selectedSecMode.requiresPassword {
+                        TextField(
+                            "Mật khẩu Wi-Fi 5G",
+                            text: Binding(
+                                get: { record.pass5g },
+                                set: { newVal in
+                                    var updated = record
+                                    updated.pass5g = newVal
+                                    viewModel.updateSelectedRecord(updated)
+                                }
+                            )
+                        )
+                        .autocorrectionDisabled(true)
+                        .textInputAutocapitalization(.never)
+                        .disabled(viewModel.autoSyncWifi5g)
+                    } else {
+                        SecureField(
+                            "Mật khẩu Wi-Fi 5G",
+                            text: Binding(
+                                get: { record.pass5g },
+                                set: { newVal in
+                                    var updated = record
+                                    updated.pass5g = newVal
+                                    viewModel.updateSelectedRecord(updated)
+                                }
+                            )
+                        )
+                        .autocorrectionDisabled(true)
+                        .textInputAutocapitalization(.never)
+                        .disabled(viewModel.autoSyncWifi5g)
+                    }
+
+                    if selectedSecMode.requiresPassword {
+                        Button {
+                            showWifi5Pass.toggle()
+                        } label: {
+                            Image(systemName: showWifi5Pass ? "eye.slash" : "eye")
+                                .foregroundColor(.secondary)
                         }
-                    )
-                )
-                .autocorrectionDisabled(true)
-                .textInputAutocapitalization(.never)
-                .disabled(viewModel.autoSyncWifi5g)
+                        .disabled(viewModel.autoSyncWifi5g)
+                    }
+                }
             }
         }
     }
@@ -334,19 +472,44 @@ public struct ConfigReviewView: View {
                 Text("Mật khẩu Admin mới (8..32 ký tự: Hoa, thường, số, ký tự đặc biệt)")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                TextField(
-                    "Mật khẩu Admin mới",
-                    text: Binding(
-                        get: { viewModel.globalSettings.adminNewPass },
-                        set: { newVal in
-                            var s = viewModel.globalSettings
-                            s.adminNewPass = newVal
-                            viewModel.updateGlobalSettings(s)
-                        }
-                    )
-                )
-                .autocorrectionDisabled(true)
-                .textInputAutocapitalization(.never)
+                HStack {
+                    if showAdminPass {
+                        TextField(
+                            "Mật khẩu Admin mới",
+                            text: Binding(
+                                get: { viewModel.globalSettings.adminNewPass },
+                                set: { newVal in
+                                    var s = viewModel.globalSettings
+                                    s.adminNewPass = newVal
+                                    viewModel.updateGlobalSettings(s)
+                                }
+                            )
+                        )
+                        .autocorrectionDisabled(true)
+                        .textInputAutocapitalization(.never)
+                    } else {
+                        SecureField(
+                            "Mật khẩu Admin mới",
+                            text: Binding(
+                                get: { viewModel.globalSettings.adminNewPass },
+                                set: { newVal in
+                                    var s = viewModel.globalSettings
+                                    s.adminNewPass = newVal
+                                    viewModel.updateGlobalSettings(s)
+                                }
+                            )
+                        )
+                        .autocorrectionDisabled(true)
+                        .textInputAutocapitalization(.never)
+                    }
+
+                    Button {
+                        showAdminPass.toggle()
+                    } label: {
+                        Image(systemName: showAdminPass ? "eye.slash" : "eye")
+                            .foregroundColor(.secondary)
+                    }
+                }
             }
         }
     }
@@ -417,7 +580,20 @@ public struct ConfigReviewView: View {
     @ViewBuilder
     private func validationSummarySection(_ validation: ValidationResult) -> some View {
         Section("Trạng thái kiểm tra hợp lệ trước khi RUN") {
-            if validation.isValid {
+            if let warning = viewModel.securityCapabilityWarning {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.octagon.fill")
+                        .foregroundColor(.red)
+                    Text("⚠️ Cảnh báo tương thích bảo mật: \(warning)")
+                        .font(.caption.weight(.semibold))
+                        .foregroundColor(.red)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.12)))
+            }
+
+            if validation.isValid && viewModel.securityCapabilityWarning == nil {
                 HStack {
                     Image(systemName: "checkmark.circle.fill")
                         .foregroundColor(.green)
@@ -439,47 +615,40 @@ public struct ConfigReviewView: View {
         }
     }
 
-    private func connectedBandAndActionSection(preRunValidation: ValidationResult) -> some View {
-        Section("Chọn băng tần đang bắt & Thực thi tự động") {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Băng tần Wi-Fi ONT iPhone đang kết nối:")
-                    .font(.caption.weight(.semibold))
-                Picker("Băng tần kết nối", selection: $viewModel.connectedBand) {
-                    Text("Đang bắt 2.4GHz").tag(WifiBand.band24GHz)
-                    Text("Đang bắt 5GHz").tag(WifiBand.band5GHz)
+    // MARK: - StickyBottomBar (Sticky Bottom Action Bar)
+    private func stickyBottomActionBar(preRunValidation: ValidationResult) -> some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack(spacing: 12) {
+                Button {
+                    viewModel.saveSelectedRecordChanges()
+                } label: {
+                    Label("Lưu lại", systemImage: "square.and.arrow.down")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
                 }
-                .pickerStyle(.segmented)
-                Text(
-                    viewModel.connectedBand == .band24GHz
-                        ? "Lần 1 cấu hình Wi-Fi phụ 5GHz trước -> Bước 7 chuyển kết nối sang 5GHz mới -> Lần 2 cấu hình nốt 2.4GHz và nạp Firmware (nếu bật)."
-                        : "Lần 1 cấu hình Wi-Fi phụ 2.4GHz trước -> Bước 7 chuyển kết nối sang 2.4GHz mới -> Lần 2 cấu hình nốt 5GHz và nạp Firmware (nếu bật)."
-                )
-                .font(.caption2)
-                .foregroundColor(.secondary)
-            }
+                .buttonStyle(.bordered)
 
-            Button {
-                viewModel.saveSelectedRecordChanges()
-            } label: {
-                Label("LƯU THAY ĐỔI", systemImage: "square.and.arrow.down")
-                    .font(.subheadline.weight(.semibold))
-                    .frame(maxWidth: .infinity)
+                let runStepsLabel = viewModel.globalSettings.enableFirmwareUpdate
+                    ? (viewModel.isOntGatewayOnline ? "RUN • ĐỔ CẤU HÌNH + UP FW (9 BƯỚC)" : "RUN • ĐỔ CẤU HÌNH + UP FW (TỰ DÒ)")
+                    : (viewModel.isOntGatewayOnline ? "RUN • ĐỔ CẤU HÌNH 2 WI-FI (8 BƯỚC)" : "RUN • ĐỔ CẤU HÌNH (TỰ DÒ)")
+                Button {
+                    viewModel.runOntConfiguration()
+                } label: {
+                    Label(runStepsLabel, systemImage: "bolt.horizontal.circle.fill")
+                        .font(.subheadline.weight(.bold))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                .disabled(!preRunValidation.isValid || viewModel.securityCapabilityWarning != nil || viewModel.isRunningSetup || viewModel.isImportingFirmware)
             }
-
-            let runStepsLabel = viewModel.globalSettings.enableFirmwareUpdate
-                ? "RUN - ĐỔ CẤU HÌNH & FIRMWARE (9 BƯỚC)"
-                : "RUN - ĐỔ CẤU HÌNH 2 WI-FI (8 BƯỚC)"
-            Button {
-                viewModel.runOntConfiguration()
-            } label: {
-                Label(runStepsLabel, systemImage: "bolt.horizontal.circle.fill")
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 6)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.green)
-            .disabled(!preRunValidation.isValid || viewModel.isRunningSetup || viewModel.isImportingFirmware)
+            .padding(.horizontal, 14)
+            .padding(.top, 8)
+            .padding(.bottom, 8)
         }
+        .background(Color(UIColor.systemBackground))
+        .ignoresSafeArea(.keyboard, edges: .bottom)
     }
-}

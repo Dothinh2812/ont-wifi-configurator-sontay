@@ -423,4 +423,100 @@ final class ExcelAndValidatorTests: XCTestCase {
         XCTAssertTrue(logger.currentEntriesSnapshot().isEmpty)
         XCTAssertFalse(FileManager.default.fileExists(atPath: prevURL.path))
     }
+
+    func testValidateHandoverSecurityCapabilityParity() throws {
+        // Valid modes on iOS should return nil
+        XCTAssertNil(IosWifiMonitor.validateHandoverSecurityCapability(secMode: "wpa2_wpa3_psk"))
+        XCTAssertNil(IosWifiMonitor.validateHandoverSecurityCapability(secMode: "wpa2_psk"))
+        XCTAssertNil(IosWifiMonitor.validateHandoverSecurityCapability(secMode: "wpa_wpa2_psk"))
+        XCTAssertNil(IosWifiMonitor.validateHandoverSecurityCapability(secMode: "open"))
+
+        // Pure WPA3-PSK on iOS returns non-nil warning
+        let wpa3Warning = IosWifiMonitor.validateHandoverSecurityCapability(secMode: "wpa3_psk")
+        XCTAssertNotNil(wpa3Warning)
+        XCTAssertTrue(wpa3Warning?.contains("WPA3-PSK") == true)
+
+        // Pure WPA-PSK (TKIP) on iOS returns non-nil warning
+        let wpaWarning = IosWifiMonitor.validateHandoverSecurityCapability(secMode: "wpa_psk")
+        XCTAssertNotNil(wpaWarning)
+        XCTAssertTrue(wpaWarning?.contains("WPA-PSK") == true)
+
+        // Invalid mode string returns non-nil error
+        let invalidWarning = IosWifiMonitor.validateHandoverSecurityCapability(secMode: "invalid_mode_xyz")
+        XCTAssertNotNil(invalidWarning)
+        XCTAssertTrue(invalidWarning?.contains("không hợp lệ") == true)
+    }
+
+    func testNormalizeQuickOntSsid() throws {
+        // Valid 6 hex chars without separators
+        let r1 = IosWifiMonitor.normalizeQuickOntSsid("A1B2C3", band: .band24GHz)
+        if case .success(let ssid) = r1 {
+            XCTAssertEqual(ssid, "GW040-NSv2_2.4G_A1B2C3")
+        } else {
+            XCTFail("Expected success for A1B2C3")
+        }
+
+        // Valid with colons and lowercase
+        let r2 = IosWifiMonitor.normalizeQuickOntSsid("a1:b2:c3", band: .band5GHz)
+        if case .success(let ssid) = r2 {
+            XCTAssertEqual(ssid, "GW040-NSv2_5G_A1B2C3")
+        } else {
+            XCTFail("Expected success for a1:b2:c3")
+        }
+
+        // Valid with hyphens
+        let r3 = IosWifiMonitor.normalizeQuickOntSsid("12-34-56", band: .band24GHz)
+        if case .success(let ssid) = r3 {
+            XCTAssertEqual(ssid, "GW040-NSv2_2.4G_123456")
+        } else {
+            XCTFail("Expected success for 12-34-56")
+        }
+
+        // Full default SSID directly
+        let r4 = IosWifiMonitor.normalizeQuickOntSsid("GW040-NSv2_2.4G_3D4E5F", band: .band24GHz)
+        if case .success(let ssid) = r4 {
+            XCTAssertEqual(ssid, "GW040-NSv2_2.4G_3D4E5F")
+        } else {
+            XCTFail("Expected success for full SSID")
+        }
+
+        // Invalid: empty string
+        let r5 = IosWifiMonitor.normalizeQuickOntSsid("   ", band: .band24GHz)
+        if case .success = r5 {
+            XCTFail("Expected failure for empty string")
+        }
+
+        // Invalid: non-hex characters
+        let r6 = IosWifiMonitor.normalizeQuickOntSsid("ZZ99XX", band: .band24GHz)
+        if case .success = r6 {
+            XCTFail("Expected failure for non-hex")
+        }
+
+        // Invalid: short length
+        let r7 = IosWifiMonitor.normalizeQuickOntSsid("12345", band: .band24GHz)
+        if case .success = r7 {
+            XCTFail("Expected failure for short length")
+        }
+    }
+
+    func testDefaultMenSsidDetectionLogic() throws {
+        var rec = SubscriberRecord(rowIndex: 1)
+        rec.slid = "001560828"
+        rec.ssid24g = "VNPT_001560828"
+
+        let isDefault1 = !rec.slid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            rec.ssid24g == "VNPT_\(rec.slid.trimmingCharacters(in: .whitespacesAndNewlines))"
+        XCTAssertTrue(isDefault1)
+
+        rec.ssid24g = "KimThu_Home"
+        let isDefault2 = !rec.slid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            rec.ssid24g == "VNPT_\(rec.slid.trimmingCharacters(in: .whitespacesAndNewlines))"
+        XCTAssertFalse(isDefault2)
+
+        rec.slid = ""
+        rec.ssid24g = "VNPT_"
+        let isDefault3 = !rec.slid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            rec.ssid24g == "VNPT_\(rec.slid.trimmingCharacters(in: .whitespacesAndNewlines))"
+        XCTAssertFalse(isDefault3)
+    }
 }
